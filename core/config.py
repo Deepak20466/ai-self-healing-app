@@ -1,0 +1,103 @@
+"""Central application configuration.
+
+Every pod (app, sentinel, mcp, healer) imports the single `settings` instance
+from this module. Values come from the process environment / a `.env` file
+(see `.env.example`), never from hardcoded defaults for secrets.
+"""
+
+from __future__ import annotations
+
+from decimal import Decimal
+from functools import lru_cache
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Typed, validated application settings loaded from the environment."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    # --- Environment ---------------------------------------------------
+    environment: str = "development"
+    log_level: str = "INFO"
+
+    # --- Database --------------------------------------------------------
+    database_url: str = "postgresql+asyncpg://selfheal:selfheal@localhost:5432/selfheal"
+    db_pool_size: int = 5
+    db_max_overflow: int = 2
+
+    # --- Pod ports ---------------------------------------------------------
+    app_port: int = 8001
+    sentinel_port: int = 8002
+    mcp_port: int = 8003
+    healer_port: int = 8000
+
+    # --- Anthropic / Claude ------------------------------------------------
+    anthropic_api_key: str | None = None
+    anthropic_model: str = "claude-sonnet-5"
+
+    # --- GitHub --------------------------------------------------------------
+    github_token: str | None = None
+    github_repo: str | None = None
+
+    # --- Auth ------------------------------------------------------------
+    admin_password_hash: str | None = None
+    session_secret: str | None = None
+
+    # --- Webhooks ------------------------------------------------------------
+    healer_webhook_secret: str | None = None
+    healer_webhook_url: str | None = None
+    public_url: str | None = None
+
+    # --- Cost control --------------------------------------------------------
+    max_tokens_per_job: int = 150_000
+    daily_budget_usd: Decimal = Decimal("2.00")
+    chat_daily_budget_usd: Decimal = Decimal("1.00")
+
+    # --- Safety guardrails -----------------------------------------------
+    auto_merge: bool = False
+
+    # --- Cloud deployment ------------------------------------------------
+    deploy_host: str | None = None
+    deploy_user: str = "deploy"
+    deploy_ssh_key: str | None = None
+
+    # --- Notifications (optional) ------------------------------------------
+    slack_webhook_url: str | None = None
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    smtp_from: str | None = None
+    smtp_to: str | None = None
+
+    # --- Rate limiting / lockout ------------------------------------------
+    login_max_attempts: int = 5
+    login_lockout_minutes: int = 15
+
+    # --- Circuit breaker (safety guardrails) --------------------------------
+    max_heal_attempts_per_fingerprint_24h: int = 3
+    max_ci_fix_attempts_per_pr: int = 2
+    max_heal_jobs_per_hour_global: int = 10
+
+    # --- Patch limits --------------------------------------------------------
+    max_patch_files: int = 3
+    max_patch_changed_lines: int = 80
+
+    webhook_replay_tolerance_seconds: int = Field(default=300, ge=1)
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Return the process-wide cached Settings instance."""
+    return Settings()
+
+
+settings = get_settings()
