@@ -15,7 +15,7 @@ dependencies = [
   "asyncpg>=0.29,<1.0",
   "alembic>=1.13,<2.0",
   "anthropic>=0.39",
-  "mcp>=1.0",
+  "mcp>=2.0,<3.0",
   "httpx>=0.27,<1.0",
   "argon2-cffi>=23.1,<24.0",
   "itsdangerous>=2.2,<3.0",
@@ -51,8 +51,13 @@ select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "S"]
 ignore = ["S101"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101", "S105", "S106"]
+"tests/*" = ["S101", "S105", "S106", "S603", "S607"]
 "scripts/*" = ["S105", "S106", "S603", "S607"]
+# Internal subprocess helpers with multiple call sites and a sensible
+# `timeout=` default; wrapping every caller in `asyncio.timeout()` instead
+# would add boilerplate at each of them for no real benefit here (unlike
+# core/queue.py's single-caller HealJobListener.wait()).
+"mcp_server/git_utils.py" = ["ASYNC109"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's documented dependency-injection idiom is exactly `= Depends(...)`

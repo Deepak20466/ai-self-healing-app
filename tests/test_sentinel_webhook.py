@@ -63,9 +63,12 @@ async def test_failed_run_enqueues_a_ci_failure_heal_job(
         "/webhooks/ci", content=body, headers={"X-Signature": signature}
     )
 
-    stmt = select(HealJob).where(HealJob.type == HealJobType.CI_FAILURE)
+    # Scoped by fingerprint, not just type=CI_FAILURE - the shared dev
+    # database accumulates other tests' heal_jobs of the same type.
+    stmt = select(HealJob).where(HealJob.fingerprint == "ci:autofix/abc123:12")
     jobs = (await db_session.execute(stmt)).scalars().all()
     assert len(jobs) == 1
+    assert jobs[0].type == HealJobType.CI_FAILURE
 
 
 async def test_successful_run_does_not_enqueue_a_heal_job(

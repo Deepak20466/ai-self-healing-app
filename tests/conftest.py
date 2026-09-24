@@ -17,9 +17,13 @@ server processes or sockets involved.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator
+import subprocess
+import uuid
+from collections.abc import AsyncGenerator, Generator
+from pathlib import Path
 
 import httpx
+import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -99,3 +103,36 @@ async def target_app_client(
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://target.test") as client:
         yield client
+
+
+@pytest.fixture
+def git_worktree() -> Generator[tuple[str, Path], None, None]:
+    """Create a real `git worktree` under `worktrees/` for sandbox/git_utils tests."""
+    from mcp_server.sandbox import REPO_ROOT, WORKTREES_ROOT
+
+    WORKTREES_ROOT.mkdir(exist_ok=True)
+    name = f"test-{uuid.uuid4().hex[:8]}"
+    worktree_path = WORKTREES_ROOT / name
+    branch_name = f"test-worktree/{name}"
+
+    subprocess.run(
+        ["git", "worktree", "add", "-b", branch_name, str(worktree_path), "master"],
+        cwd=str(REPO_ROOT),
+        check=True,
+        capture_output=True,
+    )
+    try:
+        yield name, worktree_path
+    finally:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree_path)],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            check=False,
+        )
+        subprocess.run(
+            ["git", "branch", "-D", branch_name],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            check=False,
+        )

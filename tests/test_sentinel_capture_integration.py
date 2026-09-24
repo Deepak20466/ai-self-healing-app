@@ -4,6 +4,11 @@ This is SPEC.md Phase 2's explicit acceptance check: "/trigger/zero stores
 the error with the correct file and line." Everything runs in-process
 (target_app -> SentinelMiddleware -> sentinel's ASGI app -> the same
 per-test DB transaction), so no real server processes or sockets are needed.
+
+Queries are scoped by the exact fingerprint each bug produces, not just by
+`exception_type` - the shared dev database accumulates other tests' rows
+(e.g. mcp_server tool tests exercising `get_error` with an arbitrary
+`exception_type` like "KeyError"), so filtering by type alone is fragile.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.target_app import bugs
 from core.models import Error, ErrorOccurrence
+from sentinel.fingerprint import fingerprint_error
 
 
 async def test_trigger_zero_stores_error_with_correct_file_and_line(
@@ -24,7 +30,10 @@ async def test_trigger_zero_stores_error_with_correct_file_and_line(
     response = await target_app_client.get("/trigger/zero")
     assert response.status_code == 500
 
-    stmt = select(Error).where(Error.exception_type == "ZeroDivisionError")
+    fingerprint = fingerprint_error(
+        "ZeroDivisionError", "apps/target_app/bugs.py", "average_rating"
+    )
+    stmt = select(Error).where(Error.fingerprint == fingerprint)
     error = (await db_session.execute(stmt)).scalar_one()
 
     assert error.file_path == "apps/target_app/bugs.py"
@@ -46,7 +55,8 @@ async def test_repeated_trigger_increments_occurrence_count(
     await target_app_client.get("/trigger/key")
     await target_app_client.get("/trigger/key")
 
-    stmt = select(Error).where(Error.exception_type == "KeyError")
+    fingerprint = fingerprint_error("KeyError", "apps/target_app/bugs.py", "order_status_label")
+    stmt = select(Error).where(Error.fingerprint == fingerprint)
     error = (await db_session.execute(stmt)).scalar_one()
     assert error.occurrence_count == 2
 
@@ -63,7 +73,8 @@ async def test_secret_looking_data_is_scrubbed_before_storage(
     )
     assert response.status_code == 500
 
-    stmt = select(Error).where(Error.exception_type == "AttributeError")
+    fingerprint = fingerprint_error("AttributeError", "apps/target_app/bugs.py", "item_label")
+    stmt = select(Error).where(Error.fingerprint == fingerprint)
     error = (await db_session.execute(stmt)).scalar_one()
     assert "sk-ant-not-a-real-secret-value" not in str(error.request_context)
 
