@@ -43,6 +43,18 @@ from sqlalchemy.types import Enum as SAEnum
 from core.db import Base
 
 
+def _pg_enum(enum_cls: type[enum.StrEnum], name: str) -> SAEnum:
+    """A Postgres ENUM bound to `enum_cls`, using `.value` (not `.name`) on the wire.
+
+    SQLAlchemy's `Enum(SomePythonEnum)` sends the member *name* by default
+    (e.g. "OPEN"), but the Postgres types created in the Alembic migrations
+    use the lowercase `.value` strings (e.g. "open") — without
+    `values_callable`, every insert/update fails with "invalid input value
+    for enum ...".
+    """
+    return SAEnum(enum_cls, name=name, values_callable=lambda cls: [member.value for member in cls])
+
+
 class TimestampMixin:
     """created_at column shared by every table."""
 
@@ -96,7 +108,7 @@ class Error(TimestampMixin, Base):
     request_context: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     git_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
     status: Mapped[OpenResolvedStatus] = mapped_column(
-        SAEnum(OpenResolvedStatus, name="error_status"),
+        _pg_enum(OpenResolvedStatus, "error_status"),
         nullable=False,
         default=OpenResolvedStatus.OPEN,
         server_default=OpenResolvedStatus.OPEN.value,
@@ -152,7 +164,7 @@ class ContractViolation(TimestampMixin, Base):
     file_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     line_number: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[OpenResolvedStatus] = mapped_column(
-        SAEnum(OpenResolvedStatus, name="error_status"),
+        _pg_enum(OpenResolvedStatus, "error_status"),
         nullable=False,
         default=OpenResolvedStatus.OPEN,
         server_default=OpenResolvedStatus.OPEN.value,
@@ -178,10 +190,10 @@ class HealJob(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     type: Mapped[HealJobType] = mapped_column(
-        SAEnum(HealJobType, name="heal_job_type"), nullable=False
+        _pg_enum(HealJobType, "heal_job_type"), nullable=False
     )
     status: Mapped[HealJobStatus] = mapped_column(
-        SAEnum(HealJobStatus, name="heal_job_status"),
+        _pg_enum(HealJobStatus, "heal_job_status"),
         nullable=False,
         default=HealJobStatus.QUEUED,
         server_default=HealJobStatus.QUEUED.value,
@@ -377,7 +389,7 @@ class DailySpend(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     day: Mapped[datetime] = mapped_column(Date, nullable=False)
     category: Mapped[BudgetCategory] = mapped_column(
-        SAEnum(BudgetCategory, name="budget_category"), nullable=False
+        _pg_enum(BudgetCategory, "budget_category"), nullable=False
     )
     spend_usd: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False, default=Decimal("0"))
     paused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

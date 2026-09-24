@@ -54,6 +54,12 @@ ignore = ["S101"]
 "tests/*" = ["S101", "S105", "S106"]
 "scripts/*" = ["S105", "S106", "S603", "S607"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's documented dependency-injection idiom is exactly `= Depends(...)`
+# in an argument default; it's evaluated once at route-registration time, not
+# per-call, so B008's "don't call functions in defaults" concern doesn't apply.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Body"]
+
 [tool.mypy]
 python_version = "3.11"
 warn_unused_configs = true
@@ -97,6 +103,14 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# core.db.engine is a module-level singleton whose asyncpg connection pool is
+# bound to whichever event loop first created it. Function-scoped loops (the
+# pytest-asyncio default) tear down and recreate a loop per test, so pooled
+# connections from one test outlive their loop and blow up on cleanup under
+# Windows' ProactorEventLoop. A single session-scoped loop matches how the
+# engine is actually used in production (one loop for the process lifetime).
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 
 [tool.coverage.run]
 source = ["core", "sentinel", "mcp_server", "healer"]

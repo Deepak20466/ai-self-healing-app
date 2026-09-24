@@ -93,6 +93,31 @@ class Settings(BaseSettings):
 
     webhook_replay_tolerance_seconds: int = Field(default=300, ge=1)
 
+    # --- target_app (app-pod) demo/bug settings -----------------------------
+    # Deliberately unreachable IP (RFC 5737-ish "likely blackholed" address)
+    # so bug #6 (unhandled external API timeout) is deterministic and never
+    # depends on a real third party being up or down.
+    pricing_api_url: str = "http://10.255.255.1:8080"
+    pricing_api_timeout_seconds: float = 5.0
+
+    # --- sentinel-pod ingest / detection settings ---------------------------
+    sentinel_ingest_url: str | None = None  # defaults to http://localhost:{sentinel_port}
+    error_report_timeout_seconds: float = 2.0
+    error_reoccurrence_threshold: int = 5
+    contract_probe_interval_seconds: int = 300
+    anomaly_eval_interval_seconds: int = 60
+    anomaly_window_seconds: int = 300
+    anomaly_baseline_window_seconds: int = 3600
+    anomaly_min_requests_in_window: int = 20
+    anomaly_error_rate_threshold: float = 0.05
+    anomaly_latency_multiplier_threshold: float = 2.0
+    anomaly_cooldown_seconds: int = 600
+
+    @property
+    def sentinel_base_url(self) -> str:
+        """Base URL target_app's middleware/handler use to reach sentinel-pod's ingest API."""
+        return self.sentinel_ingest_url or f"http://localhost:{self.sentinel_port}"
+
 
 @lru_cache
 def get_settings() -> Settings:

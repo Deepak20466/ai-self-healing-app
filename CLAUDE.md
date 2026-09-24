@@ -78,29 +78,147 @@ session can resume without re-deriving context.
 - **`core/hmac_utils.py` filename** (not `core/hmac.py`): avoids any
   ambiguity with the stdlib `hmac` module even though Python 3's absolute
   imports would technically resolve it correctly either way.
+- **SQLAlchemy `Enum(PythonEnum)` pitfall**: by default it sends the member
+  *name* ("OPEN") on the wire, not `.value` ("open") — but the Alembic
+  migrations create the Postgres enum types using lowercase `.value`
+  strings. Fixed with a `core/models.py:_pg_enum()` helper that always
+  passes `values_callable=lambda cls: [m.value for m in cls]`. If you ever
+  add a new enum column, use `_pg_enum(...)`, not `SAEnum(...)` directly, or
+  every insert will fail with "invalid input value for enum ...".
+- **target_app/sentinel talk over HTTP, not a shared DB session**: SPEC.md
+  calls sentinel-pod's capture path an "ingest API" and describes the
+  middleware/logging-handler as "drop-in" — so `apps/target_app`'s
+  `SentinelMiddleware`/`SentinelLogHandler` POST to sentinel-pod's
+  `/ingest/error` and `/ingest/metric` (via `sentinel/client.py`) rather than
+  writing to the DB directly. This keeps app-pod's only coupling to
+  sentinel-pod being HTTP, matching the 4-separate-native-processes
+  architecture. Error reporting is *awaited* (so "the request returned"
+  reliably means "sentinel has it", which tests depend on); metric reporting
+  is fire-and-forget (never adds latency to a normal response). Both swallow
+  transport errors — monitoring must never be able to break the app it
+  monitors.
+- **`/trigger/{bug}` IS the real endpoint, not a separate demo wrapper**: all
+  7 seeded bugs are deterministic against the fixed dataset in
+  `apps/target_app/seed_data.py`, so `/trigger/zero` etc. just call the same
+  `apps/target_app/bugs.py` functions with the specific seeded id known to
+  reproduce that bug. The 2 silent bugs (off-by-one, timezone) are also
+  registered as `apps/target_app/contracts.py` `ContractCase`s so the
+  sentinel prober catches them continuously, not just when manually
+  triggered.
+- **Bug #5 (timezone) redesign**: the first version stored a datetime with
+  an IST offset and read `.date()` directly, assuming the offset would
+  survive a DB round-trip — but Postgres `timestamptz` always normalizes to
+  UTC on read, silently erasing the original offset, so the bug never
+  actually reproduced. Fixed by introducing a fixed `STOREFRONT_TZ` (IST)
+  business-timezone constant in `bugs.py`: the bug is forgetting to
+  `.astimezone(STOREFRONT_TZ)` before taking `.date()`, which reproduces
+  correctly regardless of what offset the row was inserted with. If you add
+  another timezone-sensitive bug, remember: **`timestamptz` never round-trips
+  the original UTC offset** — design the bug around a business-timezone
+  conversion, not the insert-time offset.
+- **heal_job re-enqueue rule**: SPEC.md says "enqueue when new or above a
+  threshold" without defining "threshold" precisely. Implemented in
+  `sentinel/storage.py` as: enqueue on the *first* occurrence, then again
+  every `ERROR_REOCCURRENCE_THRESHOLD` (default 5) occurrences thereafter —
+  but only if no heal_job for that fingerprint is currently in flight
+  (status in queued/running/pr_opened/ci_fixing). This prevents duplicate
+  jobs while a fix attempt is already underway; the circuit breaker (max 3
+  attempts/24h) is a separate guardrail to build in Phase 4/5.
+- **Test DB isolation**: `tests/conftest.py`'s `db_session` fixture wraps
+  each test in an outer transaction (`conn.begin()` + `join_transaction_mode
+  ="create_savepoint"`) that's rolled back afterward, so storage.py's
+  internal `session.commit()` calls never actually persist past the test.
+  HTTP-level tests (`target_app_client`, `sentinel_http_client`) override
+  FastAPI's `get_db` dependency to the *same* session, so a single test can
+  hit target_app over ASGI, have sentinel process it over ASGI, and assert
+  the result — all inside one rolled-back transaction, no real sockets.
+  `pytest_sessionstart` runs `scripts/seed_demo.py` once for the whole run.
+- **pytest-asyncio loop scope must be `session`, not the default
+  `function`**: `core.db.engine` is a module-level singleton; its asyncpg
+  pool binds to whichever event loop first touched it. Per-test
+  (function-scoped) loops tear down and recreate a loop for every test,
+  which orphans pooled connections from previous tests and crashes on
+  cleanup (`AttributeError` / `Event loop is closed`, especially bad under
+  Windows' ProactorEventLoop). Set in `pyproject.toml`:
+  `asyncio_default_fixture_loop_scope = "session"` and
+  `asyncio_default_test_loop_scope = "session"`.
+- **Fire-and-forget `asyncio.create_task` + a rollback-based test fixture
+  don't mix**: `SentinelLogHandler.emit()` schedules a background task
+  rather than awaiting it (it's called from sync logging code). In tests,
+  don't `await asyncio.sleep(n)` and hope it finished — the fixture's
+  transaction can roll back mid-task. Instead await the handler's own
+  `_background_tasks` set directly (see `tests/test_sentinel_logging_handler.py`).
 
 ## Phase log
 
-### Phase 1 — Foundation: DONE (code), DB verification pending on user
+### Phase 1 — Foundation: DONE
 Built: `pyproject.toml` (deps, ruff, mypy strict-on-core, pytest config),
 `core/` package (`config.py`, `db.py`, `models.py` — all 14 SPEC.md tables,
 `logging.py` structlog JSON setup, `hmac_utils.py`, `untrusted.py`,
 `ratelimit.py`, `queue.py`), Alembic setup (`alembic.ini`, `alembic/env.py`
 async, `alembic/versions/0001_initial.py` — full schema + 4 Postgres enums),
-`.env.example`, `.gitignore`, `scripts/bootstrap.sh` + `scripts/bootstrap.ps1`,
-DB-independent unit tests (`tests/test_config.py`, `test_hmac_utils.py`,
-`test_untrusted.py` — 11 tests, all passing).
+`.env.example`, `.gitignore`, `scripts/bootstrap.sh` + `scripts/bootstrap.ps1`.
 
 Verified: `pip install -e ".[dev]"` succeeds, `ruff check`/`ruff format
---check` clean, `mypy core` (strict) clean, `pytest` 11/11 passing.
+--check` clean, `mypy core` (strict) clean, `alembic upgrade head` runs
+clean against the real `selfheal` Postgres DB (confirmed via `\dt`/`\dT`:
+all 15 tables incl. `alembic_version`, all 4 enum types present).
 
-**Not yet verified**: `alembic upgrade head` against a real Postgres
-instance — blocked on getting DB credentials from the user (see
-"Environment on this machine" above). Once `.env` has a working
-`DATABASE_URL`, run `.venv\Scripts\python.exe -m alembic upgrade head` and
-confirm all 14 tables + 4 enum types exist, then update this section.
+### Phase 2 — Detection: DONE
+Built:
+- `apps/target_app/`: FastAPI demo app (`main.py` — app factory, so tests
+  can inject a test `SentinelClient`), `models.py` + `repository.py`
+  (`demo_items`/`demo_orders`, migrated by
+  `alembic/versions/0002_target_app_demo_tables.py`), `seed_data.py`
+  (deterministic dataset, single source of truth for seeding/bugs/contracts),
+  `bugs.py` (the 7 seeded bugs — see SPEC.md list), `schemas.py`,
+  `routes.py` (resource routes + `/trigger/{zero,key,off_by_one,none_lookup,
+  timezone,timeout,validation}`), `contracts.py` (4 `ContractCase`s: 2
+  healthy baselines, 2 that catch the silent bugs).
+- `sentinel/`: `capture.py` (build a `CapturedError` from a live exception,
+  preferring the deepest in-app frame), `middleware.py` +
+  `logging_handler.py` (the two "drop-in" capture paths) + `client.py`
+  (shared HTTP client, used by both), `scrubber.py` (regex + sensitive-key
+  redaction), `fingerprint.py` (dedup hashing), `storage.py` (the actual
+  DB-writing/dedup/enqueue/audit logic, shared by ingest endpoints + prober +
+  anomaly loop), `prober.py` (replays `contracts.py` against a live app),
+  `anomaly.py` (pure `AnomalyDetector` + async scheduling wrapper),
+  `app.py` (sentinel-pod FastAPI app: `/healthz`, `/ingest/error`,
+  `/ingest/metric`, `POST /webhooks/ci`, lifespan starts prober + anomaly
+  background loops).
+- `scripts/seed_demo.py` (idempotent upsert of the demo dataset).
+- `tests/conftest.py`: rollback-per-test DB isolation + in-process
+  ASGI wiring between target_app and sentinel (see "Ambiguities resolved").
+- 77 tests total (up from 11 in Phase 1), covering: all 7 bugs directly,
+  HTTP-level `/trigger/*` behavior, end-to-end capture (error stored with
+  correct file/line, occurrence counting, scrubbing), the prober catching
+  both silent bugs as contract violations, webhook HMAC verification
+  (valid/unsigned/wrong-secret/replayed/unconfigured), the anomaly detector
+  (pure, synthetic timestamps), the logging handler, and `core/ratelimit.py`
+  (untested in Phase 1 since no DB fixture existed yet).
 
-### Phase 2 — Detection: NOT STARTED
+Verified (explicit Phase 2 checklist from SPEC.md):
+- `/trigger/zero` stores the error with the correct file and line:
+  `tests/test_sentinel_capture_integration.py::test_trigger_zero_stores_error_with_correct_file_and_line`
+- Off-by-one and timezone bugs are caught as contract violations:
+  `tests/test_sentinel_prober.py::test_probe_flags_off_by_one_and_timezone_as_violations`
+- A signed webhook is stored, unsigned/replayed ones are rejected:
+  `tests/test_sentinel_webhook.py` (7 tests)
+
+`ruff check .`/`ruff format --check .` clean repo-wide. `mypy core sentinel`
+(strict) clean. `pytest` 77/77 passing. Coverage on `core/`+`sentinel/`: 89%
+(`core/queue.py` at 62% is expected — `dequeue_heal_job`/`HealJobListener`
+aren't exercised until Phase 4's healer worker consumes jobs).
+
+**Known limitation, deferred**: the real `sentinel/app.py` lifespan starts
+`run_prober_loop`/anomaly loop as background tasks hitting target_app's
+*real* HTTP port — this only actually works once both pods are run together
+(e.g. via the `Procfile`, not built yet). Tests exercise the same logic
+directly (`probe_once`/`persist_results`) against an in-process ASGI app
+instead, which is deliberate (see conftest.py note) but means the live
+end-to-end loop hasn't been run for real yet. Do that as part of Phase 6/7
+when honcho/Procfile ties all pods together, or sooner if useful for a demo.
+
 ### Phase 3 — MCP: NOT STARTED
 ### Phase 4 — Runtime healing: NOT STARTED
 ### Phase 5 — CI healing: NOT STARTED
