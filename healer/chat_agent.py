@@ -74,15 +74,42 @@ _pending: dict[int, PendingConfirmation] = {}
 _YES_RE = re.compile(r"^\s*(yes|y|confirm|confirmed)\s*[.!]?\s*$", re.IGNORECASE)
 _NO_RE = re.compile(r"^\s*(no|n|cancel|nevermind)\s*[.!]?\s*$", re.IGNORECASE)
 
-_ROLLBACK_RE = re.compile(r"roll\s*back\s+(?:the\s+)?(\w+)", re.IGNORECASE)
-_CANCEL_RE = re.compile(r"cancel\s+(?:workflow\s+)?(?:run\s+)?#?(\d+)", re.IGNORECASE)
-_RERUN_RE = re.compile(r"re-?run\s+(?:the\s+)?(?:failed\s+)?(?:job|workflow|run)\s*#?(\d+)?", re.IGNORECASE)
-_PR_STATUS_RE = re.compile(r"(?:ci|pipeline).*(?:pr|pull request)\s*#?(\d+)|pr\s*#?(\d+)", re.IGNORECASE)
+_ROLLBACK_RE = re.compile(r"\broll\s*back\s+(?:the\s+)?(\w+)", re.IGNORECASE)
+_CANCEL_RE = re.compile(r"\bcancel\s+(?:workflow\s+)?(?:run\s+)?#?(\d+)", re.IGNORECASE)
+_RERUN_RE = re.compile(
+    r"re-?run\s+(?:the\s+)?(?:failed\s+)?(?:job|workflow|run)\s*#?(\d+)?", re.IGNORECASE
+)
+_PR_STATUS_RE = re.compile(
+    r"(?:ci|pipeline).*(?:pr|pull request)\s*#?(\d+)|pr\s*#?(\d+)", re.IGNORECASE
+)
 _ERROR_FIX_RE = re.compile(r"fix\s+error\s*#?(\d+)", re.IGNORECASE)
-_ERROR_SHOW_RE = re.compile(r"(?:what broke|why did (?:it|error\s*#?(\d+)) fail|show me error\s*#?(\d+))", re.IGNORECASE)
-_HEALTH_RE = re.compile(r"(is\s+production\s+healthy|health\s*check|deployment\s+status|what\s+was\s+deployed)", re.IGNORECASE)
-_STATS_RE = re.compile(r"(show\s+stats|metrics|mttr|success rate|how much.*cost|daily spend)", re.IGNORECASE)
-_PIPELINE_STATUS_RE = re.compile(r"pipeline\s+status|workflow\s+runs?|what.?s\s+running", re.IGNORECASE)
+_ERROR_SHOW_RE = re.compile(
+    r"(?:what broke|why did (?:it|error\s*#?(\d+)) fail|show me error\s*#?(\d+))", re.IGNORECASE
+)
+_HEALTH_RE = re.compile(
+    r"(is\s+production\s+healthy|health\s*check|deployment\s+status|what\s+was\s+deployed)",
+    re.IGNORECASE,
+)
+_STATS_RE = re.compile(
+    r"(show\s+stats|metrics|mttr|success rate|how much.*cost|daily spend)", re.IGNORECASE
+)
+_PIPELINE_STATUS_RE = re.compile(
+    r"pipeline\s+status|workflow\s+runs?|what.?s\s+running", re.IGNORECASE
+)
+
+
+def as_tool_list(result: Any) -> list[Any]:
+    """Normalize a list-returning MCP tool's result: the `mcp` SDK wraps a
+    bare-list tool return in `{"result": [...]}` for structured content
+    (JSON-RPC structured content must be an object), so callers that expect
+    a plain list need to unwrap it. Dict-returning tools never hit this path."""
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict):
+        inner = result.get("result")
+        if isinstance(inner, list):
+            return inner
+    return []
 
 
 def _fmt_error(err: dict[str, Any]) -> str:
@@ -116,6 +143,8 @@ async def _handle_confirmation_reply(
 async def _run_confirmed_action(mcp: MCPToolClient, pending: PendingConfirmation) -> str:
     """Server-issues the confirmation token itself (never trusts the LLM to
     have supplied it), then calls the now-confirmed destructive MCP tool."""
+    if pending.action not in _DESTRUCTIVE_ACTIONS:
+        return f"Refusing to run non-destructive-listed action {pending.action!r}."
     token = issue_confirmation_token(pending.action, **{k: str(v) for k, v in pending.args.items()})
     try:
         result = await mcp.call_tool(pending.action, {**pending.args, "confirmation_token": token})
@@ -124,9 +153,7 @@ async def _run_confirmed_action(mcp: MCPToolClient, pending: PendingConfirmation
     return f"Done. {result}"
 
 
-async def handle_chat_message(
-    mcp: MCPToolClient, *, chat_session_id: int, text: str
-) -> ChatReply:
+async def handle_chat_message(mcp: MCPToolClient, *, chat_session_id: int, text: str) -> ChatReply:
     """Route one user message to a deterministic handler or the LLM fallback."""
     text = text.strip()
 
@@ -148,7 +175,9 @@ async def handle_chat_message(
     if match := _CANCEL_RE.search(text):
         run_id = int(match.group(1))
         pending = PendingConfirmation(
-            action="cancel_workflow", args={"run_id": run_id}, confirm_phrase=f"cancel run #{run_id}"
+            action="cancel_workflow",
+            args={"run_id": run_id},
+            confirm_phrase=f"cancel run #{run_id}",
         )
         _pending[chat_session_id] = pending
         return ChatReply(
@@ -163,15 +192,21 @@ async def handle_chat_message(
         try:
             result = await mcp.call_tool("rerun_workflow", {"run_id": run_id, "failed_only": True})
         except MCPToolError as exc:
-            return ChatReply(text=f"Could not re-run #{run_id}: {exc}", tool_calls=["rerun_workflow"])
-        return ChatReply(text=f"Re-ran the failed jobs on run #{run_id}. {result}", tool_calls=["rerun_workflow"])
+            return ChatReply(
+                text=f"Could not re-run #{run_id}: {exc}", tool_calls=["rerun_workflow"]
+            )
+        return ChatReply(
+            text=f"Re-ran the failed jobs on run #{run_id}. {result}", tool_calls=["rerun_workflow"]
+        )
 
     if match := _ERROR_FIX_RE.search(text):
         error_id = int(match.group(1))
         try:
             err = await mcp.call_tool("get_error", {"error_id": error_id})
         except MCPToolError as exc:
-            return ChatReply(text=f"Could not find error #{error_id}: {exc}", tool_calls=["get_error"])
+            return ChatReply(
+                text=f"Could not find error #{error_id}: {exc}", tool_calls=["get_error"]
+            )
         fingerprint = err.get("fingerprint")
         return ChatReply(
             text=(
@@ -184,28 +219,34 @@ async def handle_chat_message(
         )
 
     if match := _ERROR_SHOW_RE.search(text):
-        error_id = match.group(1) or match.group(2)
-        if error_id:
+        error_id_str = match.group(1) or match.group(2)
+        if error_id_str:
             try:
-                err = await mcp.call_tool("get_error", {"error_id": int(error_id)})
+                err = await mcp.call_tool("get_error", {"error_id": int(error_id_str)})
             except MCPToolError as exc:
-                return ChatReply(text=f"Could not find error #{error_id}: {exc}", tool_calls=["get_error"])
+                return ChatReply(
+                    text=f"Could not find error #{error_id_str}: {exc}", tool_calls=["get_error"]
+                )
             return ChatReply(text=_fmt_error(err), tool_calls=["get_error"])
         try:
-            errors = await mcp.call_tool("list_open_errors", {"limit": 5})
+            errors = as_tool_list(await mcp.call_tool("list_open_errors", {"limit": 5}))
         except MCPToolError as exc:
             return ChatReply(text=f"Could not list errors: {exc}", tool_calls=["list_open_errors"])
         if not errors:
             return ChatReply(text="No open errors right now.", tool_calls=["list_open_errors"])
         lines = [_fmt_error(e) for e in errors]
-        return ChatReply(text="Open errors:\n\n" + "\n\n".join(lines), tool_calls=["list_open_errors"])
+        return ChatReply(
+            text="Open errors:\n\n" + "\n\n".join(lines), tool_calls=["list_open_errors"]
+        )
 
     if match := _PR_STATUS_RE.search(text):
         pr_number = int(match.group(1) or match.group(2))
         try:
             status_result = await mcp.call_tool("get_pr_status", {"pr_number": pr_number})
         except MCPToolError as exc:
-            return ChatReply(text=f"Could not get PR #{pr_number} status: {exc}", tool_calls=["get_pr_status"])
+            return ChatReply(
+                text=f"Could not get PR #{pr_number} status: {exc}", tool_calls=["get_pr_status"]
+            )
         checks = status_result.get("checks", [])
         failing = [c for c in checks if c.get("conclusion") not in (None, "success")]
         if failing:
@@ -253,16 +294,21 @@ async def handle_chat_message(
 
     if _PIPELINE_STATUS_RE.search(text):
         try:
-            runs = await mcp.call_tool("list_workflow_runs", {})
+            runs = as_tool_list(await mcp.call_tool("list_workflow_runs", {}))
         except MCPToolError as exc:
-            return ChatReply(text=f"Could not list pipeline runs: {exc}", tool_calls=["list_workflow_runs"])
+            return ChatReply(
+                text=f"Could not list pipeline runs: {exc}", tool_calls=["list_workflow_runs"]
+            )
         if not runs:
             return ChatReply(text="No recent pipeline runs.", tool_calls=["list_workflow_runs"])
         lines = [
-            f"- run #{r.get('run_id')} ({r.get('workflow')}) on {r.get('branch')}: {r.get('status')}/{r.get('conclusion')}"
+            f"- run #{r.get('run_id')} ({r.get('workflow_name')}) on {r.get('branch')}: "
+            f"{r.get('status')}/{r.get('conclusion')}"
             for r in runs[:5]
         ]
-        return ChatReply(text="Recent pipeline runs:\n" + "\n".join(lines), tool_calls=["list_workflow_runs"])
+        return ChatReply(
+            text="Recent pipeline runs:\n" + "\n".join(lines), tool_calls=["list_workflow_runs"]
+        )
 
     return await _llm_fallback(mcp, text)
 
@@ -307,4 +353,4 @@ async def _llm_fallback(mcp: MCPToolClient, text: str) -> ChatReply:
     )
 
 
-__all__ = ["ChatReply", "PendingConfirmation", "handle_chat_message"]
+__all__ = ["ChatReply", "PendingConfirmation", "as_tool_list", "handle_chat_message"]

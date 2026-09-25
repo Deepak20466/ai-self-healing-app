@@ -62,13 +62,16 @@ async def notify(event: str, message: str, **extra: object) -> None:
 
 
 def _send_email(*, subject: str, body: str) -> None:
+    smtp_host = settings.smtp_host
+    if not smtp_host:
+        return
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = settings.smtp_from
     msg["To"] = settings.smtp_to
     msg.set_content(body)
 
-    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=5) as smtp:
+    with smtplib.SMTP(smtp_host, settings.smtp_port, timeout=5) as smtp:
         smtp.starttls()
         if settings.smtp_user and settings.smtp_password:
             smtp.login(settings.smtp_user, settings.smtp_password)

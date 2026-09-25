@@ -48,6 +48,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -196,15 +197,27 @@ def _windows_shim_argv(resolved: str, rest_args: list[str]) -> list[str]:
     PATHEXT) to a `claude.cmd` shim, not a `.exe`. `asyncio.
     create_subprocess_exec` calls `CreateProcess` directly with no shell and
     no PATHEXT resolution, so it cannot launch a `.cmd`/`.bat` file at all
-    (`WinError 193`, "not a valid Win32 application"). Passing `cmd.exe /c
-    <path> <args...>` as a real argv list (still via `create_subprocess_exec`,
-    never `shell=True`) lets `cmd.exe` do the `.cmd` dispatch while each
-    argument keeps its own array element — no manual quoting/escaping of
-    paths with spaces, which a hand-built command-line string got wrong once
-    already (see job 313's "'C:\\Users\\K' is not recognized" failure: an
-    unquoted space in the resolved path broke `cmd`'s own tokenizing).
+    (`WinError 193`, "not a valid Win32 application").
+
+    Passing `["cmd.exe", "/c", resolved, *rest_args]` as a plain argv list
+    is NOT enough on its own to fix the space-in-path quoting problem (job
+    313/321's "'C:\\Users\\K' is not recognized" failure): Windows has no
+    real argv — `asyncio`/`subprocess` flattens any argv list back into one
+    command-line string via `list2cmdline` before calling `CreateProcess`,
+    and `cmd.exe /c`'s *own* parser then re-tokenizes that string with a
+    documented quirk: when the text after `/c` is not wrapped in one single
+    outer pair of quotes, `cmd.exe` can mis-split a quoted path that
+    contains a space (it sees the space inside `"C:\Users\K Deepak\..."` as
+    a token boundary). This is the same bug `cross-spawn` (npm's own
+    subprocess-spawning library) works around, with the same fix: add `/d`
+    (skip AutoRun) and `/s` (tells `cmd.exe` "strip only the first and last
+    quote of what follows, treat everything between as one verbatim string")
+    and wrap the *entire* quoted-and-joined command in one more explicit
+    pair of quotes so `/s`'s stripping rule applies to the whole thing, not
+    just the first token.
     """
-    return ["cmd.exe", "/c", resolved, *rest_args]
+    inner = subprocess.list2cmdline([resolved, *rest_args])
+    return ["cmd.exe", "/d", "/s", "/c", f'"{inner}"']
 
 
 async def run_claude_cli(

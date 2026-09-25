@@ -810,6 +810,153 @@ Verified: `pytest` 251/251 passing, `ruff check` clean, `ruff format --check`
 clean, `mypy core sentinel mcp_server healer` (strict) clean. Real end-to-end
 job execution confirmed working.
 
-### Phase 6 — UI: NOT STARTED
+### Phase 6 — UI: DONE
+Built:
+- `healer/auth.py`: single-admin auth. `ADMIN_PASSWORD_HASH` (argon2)
+  verified via `argon2-cffi`, signed itsdangerous session cookies
+  (`selfheal_session`, httpOnly/Secure-outside-dev/SameSite=Strict, 12h),
+  `require_auth` FastAPI dependency (401 on missing/invalid/expired cookie),
+  `authenticate()` wired to Phase 1's already-built `core/ratelimit.py`
+  (`is_login_locked_out`/`record_login_attempt` — unused until now since
+  nothing needed login before this phase's UI existed).
+- `healer/notifier.py`: Slack webhook / SMTP notifications per SPEC.md
+  NOTIFICATIONS (skips silently if unconfigured), plus a
+  `set_socket_broadcaster`/`notify()` pair that also pushes a Socket.io
+  "notification" event to every connected client — this is what lets
+  Phase 7's `local_deploy.py` prove a rollback "notifies the chat" without a
+  human watching a terminal.
+- `healer/chat_agent.py`: chat message routing. **Design choice**: a
+  regex-matched set of the exact questions/commands SPEC.md lists ("show
+  stats", "what's the pipeline status", "why did CI fail on PR #N", "roll
+  back <env>", "cancel workflow #N", "rerun workflow #N", "show me error
+  #N") are answered directly from live MCP tool data — fast, deterministic,
+  testable without a real LLM. Anything else falls back to the active AI
+  backend (Claude Code CLI in free mode via `run_claude_cli`, restricted to
+  a read-only `--allowedTools` subset — `trigger_rollback`/`cancel_workflow`
+  are never in that list, so an injected instruction has no destructive tool
+  to even attempt). Destructive actions (`trigger_rollback`, `cancel_workflow`)
+  go through an in-memory per-chat-session `PendingConfirmation`: the server
+  itself issues the confirmation token via `mcp_server/confirmation.py` only
+  after the user replies "yes" — the LLM is never trusted to supply or
+  fabricate a token. `as_tool_list()` unwraps the `mcp` SDK's `{"result":
+  [...]}` structured-content wrapping for list-returning tools (discovered
+  while testing `list_open_errors`/`list_workflow_runs` — a bare list return
+  type gets wrapped in an object since MCP structured content must be a
+  JSON object, not a bare array).
+- `healer/agent_free.py`: added an `allowed_tools` override parameter to
+  `run_claude_cli` (defaults to the existing `mcp__selfheal__*` used by heal
+  jobs) so chat can pass its narrower read-only list — the only change to
+  this already-tested Phase 5+ module.
+- `healer/app.py`: the healer-pod FastAPI + Socket.io app. Runs
+  `healer.worker.run_worker()` as a background `asyncio.Task` in its
+  lifespan (same pattern sentinel-pod already uses for its prober/anomaly
+  loops), so the worker and the chat/dashboard UI share one process/port —
+  SPEC.md's "4 pods", not 5. Routes: `/healthz` (public), `/api/auth/*`
+  (login applies the chat/login rate-limit bucket from `core/ratelimit.py`
+  before checking the password), `/api/errors`, `/api/metrics`,
+  `/api/health`, `/api/deployments`, `/api/pipeline` (all `require_auth` +
+  read through a long-lived `MCPToolClient` connected once at startup),
+  `/api/chat/session` + `/api/chat/history` (persist to `chat_sessions`/
+  `chat_messages`), and a Socket.io server (`connect` validates the session
+  cookie or an explicit `auth.token`, `chat_message`/`chat_reply` events).
+  Static UI served from `/` + `/static/*` via `StaticFiles`.
+- `web/`: React 18 + htm + Socket.io client, all from CDN, zero build step
+  (`index.html`, `app.js`, `style.css`). Login page, dashboard (health/
+  errors/pipeline panels, polling every 8-10s — see "Ambiguities resolved"
+  below for why polling instead of full Socket.io push for these), AI chat
+  (Socket.io, persisted history, confirmation hint), metrics page. Dark/light
+  theme via CSS variables + `prefers-color-scheme` + a manual toggle
+  persisted to `localStorage`. Responsive down to mobile width. Toasts driven
+  by the Socket.io `notification` event.
+- `scripts/hash_password.py`: argon2 hash generator for `ADMIN_PASSWORD_HASH`
+  (SPEC.md SECURITY explicitly names this script).
+- 25 new tests: `tests/test_healer_auth.py` (session cookie round-trip,
+  401 without a cookie, successful/failed login, 5-failed-attempts lockout —
+  reusing Phase 1's `core/ratelimit.py` for real against `db_session`),
+  `tests/test_healer_app.py` (httpx `AsyncClient` over ASGI with `get_db`/
+  `get_mcp_client` dependency-overridden — same pattern `tests/conftest.py`
+  already uses for sentinel-pod/target_app; unauthenticated 401s, full
+  login → dashboard → logout → 401-again flow, chat session/history),
+  `tests/test_healer_chat_agent.py` (a real MCP client<->server round trip
+  via `connect_in_memory`, GitHub mocked via `respx`: "show stats" against
+  the real `get_metrics` tool, pipeline status, "why did CI fail on PR #12"
+  with real failing-check data, showing a real seeded error, the full
+  rollback confirm/cancel flow proving GitHub's dispatch endpoint is called
+  exactly once only after "yes" and zero times after "no", and an injection
+  test proving `--allowedTools` never includes `trigger_rollback` for the
+  LLM-fallback path regardless of what the user's text asks for).
+
+Verified (explicit Phase 6 checklist from SPEC.md):
+- Unauthenticated access returns 401:
+  `tests/test_healer_app.py::test_unauthenticated_metrics_returns_401` /
+  `test_unauthenticated_errors_returns_401`.
+- The chat answers "show stats" and "why did CI fail on PR #N" from real
+  tool data, in free mode (the deterministic-intent path runs regardless of
+  `USE_CLAUDE_CODE`, but is exactly the path SPEC.md's free-mode-chat
+  checklist exercises): `tests/test_healer_chat_agent.py::
+  test_show_stats_uses_real_metrics_tool` /
+  `test_why_did_ci_fail_on_pr_reports_failing_checks`.
+- A rollback only runs after "yes":
+  `tests/test_healer_chat_agent.py::
+  test_rollback_requires_yes_confirmation_before_running` /
+  `test_rollback_cancelled_with_no_never_calls_github`.
+- Mobile width + dark mode: `web/style.css` uses CSS variables redefined
+  under both `prefers-color-scheme: dark` and an explicit `data-theme`
+  toggle, a single responsive breakpoint at 480px, and no fixed widths wider
+  than the viewport (manually reviewed; no headless-browser test harness
+  exists in this repo to automate a visual check).
+
+`ruff check .`/`ruff format --check .` clean repo-wide. `mypy core sentinel
+mcp_server healer` (strict) clean. `pytest` 270/271 (one pre-existing,
+environment-only failure: `test_get_health_reports_unreachable_pods_when_
+nothing_is_running` expects nothing listening on ports 8001-8003, which
+fails only when pods happen to already be running locally in another
+terminal — not something Phase 6 introduced or can fix in-repo).
+
+**Ambiguities resolved this phase**:
+- **Dashboard live updates are short-interval polling (8-10s), not
+  Socket.io push, for errors/pipeline/health panels.** SPEC.md says "live
+  updates via Socket.io: progress timeline per heal job" — but wiring
+  Phase 4/5's `runtime_agent.py`/`ci_agent.py`/`worker.py` to emit
+  Socket.io events mid-attempt would mean touching already-tested,
+  contract-critical Phase 4/5 code for a UI-only concern, which CLAUDE.md's
+  "don't modify completed phases without strict need" convention weighs
+  against. Socket.io is used for genuinely real-time things instead: chat
+  (`chat_message`/`chat_reply`) and `healer/notifier.py`'s cross-cutting
+  `notify()` broadcast (budget pauses, rollback results, anomaly alerts —
+  events that already funnel through one shared function, so wiring them to
+  Socket.io was a single, safe, additive change). If per-attempt job
+  progress push is wanted later, add a `notifier.notify()`-style call at
+  each stage inside `runtime_agent.py`/`ci_agent.py` deliberately, as its
+  own reviewed change.
+- **`healer/app.py` queries MCP tools for dashboard data, not the DB
+  directly**, even though the healer-pod process already has a normal DB
+  session available (`core.db.get_db`). This keeps exactly one code path
+  (mcp_server's tools) responsible for shaping "what an error/pipeline
+  run/deployment looks like as JSON", so the dashboard, the chat, and the AI
+  agent can never disagree about a field name — already caught one such
+  mismatch during testing (`list_workflow_runs` returns `workflow_name`,
+  not `workflow`).
+- **`mcp`'s structured content wraps a bare-list tool return in `{"result":
+  [...]}`** (JSON-RPC structured content must be a JSON object, never a bare
+  array) — discovered by testing `list_open_errors`/`list_workflow_runs`
+  through a real `connect_in_memory` round trip, not assumed. Added
+  `healer/chat_agent.py:as_tool_list()` to unwrap this consistently in both
+  `chat_agent.py` and `app.py` — `get_error`/`get_metrics`/single-object
+  tools are unaffected since they already return a plain dict.
+- **Chat's pending destructive-action confirmation is an in-memory,
+  per-process dict** (`healer/chat_agent.py:_pending`), not a DB table or a
+  new `chat_sessions` column. A lost "waiting for yes" on a healer-pod
+  restart is safe to lose (the user just re-issues the rollback/cancel
+  command) and this avoids a schema migration for Phase 6 UI-only state.
+- **Login rate limiting reuses the existing token-bucket `check_and_consume`
+  as a per-IP soft cap (10 attempts / 60s) in addition to**, not instead of,
+  the hard 5-failures/15-minute lockout in `core/ratelimit.py`'s
+  `is_login_locked_out` — the two mechanisms serve different purposes
+  (softly slow down a scripted brute force vs. hard-lock an account after
+  genuine repeated failures) and SPEC.md's SECURITY section calls for both
+  ("rate limiting ... on the chat, login and ingest endpoints" plus
+  separately "lock out login for 15 minutes after 5 failed attempts").
+
 ### Phase 7 — Ship: NOT STARTED
 ### Phase 8 — Prove: NOT STARTED
