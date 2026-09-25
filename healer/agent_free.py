@@ -191,7 +191,7 @@ def _is_windows_shim(resolved: str) -> bool:
 
 
 def _windows_shim_argv(resolved: str, rest_args: list[str]) -> list[str]:
-    """Build the argv for launching a `.cmd`/`.bat` shim via `cmd.exe /c`.
+    r"""Build the argv for launching a `.cmd`/`.bat` shim via `cmd.exe /c`.
 
     An npm-installed `claude` resolves (via `shutil.which`, which honors
     PATHEXT) to a `claude.cmd` shim, not a `.exe`. `asyncio.

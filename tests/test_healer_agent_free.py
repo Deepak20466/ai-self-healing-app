@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -181,13 +182,17 @@ async def test_run_claude_cli_wraps_a_windows_cmd_shim_correctly(
     """`asyncio.create_subprocess_exec` can't launch a `.cmd`/`.bat` file
     directly on Windows (no shell, no PATHEXT resolution) — this is the real
     shape `shutil.which("claude")` resolves to for an npm-installed CLI on
-    Windows. Verified via `cmd.exe /c <path> <args...>` passed as a real argv
-    list (still `create_subprocess_exec`, never `shell=True`) — no manual
-    quoting of a path with a space (the real-world case:
-    `C:\\Users\\Someone Spaced\\...\\claude.cmd`) is needed since each
-    argument stays its own array element. A hand-built command-line string
-    got this wrong once for real (job 313: "'C:\\Users\\K' is not
-    recognized", an unquoted space split the path mid-token).
+    Windows.
+
+    Plain `["cmd.exe", "/c", path, *args]` as an argv list is NOT enough:
+    Windows has no real argv, so `list2cmdline` flattens it back into one
+    command-line string before `CreateProcess`, and `cmd.exe /c`'s own
+    parser then mis-tokenizes a quoted path containing a space unless the
+    whole thing is wrapped in one more explicit pair of quotes with `/d /s`
+    (the same fix npm's `cross-spawn` uses). Verified against job 313's and
+    321's real failure: `"'C:\\Users\\K' is not recognized"` — a space in
+    `C:\\Users\\K Deepak\\...\\claude.cmd` split the path mid-token even
+    though it was launched via `create_subprocess_exec`, never `shell=True`.
     """
     monkeypatch.setattr(agent_free.sys, "platform", "win32")
     monkeypatch.setattr(
@@ -200,8 +205,12 @@ async def test_run_claude_cli_wraps_a_windows_cmd_shim_correctly(
 
     assert len(fake.calls) == 1
     argv = list(fake.calls[0]["args"])
-    assert argv[:3] == ["cmd.exe", "/c", r"C:\fake dir\npm\claude.cmd"]
-    assert argv[3:] == [
+    assert argv[:4] == ["cmd.exe", "/d", "/s", "/c"]
+    assert len(argv) == 5
+    inner = argv[4]
+    assert inner.startswith('"') and inner.endswith('"')
+    assert r"C:\fake dir\npm\claude.cmd" in inner
+    expected_rest_args = [
         "-p",
         "--output-format",
         "json",
@@ -215,6 +224,8 @@ async def test_run_claude_cli_wraps_a_windows_cmd_shim_correctly(
         "--max-turns",
         "30",
     ]
+    expected_inner = subprocess.list2cmdline([r"C:\fake dir\npm\claude.cmd", *expected_rest_args])
+    assert inner == f'"{expected_inner}"'
 
 
 async def test_run_claude_cli_does_not_shell_wrap_a_plain_exe(
