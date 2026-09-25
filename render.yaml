@@ -1,0 +1,124 @@
+# Render Blueprint for AI-Powered Self-Healing.
+#
+# This app is 4 native processes designed to share one host (see Procfile,
+# CLAUDE.md Phase 7) -- healer-pod and mcp-pod talk over a hardcoded
+# 127.0.0.1 URL, so they can't be split into separate Render services without
+# code changes. This blueprint runs all 4 as one Render web service via
+# scripts/render_start.sh; only healer-pod (dashboard + chat) is exposed
+# publicly, matching deploy/Caddyfile's own routing choice.
+#
+# Free mode (USE_CLAUDE_CODE=true, the local default) needs the interactive
+# `claude` CLI logged into a subscription -- not viable on a managed
+# platform with no persistent interactive shell. This blueprint deploys in
+# API mode instead (USE_CLAUDE_CODE=false + ANTHROPIC_API_KEY), which is
+# also why the `anthropic` extra is included in the build command.
+#
+# One-time manual steps after the first deploy (Render secrets can't be set
+# from this file):
+#   1. Generate ADMIN_PASSWORD_HASH locally: python scripts/hash_password.py
+#   2. Set ANTHROPIC_API_KEY, GITHUB_TOKEN, GITHUB_REPO, ADMIN_PASSWORD_HASH,
+#      SESSION_SECRET, HEALER_WEBHOOK_SECRET in the Render dashboard (all
+#      marked sync: false below so Render prompts for them instead of
+#      committing secrets to this file).
+#   3. Optional: SLACK_WEBHOOK_URL / SMTP_* for notifications.
+
+databases:
+  - name: selfheal-db
+    plan: free
+    databaseName: selfheal
+    user: selfheal
+
+services:
+  - type: web
+    name: selfheal
+    runtime: python
+    plan: starter
+    region: oregon
+    buildCommand: pip install -e ".[api]"
+    startCommand: bash scripts/render_start.sh
+    healthCheckPath: /healthz
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+
+      # DATABASE_URL comes from the managed Postgres above as postgres://;
+      # scripts/render_start.sh rewrites the scheme to postgresql+asyncpg://.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: selfheal-db
+          property: connectionString
+      - key: DB_POOL_SIZE
+        value: "5"
+      - key: DB_MAX_OVERFLOW
+        value: "2"
+
+      # Internal pod ports (never exposed outside the dyno; only healer's
+      # $PORT, injected by Render itself, is public).
+      - key: APP_PORT
+        value: "8001"
+      - key: SENTINEL_PORT
+        value: "8002"
+      - key: MCP_PORT
+        value: "8003"
+
+      # AI backend: API mode (free mode's `claude` CLI login isn't usable here).
+      - key: USE_CLAUDE_CODE
+        value: "false"
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ANTHROPIC_MODEL
+        value: claude-sonnet-5
+
+      # GitHub (repo + PAT with repo, workflow, pull_requests scopes).
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_REPO
+        sync: false
+
+      # Auth: generate ADMIN_PASSWORD_HASH with scripts/hash_password.py.
+      - key: ADMIN_PASSWORD_HASH
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+
+      # Webhooks (sentinel-pod's CI ingest; not publicly reachable in this
+      # single-service layout, see scripts/render_start.sh's comment).
+      - key: HEALER_WEBHOOK_SECRET
+        generateValue: true
+      - key: HEALER_WEBHOOK_URL
+        value: http://127.0.0.1:8002/webhooks/ci
+      - key: PUBLIC_URL
+        fromService:
+          type: web
+          name: selfheal
+          property: host
+
+      # Cost control.
+      - key: MAX_TOKENS_PER_JOB
+        value: "150000"
+      - key: DAILY_BUDGET_USD
+        value: "2.00"
+      - key: CHAT_DAILY_BUDGET_USD
+        value: "1.00"
+
+      # Safety.
+      - key: AUTO_MERGE
+        value: "false"
+
+      # Notifications (optional; skipped silently if unset).
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: SMTP_TO
+        sync: false
