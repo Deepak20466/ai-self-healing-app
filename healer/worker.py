@@ -94,11 +94,19 @@ async def _process_next_job(mcp: MCPToolClient, backend: _JobRunners) -> bool:
             session, max_per_hour=settings.max_heal_jobs_per_hour_global
         ):
             # Global throughput cap, not "this bug is unfixable" — put it
-            # straight back on the queue instead of failing it.
+            # straight back on the queue instead of failing it. Return False
+            # (not True): the caller's main loop treats True as "immediately
+            # try again", which busy-spins forever on this same oldest queued
+            # job the instant the cap is open — 100% CPU, log spam, and every
+            # OTHER queued job starved indefinitely, since dequeue_heal_job's
+            # FIFO order never lets a newer job get a turn. False makes the
+            # loop back off and wait on the next notify/fallback timeout
+            # instead, same as "no job available" — reproduced for real
+            # running the live CI self-healing demo (job 338 vs. job 340).
             job.status = HealJobStatus.QUEUED
             job.started_at = None
             logger.warning("worker.global_hourly_cap_hit", heal_job_id=job_id)
-            return True
+            return False
 
     try:
         async with GitHubClient() as github:
