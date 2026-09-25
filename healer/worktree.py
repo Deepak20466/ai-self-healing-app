@@ -11,6 +11,7 @@ responsibility, done with plain `git` subprocess calls exactly like
 from __future__ import annotations
 
 import asyncio
+import shutil
 from pathlib import Path
 
 from mcp_server.sandbox import REPO_ROOT, WORKTREES_ROOT
@@ -144,6 +145,41 @@ async def _run_git_best_effort(args: list[str], *, cwd: Path) -> None:
     except TimeoutError:
         process.kill()
         await process.wait()
+
+
+async def create_worktree_for_connected_app(name: str, branch: str, *, source_dir: Path) -> Path:
+    """Clone a connect-a-repo app's own local checkout (`connected_apps/<name>/`,
+    see `core/repo_connect.py`) into a fresh worktree and check out a new
+    branch there.
+
+    Unlike `create_worktree`, this is *not* `git worktree add` against this
+    project's own `.git` -- a connected app is a real, independent git
+    repository in its own right (its own `.git/`, its own history, its own
+    GitHub remote), just physically nested under this repo's working tree
+    and gitignored. `git worktree add` only ever materializes commits that
+    exist in *this* repo's object store, so it would produce an empty
+    directory for anything under `connected_apps/`. A plain local `git
+    clone` (fast: no network, same filesystem) gives the fix attempt its own
+    isolated copy exactly the way `create_worktree` does for an in-repo app.
+    """
+    WORKTREES_ROOT.mkdir(exist_ok=True)
+    path = WORKTREES_ROOT / name
+    await _run_git(["clone", str(source_dir), str(path)], cwd=WORKTREES_ROOT)
+    await _run_git(["checkout", "-b", branch], cwd=path)
+    return path
+
+
+async def remove_plain_clone(name: str) -> None:
+    """Best-effort cleanup for a `create_worktree_for_connected_app` clone --
+    not a real git-worktree of this repo, so `git worktree remove` doesn't
+    apply; just delete the directory (same best-effort, never-raises
+    contract as `remove_worktree`)."""
+    path = WORKTREES_ROOT / name
+
+    def _rmtree() -> None:
+        shutil.rmtree(path, ignore_errors=True)
+
+    await asyncio.get_running_loop().run_in_executor(None, _rmtree)
 
 
 async def remove_worktree(name: str, branch: str) -> None:

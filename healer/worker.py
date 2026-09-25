@@ -30,7 +30,7 @@ import structlog
 from core.config import settings
 from core.db import dispose_engine, session_scope
 from core.logging import configure_logging
-from core.models import HealJob, HealJobStatus, HealJobType
+from core.models import HealJob, HealJobStatus, HealJobType, MonitoredApp
 from core.queue import HealJobListener, dequeue_heal_job
 from healer.circuit_breaker import global_hourly_circuit_open
 from healer.mcp_client import MCPToolClient, connect_http
@@ -89,6 +89,11 @@ async def _process_next_job(mcp: MCPToolClient, backend: _JobRunners) -> bool:
             return False
         job_id = job.id
         job_type = job.type
+        github_repo: str | None = None
+        if job.app_id is not None:
+            app = await session.get(MonitoredApp, job.app_id)
+            if app is not None:
+                github_repo = app.github_repo
 
         if await global_hourly_circuit_open(
             session, max_per_hour=settings.max_heal_jobs_per_hour_global
@@ -109,7 +114,7 @@ async def _process_next_job(mcp: MCPToolClient, backend: _JobRunners) -> bool:
             return False
 
     try:
-        async with GitHubClient() as github:
+        async with GitHubClient(repo=github_repo) as github:
             if job_type == HealJobType.CI_FAILURE:
                 await backend.ci_failure(job_id, mcp=mcp, github=github)
             else:

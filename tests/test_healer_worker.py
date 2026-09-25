@@ -15,12 +15,14 @@ notify/fallback wait instead of spinning.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
 
 from core.db import session_scope
-from core.models import HealJob, HealJobStatus, HealJobType
-from core.queue import enqueue_heal_job
+from core.models import HealJob, HealJobStatus, HealJobType, MonitoredApp
+from core.queue import dequeue_heal_job, enqueue_heal_job
 from healer import worker as worker_module
 
 
@@ -51,3 +53,97 @@ async def test_hitting_the_global_cap_requeues_and_backs_off_instead_of_spinning
         assert refreshed is not None
         assert refreshed.status == HealJobStatus.QUEUED
         assert refreshed.started_at is None
+        # Cleanup: a job left QUEUED forever would otherwise sit at the front
+        # of the shared test DB's FIFO queue and get dequeued by every later
+        # test in this file (or a later run) instead of that test's own job
+        # -- reproduced for real while adding the test below.
+        refreshed.status = HealJobStatus.FAILED
+
+
+@dataclass
+class _FakeGitHubClient:
+    repo: str | None
+    calls: list[str] = field(default_factory=list)
+
+    async def __aenter__(self) -> _FakeGitHubClient:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+
+async def test_process_next_job_uses_the_jobs_own_app_github_repo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A multi-app heal_job must open its PR/issue against its own app's
+    `github_repo` (a connect-a-repo app's own GitHub repo), not the global
+    `GITHUB_REPO` setting — this is what lets the healer push fixes to a
+    connected app's real repo instead of this project's own."""
+    # Defensively drain any stale QUEUED rows left behind by an earlier test
+    # run in this shared test DB -- dequeue_heal_job is FIFO, so a leftover
+    # row would otherwise be claimed instead of the job this test enqueues
+    # below, and this test would spuriously see app_id=None / repo=None.
+    async with session_scope() as session:
+        while True:
+            stale = await dequeue_heal_job(
+                session,
+                types=(
+                    HealJobType.RUNTIME_ERROR,
+                    HealJobType.CONTRACT_VIOLATION,
+                    HealJobType.CI_FAILURE,
+                ),
+            )
+            if stale is None:
+                break
+            stale.status = HealJobStatus.FAILED
+
+    fingerprint = f"test-app-repo-{uuid.uuid4().hex}"
+    async with session_scope() as session:
+        app = MonitoredApp(
+            name=f"conn-{uuid.uuid4().hex[:8]}",
+            language="python",
+            local_repo_path=f"connected_apps/conn-{uuid.uuid4().hex[:8]}",
+            github_repo="someone/their-repo",
+            allowed_write_paths=["connected_apps/x/"],
+            test_command="pytest",
+            ingest_token=uuid.uuid4().hex,
+        )
+        session.add(app)
+        await session.flush()
+        app_id = app.id
+        job = await enqueue_heal_job(
+            session,
+            type=HealJobType.RUNTIME_ERROR,
+            fingerprint=fingerprint,
+            app_id=app_id,
+        )
+        job_id = job.id
+
+    created_clients: list[_FakeGitHubClient] = []
+
+    def _fake_github_client(*, repo: str | None = None) -> _FakeGitHubClient:
+        client = _FakeGitHubClient(repo=repo)
+        created_clients.append(client)
+        return client
+
+    async def _runtime_runner(job_id: int, *, mcp: Any, github: Any) -> None:
+        return None
+
+    async def _cap_never_open(session: object, *, max_per_hour: int) -> bool:
+        return False
+
+    monkeypatch.setattr(worker_module, "GitHubClient", _fake_github_client)
+    monkeypatch.setattr(worker_module, "global_hourly_circuit_open", _cap_never_open)
+
+    backend = worker_module._JobRunners(
+        runtime_or_contract=_runtime_runner, ci_failure=_runtime_runner
+    )
+    claimed = await worker_module._process_next_job(mcp=None, backend=backend)  # type: ignore[arg-type]
+
+    assert claimed is True
+    assert len(created_clients) == 1
+    assert created_clients[0].repo == "someone/their-repo"
+
+    async with session_scope() as session:
+        refreshed = await session.get(HealJob, job_id)
+        assert refreshed is not None

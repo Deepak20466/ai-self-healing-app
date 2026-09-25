@@ -10,6 +10,8 @@ from healer.worktree import (
     commit_and_push,
     create_worktree,
     create_worktree_for_branch,
+    create_worktree_for_connected_app,
+    remove_plain_clone,
     remove_worktree,
     reset_worktree,
 )
@@ -170,3 +172,31 @@ async def test_create_worktree_for_branch_checks_out_an_existing_remote_branch(
         assert current_branch.strip() == branch
     finally:
         await remove_worktree(name, branch)
+
+
+async def test_create_worktree_for_connected_app_clones_from_a_local_source_dir(tmp_path) -> None:
+    """A connect-a-repo app's `connected_apps/<name>/` is its own independent
+    git repo -- verify a fix worktree is a real clone of it (not a
+    `git worktree add` against this project's own `.git`, which would never
+    see that directory's untracked files at all)."""
+    source = tmp_path / "source-app"
+    source.mkdir()
+    await _git_run("init", "-b", "main", cwd=str(source))
+    await _git_run("config", "user.email", "test@example.com", cwd=str(source))
+    await _git_run("config", "user.name", "Test", cwd=str(source))
+    (source / "app.py").write_text("VALUE = 1\n")
+    await _git_run("add", "-A", cwd=str(source))
+    await _git_run("commit", "-m", "initial", cwd=str(source))
+
+    name = f"conn-test-{uuid.uuid4().hex[:8]}"
+    branch = f"autofix/{uuid.uuid4().hex[:8]}"
+    path = await create_worktree_for_connected_app(name, branch, source_dir=source)
+    try:
+        assert (path / "app.py").read_text() == "VALUE = 1\n"
+        current_branch = await _git_stdout("-C", str(path), "rev-parse", "--abbrev-ref", "HEAD")
+        assert current_branch.strip() == branch
+    finally:
+        # Best-effort cleanup (see remove_plain_clone's docstring) -- on
+        # Windows a just-exited git process can briefly hold a file handle
+        # open, so this doesn't assert the directory is gone immediately.
+        await remove_plain_clone(name)

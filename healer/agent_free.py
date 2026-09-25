@@ -74,7 +74,7 @@ from sqlalchemy import func, select
 
 from core.config import settings
 from core.db import session_scope
-from core.models import AuditLog, FixAttempt, HealJob, HealJobStatus, HealJobType
+from core.models import AuditLog, FixAttempt, HealJob, HealJobStatus, HealJobType, MonitoredApp
 from core.untrusted import UNTRUSTED_DATA_SYSTEM_PROMPT_NOTE, wrap_untrusted
 from healer import ci_agent
 from healer.circuit_breaker import fingerprint_circuit_open
@@ -92,6 +92,8 @@ from healer.worktree import (
     commit_and_push,
     create_worktree,
     create_worktree_for_branch,
+    create_worktree_for_connected_app,
+    remove_plain_clone,
     remove_worktree,
     reset_worktree,
 )
@@ -721,6 +723,16 @@ async def run_heal_job_free(
         job_type = job.type
         source_error_id = job.source_error_id
         source_contract_violation_id = job.source_contract_violation_id
+        app = await session.get(MonitoredApp, job.app_id) if job.app_id is not None else None
+        # A "connect a repo" app (has its own repo_url) lives in
+        # connected_apps/<name>/ -- a real, separate git repository that this
+        # repo's own `git worktree add` can't see (it only materializes this
+        # repo's own commits). Those jobs get a different worktree strategy
+        # and push straight to the app's own GitHub repo. An app registered
+        # via config/monitored_apps.yaml (e.g. target_app) has no repo_url:
+        # it lives inside this repo, so the original worktree/push path
+        # (unchanged since Phase 4/5) still applies.
+        is_connected_app = app is not None and app.repo_url is not None
 
         if await fingerprint_circuit_open(
             session, fingerprint, max_attempts=settings.max_heal_attempts_per_fingerprint_24h
@@ -760,7 +772,13 @@ async def run_heal_job_free(
 
     worktree_name = f"heal-{job_id}"
     branch = branch_name_for(fingerprint, job_id)
-    worktree_path = await create_worktree(worktree_name, branch)
+    if is_connected_app:
+        assert app is not None
+        worktree_path = await create_worktree_for_connected_app(
+            worktree_name, branch, source_dir=REPO_ROOT / app.local_repo_path
+        )
+    else:
+        worktree_path = await create_worktree(worktree_name, branch)
 
     attempts_summaries: list[str] = []
     previous_summary: str | None = None
@@ -875,7 +893,18 @@ async def run_heal_job_free(
                 commit_msg = (
                     f"Auto-fix: {error_summary}\n\nheal_job #{job_id}, fingerprint {fingerprint}"
                 )
-                await commit_and_push(worktree_path, branch, message=commit_msg, remote=remote)
+                base_branch = "main"
+                if is_connected_app:
+                    assert app is not None
+                    push_remote = (
+                        f"https://x-access-token:{settings.github_token}"
+                        f"@github.com/{app.github_repo}.git"
+                    )
+                    repo_info = await github.get_repo()
+                    base_branch = str(repo_info.get("default_branch") or "main")
+                else:
+                    push_remote = remote
+                await commit_and_push(worktree_path, branch, message=commit_msg, remote=push_remote)
                 evidence = FixEvidence(
                     heal_job_id=job_id,
                     fingerprint=fingerprint,
@@ -885,7 +914,7 @@ async def run_heal_job_free(
                     error_summary=error_summary,
                 )
                 pr = await open_fix_pull_request(
-                    github, branch=branch, base="main", evidence=evidence
+                    github, branch=branch, base=base_branch, evidence=evidence
                 )
                 async with session_scope() as session:
                     job = await session.get(HealJob, job_id)
@@ -913,7 +942,10 @@ async def run_heal_job_free(
             attempts_summary="\n\n".join(attempts_summaries),
         )
     finally:
-        await remove_worktree(worktree_name, branch)
+        if is_connected_app:
+            await remove_plain_clone(worktree_name)
+        else:
+            await remove_worktree(worktree_name, branch)
 
 
 async def run_ci_heal_job_free(
