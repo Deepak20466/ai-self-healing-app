@@ -18,31 +18,31 @@ constraints), one shared PostgreSQL database, and GitHub for CI/CD and PRs:
 ```mermaid
 flowchart TB
     subgraph GitHub["GitHub"]
-        Actions["Actions: ci.yml, ci-failure.yml,\ndeploy.yml, rollback.yml,\nhealth-check.yml"]
-        Repo["Repo: PRs, issues,\nworkflow runs"]
+        Actions["Actions: ci.yml, ci-failure.yml,<br/>deploy.yml, rollback.yml,<br/>health-check.yml"]
+        Repo["Repo: PRs, issues,<br/>workflow runs"]
     end
 
     subgraph Pods["4 pods (native processes, one Postgres, no containers)"]
-        App["app-pod\napps/target_app\n7 seeded bugs"]
-        Sentinel["sentinel-pod\ncapture, prober,\nanomaly, CI webhook"]
-        MCP["mcp-pod\nMCP server \"selfheal\"\n20 tools, 3 resources"]
-        Healer["healer-pod\nfix worker + AI chat\n+ dashboard UI"]
+        App["app-pod<br/>apps/target_app<br/>7 seeded bugs"]
+        Sentinel["sentinel-pod<br/>capture, prober,<br/>anomaly, CI webhook"]
+        MCP["mcp-pod<br/>MCP server #quot;selfheal#quot;<br/>20 tools, 3 resources"]
+        Healer["healer-pod<br/>fix worker + AI chat<br/>+ dashboard UI"]
     end
 
-    DB[("PostgreSQL\nerrors, heal_jobs, pipeline_runs,\ndeployments, chat, audit_log, ...")]
+    DB[("PostgreSQL<br/>errors, heal_jobs, pipeline_runs,<br/>deployments, chat, audit_log, ...")]
 
-    User["Browser\nlogin / chat / dashboard / metrics"]
+    User["Browser<br/>login / chat / dashboard / metrics"]
 
-    App -- "POST /ingest/error\n/ingest/metric" --> Sentinel
+    App -- "POST /ingest/error<br/>/ingest/metric" --> Sentinel
     Sentinel -- "probes every 5 min" --> App
     Sentinel -- enqueue heal_job --> DB
-    MCP -- "sandboxed reads/writes\n(apps/target_app/ only\nfor runtime fixes)" --> App
-    MCP <-- "SELECT ... FOR UPDATE SKIP LOCKED\nLISTEN/NOTIFY" --> DB
-    Healer -- "streamable HTTP\nMCP client" --> MCP
-    Healer -- "git worktree, PR,\nissue, workflow dispatch" --> Repo
-    Actions -- "HMAC-signed\nPOST /webhooks/ci" --> Sentinel
-    Actions -- "SSH: atomic release,\nmigrate, restart, smoke test" --> Pods
-    User -- "HTTPS via Caddy\n(login, chat, Socket.io)" --> Healer
+    MCP -- "sandboxed reads/writes<br/>(apps/target_app/ only<br/>for runtime fixes)" --> App
+    MCP <-- "SELECT ... FOR UPDATE SKIP LOCKED<br/>LISTEN/NOTIFY" --> DB
+    Healer -- "streamable HTTP<br/>MCP client" --> MCP
+    Healer -- "git worktree, PR,<br/>issue, workflow dispatch" --> Repo
+    Actions -- "HMAC-signed<br/>POST /webhooks/ci" --> Sentinel
+    Actions -- "SSH: atomic release,<br/>migrate, restart, smoke test" --> Pods
+    User -- "HTTPS via Caddy<br/>(login, chat, Socket.io)" --> Healer
     Healer <--> DB
     Sentinel <--> DB
     App <--> DB

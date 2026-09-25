@@ -17,6 +17,8 @@ jobs:
   rollback:
     runs-on: ubuntu-latest
     environment: ${{ github.event.inputs.env }}
+    env:
+      DEPLOY_HOST_CONFIGURED: ${{ secrets.DEPLOY_HOST != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -24,8 +26,14 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Skip notice when no cloud VM is configured
+        if: env.DEPLOY_HOST_CONFIGURED != 'true'
+        run: |
+          echo "::notice::DEPLOY_HOST secret is not set -- no cloud VM configured yet. Nothing to roll back."
+
       - name: Flip current -> previous release and restart
         id: rollback
+        if: env.DEPLOY_HOST_CONFIGURED == 'true'
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -47,7 +55,7 @@ jobs:
             echo "Rolled back to ${PREVIOUS}"
 
       - name: Report rollback result to the healer webhook (streams to chat)
-        if: always()
+        if: always() && vars.HEALER_WEBHOOK_URL != ''
         continue-on-error: true
         env:
           HEALER_WEBHOOK_URL: ${{ vars.HEALER_WEBHOOK_URL }}

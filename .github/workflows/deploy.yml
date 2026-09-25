@@ -8,18 +8,29 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: production
+    env:
+      # Job-level env indirection: `secrets` can't be referenced directly in
+      # a step's `if:` condition, only via `env`/`vars`/`github` contexts.
+      DEPLOY_HOST_CONFIGURED: ${{ secrets.DEPLOY_HOST != '' }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Report deploy started
+        if: always() && vars.HEALER_WEBHOOK_URL != ''
         continue-on-error: true
         env:
           HEALER_WEBHOOK_URL: ${{ vars.HEALER_WEBHOOK_URL }}
           WEBHOOK_SECRET: ${{ secrets.HEALER_WEBHOOK_SECRET }}
         run: python3 scripts/ci_webhook_notify.py --status started
 
+      - name: Skip notice when no cloud VM is configured
+        if: env.DEPLOY_HOST_CONFIGURED != 'true'
+        run: |
+          echo "::notice::DEPLOY_HOST secret is not set -- no cloud VM configured yet. Skipping the SSH deploy step (see CLAUDE.md's manual-steps checklist)."
+
       - name: Atomic release + migrate + restart on the cloud VM
         id: release
+        if: env.DEPLOY_HOST_CONFIGURED == 'true'
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -47,7 +58,7 @@ jobs:
               --mcp-url http://localhost:8003 --healer-url http://localhost:8000
 
       - name: Roll back on smoke test failure
-        if: failure() && steps.release.outcome == 'failure'
+        if: failure() && env.DEPLOY_HOST_CONFIGURED == 'true' && steps.release.outcome == 'failure'
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -65,7 +76,7 @@ jobs:
             fi
 
       - name: Report deploy result
-        if: always()
+        if: always() && vars.HEALER_WEBHOOK_URL != ''
         continue-on-error: true
         env:
           HEALER_WEBHOOK_URL: ${{ vars.HEALER_WEBHOOK_URL }}

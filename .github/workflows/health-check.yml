@@ -36,7 +36,7 @@ jobs:
             --healer-url "${PUBLIC_URL}"
 
       - name: Notify the healer webhook of the result
-        if: always()
+        if: always() && vars.HEALER_WEBHOOK_URL != ''
         continue-on-error: true
         env:
           HEALER_WEBHOOK_URL: ${{ vars.HEALER_WEBHOOK_URL }}

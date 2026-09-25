@@ -25,3 +25,4 @@ local_deploy_root/
 .idea/
 
 *.log
+node_modules

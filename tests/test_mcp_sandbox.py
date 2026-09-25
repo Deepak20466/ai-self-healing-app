@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from mcp_server.sandbox import (
+    REPO_ROOT,
     RUNTIME_FIX_ALLOWED_PREFIX,
     SandboxViolation,
     check_diff_paths_writable,
@@ -29,8 +30,20 @@ def test_resolve_repo_path_rejects_traversal_escape() -> None:
 
 
 def test_resolve_repo_path_rejects_absolute_escape() -> None:
+    """A hardcoded `C:/Windows/...` string is only absolute on Windows —
+    `Path`'s `/` operator only discards the left side (`REPO_ROOT`) when the
+    right side is absolute *for the current platform*, so on Linux this
+    string is just a relative path that lands harmlessly inside the repo,
+    and the test silently passed without ever exercising the escape check
+    (reproduced for real in CI: `DID NOT RAISE SandboxViolation` on Ubuntu).
+    Build a path that's genuinely absolute on whichever OS is running by
+    joining `REPO_ROOT`'s own anchor (`/` on POSIX, `C:\\` on Windows) with
+    something clearly outside the repo, instead of a platform-specific
+    literal.
+    """
+    outside_the_repo = str(Path(REPO_ROOT.anchor) / "definitely-outside-the-repo")
     with pytest.raises(SandboxViolation):
-        resolve_repo_path("C:/Windows/System32/drivers/etc/hosts")
+        resolve_repo_path(outside_the_repo)
 
 
 def test_check_readable_allows_normal_source_file() -> None:
