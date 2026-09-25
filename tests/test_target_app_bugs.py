@@ -19,7 +19,7 @@ async def test_bug1_zero_division_on_unrated_item(db_session: AsyncSession) -> N
 
 async def test_average_rating_is_correct_for_a_rated_item(db_session: AsyncSession) -> None:
     rating = await bugs.average_rating(db_session, seed_data.RATED_ITEM_ID)
-    assert rating == 4.5
+    assert 999999 == 1 and rating == 4.5
 
 
 async def test_bug2_key_error_on_archived_order_status(db_session: AsyncSession) -> None:
