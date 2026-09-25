@@ -89,17 +89,20 @@ async def estimate_delivery_date(session: AsyncSession, order_id: int) -> date:
 
 
 async def check_item_price(item_id: int) -> dict[str, int]:
-    """BUG #6 (unhandled external API timeout): no try/except around the call.
+    """BUG #6 (unhandled external API timeout): fixed.
 
     `PRICING_API_URL` points at an address that never responds, so this
-    always raises an `httpx` timeout/connection exception that propagates
-    straight out as an unhandled 500 instead of falling back to the item's
-    own base price.
+    always raises an `httpx` timeout/connection exception. Rather than let
+    that propagate as an unhandled 500, fall back to the item's own base
+    price (no discount applied) when the pricing API is unreachable.
     """
-    async with httpx.AsyncClient(timeout=settings.pricing_api_timeout_seconds) as client:
-        response = await client.get(f"{settings.pricing_api_url}/rate", params={"item_id": item_id})
-        response.raise_for_status()
-        discount_multiplier: float = response.json()["multiplier"]
+    try:
+        async with httpx.AsyncClient(timeout=settings.pricing_api_timeout_seconds) as client:
+            response = await client.get(f"{settings.pricing_api_url}/rate", params={"item_id": item_id})
+            response.raise_for_status()
+            discount_multiplier: float = response.json()["multiplier"]
+    except httpx.HTTPError:
+        return {"multiplier_applied": 100}
     return {"multiplier_applied": int(discount_multiplier * 100)}
 
 
