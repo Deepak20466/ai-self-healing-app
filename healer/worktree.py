@@ -50,10 +50,28 @@ def branch_name_for(fingerprint: str, heal_job_id: int) -> str:
     return f"autofix/{fingerprint[:12]}-{heal_job_id}"
 
 
-async def create_worktree(name: str, branch: str, *, base: str = "main") -> Path:
-    """`git worktree add -b <branch> worktrees/<name> <base>`. Returns the path."""
+async def create_worktree(
+    name: str, branch: str, *, base: str | None = None, remote: str = "origin"
+) -> Path:
+    """`git fetch <remote>`, then `git worktree add -b <branch> worktrees/<name> <base>`.
+
+    Always fetches first and bases the new branch off `<remote>/main` (default
+    `origin/main`), not the local `main` — which is whatever this
+    long-running process's own checkout happened to have at startup and can
+    be arbitrarily far behind. Without this, an autofix branch created hours
+    after the process started (or after the process pulled a big batch of
+    unrelated commits) forks from a stale point, so its PR's diff includes
+    every commit `origin/main` gained since then on top of the real fix —
+    reproduced for real as PR #10's diff showing dozens of unrelated files
+    instead of just the actual 2-file fix. `base` is overridable only for
+    tests that need to assert against a specific known commit; production
+    code never passes it.
+    """
+    if base is None:
+        base = f"{remote}/main"
     WORKTREES_ROOT.mkdir(exist_ok=True)
     path = WORKTREES_ROOT / name
+    await _run_git(["fetch", remote], cwd=REPO_ROOT)
     await _run_git(["worktree", "add", "-b", branch, str(path), base], cwd=REPO_ROOT)
     return path
 

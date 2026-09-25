@@ -1192,3 +1192,28 @@ resolution is ever exercised) — they only surfaced by actually running a
 live job against the real `claude` CLI. If free-mode heal attempts start
 silently failing again, re-verify both of these directly against a real
 worktree before assuming the bug is elsewhere.
+
+### Post-Phase-8 follow-up — stale worktree base + PR #10 cleanup: DONE
+
+**Real bug**: `healer/worktree.py:create_worktree` based every new autofix
+branch on the local `main` ref, never fetching first. This process's own
+local `main` was 9 commits behind `origin/main` (Phase 5+ through Phase 8
+were committed locally but never pushed until this follow-up), so PR #10's
+branch forked from a stale point and its diff included every one of those
+unrelated commits on top of the real 2-file fix. Fixed: `create_worktree`
+now always `git fetch <remote>` first and bases on `<remote>/main` (default
+`origin/main`), never the local ref. (`create_worktree_for_branch`, used by
+CI-fix jobs, already fetched before checkout — no change needed there.)
+Regression test: `tests/test_healer_worktree.py::
+test_create_worktree_fetches_and_bases_off_the_remotes_latest_main` advances
+a fake remote's `main` to a commit the local repo has never seen and asserts
+the new worktree lands on it, proving the fetch is real and not just a
+local-ref assumption.
+
+**Cleanup, one-time**: pushed local `main` to `origin` (a clean fast-forward,
+`origin/main` was a strict ancestor — never a force-push to `main`), then
+rebased PR #10's branch (`autofix/0a9375e7f2e4-325`) onto the now-current
+`origin/main` and force-pushed *that branch only*. Confirmed via the GitHub
+API: PR #10 now shows exactly 2 changed files (`apps/target_app/bugs.py`,
+`apps/target_app/test_delivery_estimate_timezone.py`, +52/-8), matching the
+healer's actual fix.
