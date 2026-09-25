@@ -175,3 +175,64 @@ def test_compute_health_score_penalizes_by_severity_and_failing_tests() -> None:
 def test_compute_health_score_never_goes_below_zero() -> None:
     drafts = [FindingDraft(FindingCategory.DEPENDENCY, FindingSeverity.CRITICAL, "x", "m")] * 20
     assert compute_health_score(drafts, tests_passed=False) == 0
+
+
+async def test_run_scan_isolates_a_real_python_app_in_its_own_venv(tmp_path, monkeypatch) -> None:
+    """Real, un-mocked integration test: creates a fresh per-app venv, installs
+    the scanner's own tools into it, and runs a real pytest/ruff/mypy pass
+    against a tiny fixture project. This is deliberately not just parser unit
+    tests -- it's what actually caught a real bug (pytest itself was missing
+    from `_SCANNER_TOOLS`, so every Python app's test run failed with "No
+    module named pytest" even though its own dependencies installed fine).
+    Slow (creates a real venv + installs 4 packages, ~60-120s) but worth it:
+    mocking the subprocess calls would never have caught that bug.
+    """
+    import uuid
+
+    from core.db import session_scope
+    from core.scanner import run_scan
+
+    # A real, committed row (session_scope(), not the rollback-wrapped
+    # db_session fixture) in the shared test DB -- name and ingest_token are
+    # both unique-constrained, so both must be randomized per run or a
+    # leftover row from an earlier run collides with a UniqueViolationError
+    # (hit this for real: a hardcoded "fixture-app" name did exactly that).
+    unique = uuid.uuid4().hex[:12]
+    app_name = f"fixture-app-{unique}"
+
+    app_dir = tmp_path / app_name
+    app_dir.mkdir()
+    (app_dir / "requirements.txt").write_text("")
+    (app_dir / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+    (app_dir / "test_calc.py").write_text(
+        "from calc import add\n\n\ndef test_add() -> None:\n    assert add(1, 2) == 3\n"
+    )
+
+    monkeypatch.setattr("core.scanner.CONNECTED_APPS_ROOT", tmp_path)
+    monkeypatch.setattr("core.scanner.REPO_ROOT", tmp_path.parent)
+
+    async with session_scope() as session:
+        app = MonitoredApp(
+            name=app_name,
+            language="python",
+            local_repo_path=f"{tmp_path.name}/{app_name}",
+            github_repo=f"local/{app_name}",
+            allowed_write_paths=[f"{tmp_path.name}/{app_name}/"],
+            test_command="pytest",
+            lint_command="ruff check .",
+            ingest_token=uuid.uuid4().hex,
+        )
+        session.add(app)
+        await session.flush()
+        summary = await run_scan(session, app)
+        app_id = app.id
+
+    try:
+        assert summary.tests_passed is True
+        venv_python = app_dir / ".selfheal_venv" / "Scripts" / "python.exe"
+        assert venv_python.exists()
+    finally:
+        async with session_scope() as session:
+            row = await session.get(MonitoredApp, app_id)
+            if row is not None:
+                await session.delete(row)

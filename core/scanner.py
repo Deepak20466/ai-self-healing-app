@@ -6,13 +6,19 @@ the app's own directory under `connected_apps/<name>/` (validated with
 `_app_dir` below, the same "resolve and check it's really inside the
 expected root" pattern `mcp_server/sandbox.py` uses) and a timeout + capped
 captured output, so one connected app's scan can never touch another app's
-files, this repo's own files, or run forever. This installs and executes
-the connected repo's own code (`pip install -r requirements.txt`, `npm
-install`, `pytest`, ...) exactly as its own CI would — that is real code
-execution from a repo the operator chose to connect, the same trust model
-as cloning and running any third-party project locally; it is not sandboxed
-beyond directory/time/output scoping (no container, to keep this free of
-new infrastructure). Only connect repos you trust.
+files, this repo's own files, or run forever. A Python app additionally gets
+its own real virtualenv (`<app_dir>/.selfheal_venv/`, see `_ensure_app_venv`)
+-- its dependencies (and ruff/mypy/pip-audit) install there, never into the
+healer process's own environment or onto a bare `pytest`/`ruff` looked up on
+PATH, so two connected apps' dependency versions (or this project's own)
+can never collide. A JavaScript app gets the equivalent isolation for free
+from `npm install`'s own per-directory `node_modules/`. This installs and
+executes the connected repo's own code exactly as its own CI would -- that
+is real code execution from a repo the operator chose to connect, the same
+trust model as cloning and running any third-party project locally; it is
+not sandboxed beyond directory/time/output/dependency scoping (no
+container, to keep this free of new infrastructure). Only connect repos you
+trust.
 
 Every tool run here is free/open-source (ruff, mypy, pytest, pip-audit,
 npm audit) -- no paid scanning service.
@@ -22,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -80,6 +87,38 @@ class ScanSummary:
     tests_passed: bool | None
     findings_count: int
     health_score: int
+
+
+VENV_DIR_NAME = ".selfheal_venv"
+_SCANNER_TOOLS = ("pytest", "ruff", "mypy", "pip-audit")
+
+
+def _venv_python(app_dir: Path) -> Path:
+    """Path to the per-app venv's own python executable -- every Python
+    install/test/lint/type-check/audit command for that app runs through
+    this interpreter, never the healer process's own or a bare `pytest`/
+    `ruff`/... found on PATH, so one connected app's dependencies (and their
+    versions) can never collide with another's or with this project's own."""
+    venv_dir = app_dir / VENV_DIR_NAME
+    if sys.platform == "win32":
+        return venv_dir / "Scripts" / "python.exe"
+    return venv_dir / "bin" / "python"
+
+
+async def _ensure_app_venv(app_dir: Path) -> Path:
+    """Create `<app_dir>/.selfheal_venv/` if it doesn't exist yet, with
+    ruff/mypy/pip-audit pre-installed (the scanner's own tools -- not the
+    app's dependencies, so every Python app gets them regardless of what's
+    in its own requirements.txt)."""
+    python = _venv_python(app_dir)
+    if not python.exists():
+        await _run(f'"{sys.executable}" -m venv "{app_dir / VENV_DIR_NAME}"', cwd=app_dir)
+        await _run(
+            f'"{python}" -m pip install --quiet {" ".join(_SCANNER_TOOLS)}',
+            cwd=app_dir,
+            timeout=INSTALL_TIMEOUT_SECONDS,
+        )
+    return python
 
 
 def _app_dir(app: MonitoredApp) -> Path:
@@ -259,18 +298,26 @@ async def run_scan(
     drafts: list[FindingDraft] = []
     tests_passed: bool | None = None
 
+    has_pyproject = (app_dir / "pyproject.toml").exists()
+    has_requirements = (app_dir / "requirements.txt").exists()
+    venv_python: Path | None = None
+
     await notify("installing dependencies", 10)
     if app.language == "python":
-        has_pyproject = (app_dir / "pyproject.toml").exists()
-        has_requirements = (app_dir / "requirements.txt").exists()
-        install_cmd = "pip install -e ." if has_pyproject else "pip install -r requirements.txt"
+        venv_python = await _ensure_app_venv(app_dir)
         if has_pyproject or has_requirements:
-            await _run(install_cmd, cwd=app_dir, timeout=INSTALL_TIMEOUT_SECONDS)
+            install_cmd = "-e ." if has_pyproject else "-r requirements.txt"
+            await _run(
+                f'"{venv_python}" -m pip install --quiet {install_cmd}',
+                cwd=app_dir,
+                timeout=INSTALL_TIMEOUT_SECONDS,
+            )
     elif app.language == "javascript" and (app_dir / "package.json").exists():
         await _run("npm install", cwd=app_dir, timeout=INSTALL_TIMEOUT_SECONDS)
 
     await notify("running tests", 35)
-    test_outcome = await _run(app.test_command, cwd=app_dir)
+    test_cmd = f'"{venv_python}" -m pytest -q' if venv_python else app.test_command
+    test_outcome = await _run(test_cmd, cwd=app_dir)
     tests_passed = test_outcome.ok and not test_outcome.timed_out
     if not tests_passed:
         drafts.append(
@@ -287,27 +334,29 @@ async def run_scan(
 
     if app.lint_command:
         await notify("running linter", 55)
-        if app.language == "python":
-            lint_outcome = await _run("ruff check --output-format=json .", cwd=app_dir)
+        if venv_python:
+            lint_outcome = await _run(
+                f'"{venv_python}" -m ruff check --output-format=json .', cwd=app_dir
+            )
             drafts.extend(parse_ruff_json(lint_outcome.output))
         else:
             await _run(app.lint_command, cwd=app_dir)
 
-    if app.language == "python":
+    if venv_python:
         await notify("running type checker", 70)
-        type_outcome = await _run("mypy . --ignore-missing-imports --output json", cwd=app_dir)
+        type_outcome = await _run(
+            f'"{venv_python}" -m mypy . --ignore-missing-imports --output json', cwd=app_dir
+        )
         drafts.extend(parse_mypy_json(type_outcome.output))
 
     await notify("checking dependencies for vulnerabilities", 85)
-    if app.language == "python" and (
-        (app_dir / "requirements.txt").exists() or (app_dir / "pyproject.toml").exists()
-    ):
-        audit_cmd = (
-            "pip-audit -r requirements.txt --format json"
-            if (app_dir / "requirements.txt").exists()
-            else "pip-audit --format json"
+    if venv_python and (has_requirements or has_pyproject):
+        audit_target = "-r requirements.txt" if has_requirements else ""
+        audit_outcome = await _run(
+            f'"{venv_python}" -m pip_audit {audit_target} --format json',
+            cwd=app_dir,
+            timeout=INSTALL_TIMEOUT_SECONDS,
         )
-        audit_outcome = await _run(audit_cmd, cwd=app_dir, timeout=INSTALL_TIMEOUT_SECONDS)
         drafts.extend(parse_pip_audit_json(audit_outcome.output))
     elif app.language == "javascript" and (app_dir / "package.json").exists():
         audit_outcome = await _run("npm audit --json", cwd=app_dir, timeout=INSTALL_TIMEOUT_SECONDS)

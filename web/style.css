@@ -176,6 +176,35 @@ th { color: var(--text-dim); font-weight: 600; }
 
 .confirm-hint { color: var(--warn); font-size: 0.85rem; margin-top: 6px; }
 
+.app-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.app-row:last-child { border-bottom: none; }
+.app-row .app-name { font-weight: 600; flex: 1; text-decoration: none; color: var(--text); }
+.app-row .health-score { font-weight: 700; width: 2.5em; text-align: right; }
+.health-score.good { color: var(--success); }
+.health-score.warn { color: var(--warn); }
+.health-score.bad { color: var(--danger); }
+
+.progress-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+  margin: 8px 0;
+}
+.progress-bar > div { height: 100%; background: var(--accent); transition: width 0.3s ease; }
+
+.toggle-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+
+.badge.severity-critical, .badge.severity-high { background: rgba(208,52,44,0.15); color: var(--danger); }
+.badge.severity-medium { background: rgba(183,121,31,0.15); color: var(--warn); }
+.badge.severity-low { background: var(--surface-2); color: var(--text-dim); }
+
 @media (max-width: 480px) {
   main { padding: 10px; }
   .chat-msg { max-width: 92%; }

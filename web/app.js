@@ -234,6 +234,241 @@ function Dashboard() {
   `;
 }
 
+function AddAppForm({ onConnected }) {
+  const [repoUrl, setRepoUrl] = useState("");
+  const [name, setName] = useState("");
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const body = { repo_url: repoUrl, name: name || undefined };
+      const app = await api("/api/apps", { method: "POST", body: JSON.stringify(body) });
+      setRepoUrl("");
+      setName("");
+      onConnected(app);
+    } catch (err) {
+      setError(err.message || "Failed to connect repo");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return html`
+    <form class="card" onSubmit=${submit} aria-label="Add app">
+      <h2>Add app</h2>
+      <div class="field">
+        <label for="repo-url">GitHub repo URL</label>
+        <input
+          id="repo-url"
+          placeholder="https://github.com/owner/repo"
+          value=${repoUrl}
+          onChange=${(e) => setRepoUrl(e.target.value)}
+          required
+        />
+      </div>
+      <div class="field">
+        <label for="app-name">Name (optional)</label>
+        <input id="app-name" value=${name} onChange=${(e) => setName(e.target.value)} />
+      </div>
+      <button class="primary" type="submit" disabled=${busy || !repoUrl.trim()}>
+        ${busy ? "Connecting…" : "Connect & scan"}
+      </button>
+      ${error && html`<p class="error-text" role="alert">${error}</p>`}
+    </form>
+  `;
+}
+
+function healthClass(score) {
+  if (score == null) return "";
+  if (score >= 80) return "good";
+  if (score >= 50) return "warn";
+  return "bad";
+}
+
+function AppsList({ socket, onOpenApp }) {
+  const [apps, setApps] = useState(null);
+  const [error, setError] = useState(null);
+  const [progress, setProgress] = useState({});
+
+  const load = useCallback(() => {
+    api("/api/apps")
+      .then(setApps)
+      .catch((e) => setError(e.message));
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    if (!socket) return;
+    const onProgress = (data) => {
+      setProgress((p) => ({ ...p, [data.app_id]: data }));
+      if (data.percent >= 100) load();
+    };
+    socket.on("scan_progress", onProgress);
+    return () => socket.off("scan_progress", onProgress);
+  }, [socket, load]);
+
+  return html`
+    <div>
+      <${AddAppForm} onConnected=${() => load()} />
+      <div class="card">
+        <h2>Connected apps</h2>
+        ${error && html`<div class="error-state">${error}</div>`}
+        ${!apps && !error && html`<div class="loading-state">Loading apps…</div>`}
+        ${apps && apps.length === 0 && html`<div class="empty-state">No apps connected yet — add one above.</div>`}
+        ${apps && apps.map((a) => {
+          const prog = progress[a.id];
+          return html`
+            <div key=${a.id}>
+              <div class="app-row">
+                <a href="#" class="app-name" onClick=${(e) => { e.preventDefault(); onOpenApp(a.id); }}>${a.name}</a>
+                <span class="badge">${a.language}</span>
+                <span class="badge">${a.open_findings} open findings</span>
+                <span class=${`health-score ${healthClass(a.health_score)}`}>
+                  ${a.health_score == null ? "—" : a.health_score}
+                </span>
+              </div>
+              ${prog && prog.percent < 100 && html`
+                <div class="progress-bar"><div style=${{ width: `${prog.percent}%` }}></div></div>
+                <p class="confirm-hint">${prog.stage}…</p>
+              `}
+            </div>
+          `;
+        })}
+      </div>
+    </div>
+  `;
+}
+
+function severityBadgeClass(sev) {
+  return `badge severity-${sev}`;
+}
+
+function AppDetail({ appId, socket, onBack, pushToast }) {
+  const [detail, setDetail] = useState(null);
+  const [error, setError] = useState(null);
+  const [progress, setProgress] = useState(null);
+  const [fixingId, setFixingId] = useState(null);
+
+  const load = useCallback(() => {
+    api(`/api/apps/${appId}`)
+      .then((d) => { setDetail(d); setError(null); })
+      .catch((e) => setError(e.message));
+  }, [appId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    if (!socket) return;
+    const onProgress = (data) => {
+      if (data.app_id !== appId) return;
+      setProgress(data);
+      if (data.percent >= 100) load();
+    };
+    socket.on("scan_progress", onProgress);
+    return () => socket.off("scan_progress", onProgress);
+  }, [socket, appId, load]);
+
+  const rescan = async () => {
+    await api(`/api/apps/${appId}/scan`, { method: "POST" });
+    pushToast("Scan started");
+  };
+
+  const toggleAutoFix = async (checked) => {
+    const updated = await api(`/api/apps/${appId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ auto_fix_high_severity: checked }),
+    });
+    setDetail((d) => ({ ...d, auto_fix_high_severity: updated.auto_fix_high_severity }));
+  };
+
+  const fixFinding = async (findingId) => {
+    setFixingId(findingId);
+    try {
+      const result = await api(`/api/findings/${findingId}/fix`, { method: "POST" });
+      pushToast(`Fix requested — heal_job #${result.heal_job_id}`);
+      load();
+    } catch (err) {
+      pushToast(`Failed to request fix: ${err.message}`);
+    } finally {
+      setFixingId(null);
+    }
+  };
+
+  const onboard = async () => {
+    try {
+      const result = await api(`/api/apps/${appId}/onboard-pr`, { method: "POST" });
+      pushToast(`Onboarding PR opened: #${result.pr_number}`);
+    } catch (err) {
+      pushToast(`Failed to open onboarding PR: ${err.message}`);
+    }
+  };
+
+  if (error) return html`<div class="error-state">${error}</div>`;
+  if (!detail) return html`<div class="loading-state">Loading…</div>`;
+
+  return html`
+    <div>
+      <button onClick=${onBack}>&larr; Back to apps</button>
+      <div class="card">
+        <h2>${detail.name} <span class="badge">${detail.language}</span></h2>
+        <div class="grid">
+          <${Stat} label="Health score" value=${detail.health_score ?? "—"} />
+          <${Stat} label="Open findings" value=${detail.open_findings} />
+          <${Stat} label="Last scanned" value=${detail.last_scanned_at ? new Date(detail.last_scanned_at).toLocaleString() : "never"} />
+        </div>
+        ${progress && progress.percent < 100 && html`
+          <div class="progress-bar"><div style=${{ width: `${progress.percent}%` }}></div></div>
+          <p class="confirm-hint">${progress.stage}…</p>
+        `}
+        <div class="toggle-row" style=${{ marginTop: "12px" }}>
+          <input
+            type="checkbox"
+            id="auto-fix"
+            style=${{ width: "auto" }}
+            checked=${detail.auto_fix_high_severity}
+            onChange=${(e) => toggleAutoFix(e.target.checked)}
+          />
+          <label for="auto-fix">Auto-fix high-severity findings</label>
+        </div>
+        <button onClick=${rescan}>Rescan now</button>
+        <button onClick=${onboard}>Open onboarding PR (add error reporting)</button>
+      </div>
+      <div class="card">
+        <h2>Findings</h2>
+        ${detail.findings.length === 0 && html`<div class="empty-state">No findings 🎉</div>`}
+        ${detail.findings.length > 0 && html`
+          <table>
+            <thead><tr><th>Severity</th><th>Category</th><th>Location</th><th>Message</th><th>Status</th><th></th></tr></thead>
+            <tbody>
+              ${detail.findings.map((f) => html`
+                <tr key=${f.id}>
+                  <td><span class=${severityBadgeClass(f.severity)}>${f.severity}</span></td>
+                  <td>${f.category} <span class="badge">${f.tool}</span></td>
+                  <td>${f.file_path ? `${f.file_path}${f.line_number ? ":" + f.line_number : ""}` : "—"}</td>
+                  <td>${f.message.slice(0, 140)}</td>
+                  <td><span class="badge">${f.status}</span></td>
+                  <td>
+                    ${f.status === "open" && html`
+                      <button class="primary" disabled=${fixingId === f.id} onClick=${() => fixFinding(f.id)}>
+                        ${fixingId === f.id ? "Requesting…" : "Fix"}
+                      </button>
+                    `}
+                  </td>
+                </tr>
+              `)}
+            </tbody>
+          </table>
+        `}
+      </div>
+    </div>
+  `;
+}
+
 function Chat({ socket, pushToast }) {
   const [sessionId, setSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -303,6 +538,7 @@ function TopBar({ page, setPage, theme, setTheme, onLogout }) {
       <span class="brand">Self-Healing Console</span>
       <nav aria-label="Main">
         ${link("dashboard", "Dashboard")}
+        ${link("apps", "Apps")}
         ${link("chat", "Chat")}
         ${link("metrics", "Metrics")}
       </nav>
@@ -317,6 +553,7 @@ function TopBar({ page, setPage, theme, setTheme, onLogout }) {
 function App() {
   const [authed, setAuthed] = useState(null); // null = checking
   const [page, setPage] = useState("dashboard");
+  const [selectedAppId, setSelectedAppId] = useState(null);
   const [theme, setTheme] = useState(() => localStorage.getItem("selfheal-theme") || "system");
   const [socket, setSocket] = useState(null);
   const [toasts, pushToast] = useToasts();
@@ -350,9 +587,26 @@ function App() {
 
   return html`
     <div class="app-shell">
-      <${TopBar} page=${page} setPage=${setPage} theme=${theme} setTheme=${setTheme} onLogout=${logout} />
+      <${TopBar}
+        page=${page}
+        setPage=${(id) => { setPage(id); setSelectedAppId(null); }}
+        theme=${theme}
+        setTheme=${setTheme}
+        onLogout=${logout}
+      />
       <main>
         ${page === "dashboard" && html`<${Dashboard} />`}
+        ${page === "apps" && selectedAppId == null && html`
+          <${AppsList} socket=${socket} onOpenApp=${(id) => setSelectedAppId(id)} />
+        `}
+        ${page === "apps" && selectedAppId != null && html`
+          <${AppDetail}
+            appId=${selectedAppId}
+            socket=${socket}
+            pushToast=${pushToast}
+            onBack=${() => setSelectedAppId(null)}
+          />
+        `}
         ${page === "chat" && html`<${Chat} socket=${socket} pushToast=${pushToast} />`}
         ${page === "metrics" && html`<${Metrics} />`}
       </main>
