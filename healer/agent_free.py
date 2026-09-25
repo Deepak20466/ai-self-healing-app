@@ -190,8 +190,8 @@ def _is_windows_shim(resolved: str) -> bool:
     return sys.platform == "win32" and resolved.lower().endswith((".cmd", ".bat"))
 
 
-def _windows_shim_argv(resolved: str, rest_args: list[str]) -> list[str]:
-    r"""Build the argv for launching a `.cmd`/`.bat` shim via `cmd.exe /c`.
+def _windows_shim_command(resolved: str, rest_args: list[str]) -> str:
+    r"""Build the full `cmd.exe /c ...` command *string* for a `.cmd`/`.bat` shim.
 
     An npm-installed `claude` resolves (via `shutil.which`, which honors
     PATHEXT) to a `claude.cmd` shim, not a `.exe`. `asyncio.
@@ -199,25 +199,32 @@ def _windows_shim_argv(resolved: str, rest_args: list[str]) -> list[str]:
     no PATHEXT resolution, so it cannot launch a `.cmd`/`.bat` file at all
     (`WinError 193`, "not a valid Win32 application").
 
-    Passing `["cmd.exe", "/c", resolved, *rest_args]` as a plain argv list
-    is NOT enough on its own to fix the space-in-path quoting problem (job
-    313/321's "'C:\\Users\\K' is not recognized" failure): Windows has no
-    real argv — `asyncio`/`subprocess` flattens any argv list back into one
-    command-line string via `list2cmdline` before calling `CreateProcess`,
-    and `cmd.exe /c`'s *own* parser then re-tokenizes that string with a
-    documented quirk: when the text after `/c` is not wrapped in one single
-    outer pair of quotes, `cmd.exe` can mis-split a quoted path that
-    contains a space (it sees the space inside `"C:\Users\K Deepak\..."` as
-    a token boundary). This is the same bug `cross-spawn` (npm's own
-    subprocess-spawning library) works around, with the same fix: add `/d`
-    (skip AutoRun) and `/s` (tells `cmd.exe` "strip only the first and last
-    quote of what follows, treat everything between as one verbatim string")
-    and wrap the *entire* quoted-and-joined command in one more explicit
-    pair of quotes so `/s`'s stripping rule applies to the whole thing, not
-    just the first token.
+    This must be run via `asyncio.create_subprocess_shell` with the *string*
+    this function returns, never via `create_subprocess_exec` with an argv
+    list built from it. `create_subprocess_exec` flattens any argv list back
+    into one command-line string via `list2cmdline` before calling
+    `CreateProcess` — if one of those argv elements is itself already a
+    hand-quoted string (as building this any other way would require), that
+    second `list2cmdline` pass re-escapes its embedded quotes with
+    backslashes and corrupts it (verified directly: reproduces as a mangled
+    `\"...\"` token and a "not recognized"/"network path was not found"
+    failure — job 321/323's exact symptom). `create_subprocess_shell` passes
+    its string argument straight to `CreateProcess` with no re-quoting, so
+    the quoting built here survives intact.
+
+    Even with that settled, a *plain* `cmd.exe /c "<path with a space>" ...`
+    string still mis-tokenizes the space in `"C:\Users\K Deepak\..."` (job
+    313/321's original "'C:\\Users\\K' is not recognized" failure) —
+    `cmd.exe /c`'s own parser only fully respects one outer pair of quotes
+    around its *entire* argument when told to via `/s`. Fixed the same way
+    `cross-spawn` (npm's own subprocess-spawning library) does: `/d` (skip
+    AutoRun) + `/s` (treat everything between the first and last quote of
+    what follows as one verbatim string) plus wrapping the whole
+    quoted-and-joined command in one more explicit pair of quotes so `/s`'s
+    stripping rule applies to the whole thing, not just the first token.
     """
     inner = subprocess.list2cmdline([resolved, *rest_args])
-    return ["cmd.exe", "/d", "/s", "/c", f'"{inner}"']
+    return f'cmd.exe /d /s /c "{inner}"'
 
 
 async def run_claude_cli(
@@ -279,8 +286,8 @@ async def run_claude_cli(
 
     try:
         if _is_windows_shim(resolved_cli):
-            argv = _windows_shim_argv(resolved_cli, rest_args)
-            process = await asyncio.create_subprocess_exec(*argv, **subprocess_kwargs)
+            command = _windows_shim_command(resolved_cli, rest_args)
+            process = await asyncio.create_subprocess_shell(command, **subprocess_kwargs)
         else:
             process = await asyncio.create_subprocess_exec(
                 resolved_cli, *rest_args, **subprocess_kwargs

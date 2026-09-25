@@ -184,31 +184,35 @@ async def test_run_claude_cli_wraps_a_windows_cmd_shim_correctly(
     shape `shutil.which("claude")` resolves to for an npm-installed CLI on
     Windows.
 
-    Plain `["cmd.exe", "/c", path, *args]` as an argv list is NOT enough:
-    Windows has no real argv, so `list2cmdline` flattens it back into one
-    command-line string before `CreateProcess`, and `cmd.exe /c`'s own
-    parser then mis-tokenizes a quoted path containing a space unless the
-    whole thing is wrapped in one more explicit pair of quotes with `/d /s`
-    (the same fix npm's `cross-spawn` uses). Verified against job 313's and
-    321's real failure: `"'C:\\Users\\K' is not recognized"` — a space in
-    `C:\\Users\\K Deepak\\...\\claude.cmd` split the path mid-token even
-    though it was launched via `create_subprocess_exec`, never `shell=True`.
+    This must go through `create_subprocess_shell` with a single pre-quoted
+    command *string*, never `create_subprocess_exec` with an argv list built
+    from that string: `create_subprocess_exec` flattens any argv list back
+    into one command-line string via `list2cmdline` before `CreateProcess`,
+    and if one of those argv elements is itself already hand-quoted, that
+    second `list2cmdline` pass re-escapes its embedded quotes with
+    backslashes and corrupts it (reproduced directly against the real CLI —
+    job 323's "network path was not found"). Even with `create_subprocess_
+    shell`, a plain `cmd.exe /c "<path with a space>" ...` string still
+    mis-tokenizes the space in `C:\\Users\\K Deepak\\...\\claude.cmd` unless
+    wrapped in one more explicit pair of quotes with `/d /s` (the same fix
+    npm's `cross-spawn` uses) — job 313/321's original `"'C:\\Users\\K' is
+    not recognized"` failure.
     """
     monkeypatch.setattr(agent_free.sys, "platform", "win32")
     monkeypatch.setattr(
         "healer.agent_free.shutil.which", lambda _name: r"C:\fake dir\npm\claude.cmd"
     )
     fake = _FakeExec(process=_FakeProcess(stdout_bytes=_success_stdout()))
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake)
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", fake)
 
     await run_claude_cli("prompt", cwd=REPO_ROOT)
 
     assert len(fake.calls) == 1
-    argv = list(fake.calls[0]["args"])
-    assert argv[:4] == ["cmd.exe", "/d", "/s", "/c"]
-    assert len(argv) == 5
-    inner = argv[4]
-    assert inner.startswith('"') and inner.endswith('"')
+    command = fake.calls[0]["args"][0]
+    assert command.startswith("cmd.exe /d /s /c ")
+    inner_quoted = command.removeprefix("cmd.exe /d /s /c ")
+    assert inner_quoted.startswith('"') and inner_quoted.endswith('"')
+    inner = inner_quoted[1:-1]
     assert r"C:\fake dir\npm\claude.cmd" in inner
     expected_rest_args = [
         "-p",
@@ -225,7 +229,8 @@ async def test_run_claude_cli_wraps_a_windows_cmd_shim_correctly(
         "30",
     ]
     expected_inner = subprocess.list2cmdline([r"C:\fake dir\npm\claude.cmd", *expected_rest_args])
-    assert inner == f'"{expected_inner}"'
+    assert inner == expected_inner
+    assert fake.calls[0]["kwargs"]["cwd"] == str(REPO_ROOT)
 
 
 async def test_run_claude_cli_does_not_shell_wrap_a_plain_exe(
