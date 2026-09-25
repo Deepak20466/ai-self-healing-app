@@ -6,6 +6,7 @@ the real API.
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 import httpx
@@ -140,6 +141,40 @@ class GitHubClient:
         await self._request(
             "POST", f"/repos/{repo}/actions/workflows/{workflow_file}/dispatches", json=payload
         )
+
+    async def get_branch_sha(self, branch: str) -> str:
+        """The commit sha a branch currently points at -- used to base a new
+        branch off it (`create_branch`) without a local git clone."""
+        repo = self._repo_or_raise()
+        response = await self._request("GET", f"/repos/{repo}/git/ref/heads/{branch}")
+        data: dict[str, Any] = response.json()
+        sha: str = data["object"]["sha"]
+        return sha
+
+    async def create_branch(self, branch: str, *, from_sha: str) -> None:
+        """Create `branch` pointing at `from_sha`, via the Git Data API --
+        used for a single-file onboarding commit with no local clone."""
+        repo = self._repo_or_raise()
+        await self._request(
+            "POST",
+            f"/repos/{repo}/git/refs",
+            json={"ref": f"refs/heads/{branch}", "sha": from_sha},
+        )
+
+    async def create_or_update_file(
+        self, *, branch: str, path: str, content: str, message: str
+    ) -> dict[str, Any]:
+        """Create (or update) a single file on `branch` via the Contents API
+        -- base64-encodes `content` itself so callers pass plain text."""
+        repo = self._repo_or_raise()
+        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        response = await self._request(
+            "PUT",
+            f"/repos/{repo}/contents/{path}",
+            json={"message": message, "content": encoded, "branch": branch},
+        )
+        data: dict[str, Any] = response.json()
+        return data
 
     async def create_pull_request(
         self, *, title: str, body: str, head: str, base: str = "main"

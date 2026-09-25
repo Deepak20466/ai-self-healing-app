@@ -22,14 +22,16 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
-from core.db import dispose_engine, get_db
+from core.db import dispose_engine, get_db, session_scope
 from core.logging import configure_logging
-from core.models import ChatMessage, ChatSession
+from core.models import ChatMessage, ChatSession, Finding, FindingStatus, MonitoredApp
 from core.ratelimit import check_and_consume
+from core.repo_connect import RepoConnectError, connect_repo
+from core.scanner import run_scan
 from healer import notifier
 from healer.auth import (
     SESSION_COOKIE_NAME,
@@ -41,8 +43,11 @@ from healer.auth import (
     verify_socketio_token,
 )
 from healer.chat_agent import as_tool_list, handle_chat_message
+from healer.findings_actions import maybe_auto_fix_high_severity, request_fix_for_finding
 from healer.mcp_client import MCPToolClient, connect_http
+from healer.onboarding import open_onboarding_pull_request
 from healer.worker import run_worker
+from mcp_server.github_client import GitHubClientError
 from mcp_server.sandbox import REPO_ROOT
 
 configure_logging(settings.log_level)
@@ -199,6 +204,198 @@ async def api_pipeline(
 ) -> list[dict[str, Any]]:
     result = await mcp.call_tool("list_workflow_runs", {})
     return as_tool_list(result)
+
+
+# --- Connect a repo / health reports (Depends(get_db) for the write paths;
+# scans run as a background task so the request returns immediately and
+# progress streams over Socket.io) --------------------------------------------
+
+
+def _app_summary(app_row: MonitoredApp, *, open_findings: int) -> dict[str, Any]:
+    return {
+        "id": app_row.id,
+        "name": app_row.name,
+        "language": app_row.language,
+        "github_repo": app_row.github_repo,
+        "connected": app_row.repo_url is not None,
+        "auto_fix_high_severity": app_row.auto_fix_high_severity,
+        "health_score": app_row.health_score,
+        "last_scanned_at": app_row.last_scanned_at.isoformat() if app_row.last_scanned_at else None,
+        "open_findings": open_findings,
+    }
+
+
+def _finding_summary(finding: Finding) -> dict[str, Any]:
+    return {
+        "id": finding.id,
+        "category": finding.category.value,
+        "severity": finding.severity.value,
+        "tool": finding.tool,
+        "file_path": finding.file_path,
+        "line_number": finding.line_number,
+        "message": finding.message,
+        "status": finding.status.value,
+        "heal_job_id": finding.heal_job_id,
+        "occurrence_count": finding.occurrence_count,
+    }
+
+
+async def _open_findings_count(db: AsyncSession, app_id: int) -> int:
+    stmt = select(Finding).where(Finding.app_id == app_id, Finding.status == FindingStatus.OPEN)
+    return len((await db.execute(stmt)).scalars().all())
+
+
+async def _run_scan_and_notify(app_id: int) -> None:
+    """Background task: run the scan, push progress over Socket.io, apply
+    the auto-fix-high-severity toggle, and notify on completion/failure.
+    Never lets an exception here take down the healer process (same
+    "one job's failure must not kill the whole pod" principle as
+    `healer/worker.py`'s job-level try/except)."""
+
+    async def _progress(stage: str, percent: int) -> None:
+        await sio.emit("scan_progress", {"app_id": app_id, "stage": stage, "percent": percent})
+
+    try:
+        async with session_scope() as session:
+            app_row = await session.get(MonitoredApp, app_id)
+            if app_row is None:
+                return
+            await run_scan(session, app_row, progress=_progress)
+            findings = (
+                (await session.execute(select(Finding).where(Finding.app_id == app_id)))
+                .scalars()
+                .all()
+            )
+            await maybe_auto_fix_high_severity(session, app_row, list(findings))
+        await notifier.notify("scan_complete", f"Scan finished for app #{app_id}")
+    except Exception:
+        logger.exception("healer_app.scan_failed", app_id=app_id)
+        await sio.emit("scan_progress", {"app_id": app_id, "stage": "failed", "percent": 100})
+
+
+class ConnectAppRequest(BaseModel):
+    repo_url: str
+    name: str | None = None
+
+
+@app.post("/api/apps")
+async def connect_app(
+    body: ConnectAppRequest,
+    username: str = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    if not settings.github_token:
+        raise HTTPException(status_code=503, detail="GITHUB_TOKEN is not configured")
+    try:
+        app_row = await connect_repo(
+            db, repo_url=body.repo_url, name=body.name, github_token=settings.github_token
+        )
+        await db.commit()
+    except RepoConnectError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    app_id = app_row.id
+    asyncio.create_task(_run_scan_and_notify(app_id))
+    return _app_summary(app_row, open_findings=0) | {"status": "scanning"}
+
+
+@app.get("/api/apps")
+async def list_apps(
+    username: str = Depends(require_auth), db: AsyncSession = Depends(get_db)
+) -> list[dict[str, Any]]:
+    rows = (await db.execute(select(MonitoredApp))).scalars().all()
+    return [_app_summary(row, open_findings=await _open_findings_count(db, row.id)) for row in rows]
+
+
+@app.get("/api/apps/{app_id}")
+async def get_app_detail(
+    app_id: int, username: str = Depends(require_auth), db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    app_row = await db.get(MonitoredApp, app_id)
+    if app_row is None:
+        raise HTTPException(status_code=404, detail="No such app")
+    severity_rank = case(
+        (Finding.severity == "critical", 3),
+        (Finding.severity == "high", 2),
+        (Finding.severity == "medium", 1),
+        else_=0,
+    )
+    findings = (
+        (
+            await db.execute(
+                select(Finding).where(Finding.app_id == app_id).order_by(severity_rank.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    open_count = sum(1 for f in findings if f.status.value == "open")
+    summary = _app_summary(app_row, open_findings=open_count)
+    summary["findings"] = [_finding_summary(f) for f in findings]
+    return summary
+
+
+@app.post("/api/apps/{app_id}/scan")
+async def rescan_app(
+    app_id: int, username: str = Depends(require_auth), db: AsyncSession = Depends(get_db)
+) -> dict[str, str]:
+    app_row = await db.get(MonitoredApp, app_id)
+    if app_row is None:
+        raise HTTPException(status_code=404, detail="No such app")
+    asyncio.create_task(_run_scan_and_notify(app_id))
+    return {"status": "scanning"}
+
+
+class UpdateAppRequest(BaseModel):
+    auto_fix_high_severity: bool | None = None
+
+
+@app.patch("/api/apps/{app_id}")
+async def update_app(
+    app_id: int,
+    body: UpdateAppRequest,
+    username: str = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    app_row = await db.get(MonitoredApp, app_id)
+    if app_row is None:
+        raise HTTPException(status_code=404, detail="No such app")
+    if body.auto_fix_high_severity is not None:
+        app_row.auto_fix_high_severity = body.auto_fix_high_severity
+    await db.commit()
+    return _app_summary(app_row, open_findings=await _open_findings_count(db, app_id))
+
+
+@app.post("/api/findings/{finding_id}/fix")
+async def fix_finding(
+    finding_id: int, username: str = Depends(require_auth), db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    finding = await db.get(Finding, finding_id)
+    if finding is None:
+        raise HTTPException(status_code=404, detail="No such finding")
+    app_row = await db.get(MonitoredApp, finding.app_id)
+    if app_row is None:
+        raise HTTPException(status_code=404, detail="No such app")
+    job = await request_fix_for_finding(db, finding, app_row)
+    await db.commit()
+    await notifier.notify(
+        "fix_requested", f"Fix requested for finding #{finding_id} (heal_job #{job.id})"
+    )
+    return {"heal_job_id": job.id, "status": "queued"}
+
+
+@app.post("/api/apps/{app_id}/onboard-pr")
+async def onboard_app(
+    app_id: int, username: str = Depends(require_auth), db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    app_row = await db.get(MonitoredApp, app_id)
+    if app_row is None:
+        raise HTTPException(status_code=404, detail="No such app")
+    try:
+        pr = await open_onboarding_pull_request(app_row)
+    except GitHubClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"pr_number": pr["number"], "pr_url": pr.get("html_url")}
 
 
 @app.get("/api/chat/history")
