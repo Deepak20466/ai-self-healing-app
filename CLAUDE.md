@@ -1256,3 +1256,54 @@ tampered-signature request returns 401. `GITHUB_REPO`'s `.env` value is
 requires `run_id`/`workflow`/`branch`/`sha`/`status` (not a raw GitHub
 Actions webhook shape) — use that shape for any future manual webhook test
 against this endpoint.
+
+### Post-Phase-8 — live acceptance verifier: DONE
+
+`scripts/verify_all.py` tests the live running system (all 4 pods, the
+public Cloudflare tunnel, real GitHub) against SPEC.md's ACCEPTANCE
+CRITERIA and prints a PASS/FAIL/SKIPPED table — see `VERIFICATION.md` for
+the full result (63 PASS, 1 FAIL, 6 SKIPPED, stable across repeat runs).
+**Never invokes the Claude Code CLI** — real AI usage costs the operator's
+subscription, so this script is meant to be re-run freely (CI, after any
+change) without ever spending that budget. Anywhere the acceptance criteria
+need a real AI-produced fix, it cites *existing* evidence (PR #10, the
+mocked e2e test suite) rather than generating new evidence itself.
+
+**The one real FAIL is RAM over budget on Windows (~500MB vs. 300MB)** —
+already documented as a platform gap in Phase 8's log, not a new bug;
+unresolved because no Linux VM was available this session either.
+
+**Real bugs found and fixed while building/running the verifier**:
+1. `HealJob` already has a `fingerprint` column directly on the row — no
+   need to look up the source `Error`/`ContractViolation` to get it (an
+   earlier draft of the verifier tried to, incorrectly, via a nonexistent
+   `error_id` attribute).
+2. `healer/budget.py`'s `record_spend`/`is_budget_paused` have no date
+   override parameter (today's date is implicit) — the same
+   `isolated_budget_date` monkeypatch pattern tests/conftest.py already uses
+   is required for *any* caller (including a one-off script, not just
+   pytest) that wants to probe the budget cap without touching the real
+   production `daily_spend` row for today.
+3. `python-socketio`'s `AsyncClient` silently requires `aiohttp` to be
+   installed for its default HTTP transport — with it missing, `sio.connect()`
+   fails with a generic `ConnectionError: Unexpected connection error` that
+   gives no hint the actual cause is a missing dependency, not a network or
+   auth problem. Added `aiohttp>=3.10` to `[dev]` (only needed for this kind
+   of out-of-process client testing — the server side, python-socketio's
+   ASGI app in `healer/app.py`, has never needed it).
+4. `gh run list --limit 3` on `main` can miss the actual `CI` run if other
+   workflows (`Deploy`, `CI failure -> AI fix`) also ran recently on the
+   same branch and sort ahead of it — fixed by filtering with
+   `--workflow ci.yml` directly instead of over-fetching and filtering
+   client-side.
+5. MCP tool parameter names don't always match the obvious guess:
+   `list_files` takes `glob` (not `directory`), `search_code` takes
+   `pattern` (not `query`), `get_recent_commits` takes `n` (not `limit`).
+   Worth checking `mcp_server/tools/*.py`'s actual signatures directly
+   rather than assuming from the tool name.
+
+**Design choice**: bug attribution (which `Error` row belongs to which
+seeded `/trigger/*` bug) matches on `Error.function_name`, not
+`exception_type` — the timeout bug's exception class varies by platform
+(`ConnectTimeout` here), while `function_name` (`check_item_price`, etc.) is
+stable and directly names the exact function in `bugs.py` that raised it.

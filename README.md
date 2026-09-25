@@ -156,6 +156,18 @@ a new regression test that fails before and passes after — see CLAUDE.md's
 Windows-specific bugs this run uncovered and fixed in `healer/agent_free.py`
 and `.mcp.json`.
 
+## Verification
+
+[**VERIFICATION.md**](VERIFICATION.md) — an automated verifier
+(`scripts/verify_all.py`) tests the *live running system* (all 4 pods, the
+public tunnel, real GitHub) against every item in SPEC.md's ACCEPTANCE
+CRITERIA and prints a PASS/FAIL/SKIPPED table with one-line evidence per
+row. Latest run: **63 PASS, 1 FAIL (RAM over budget on Windows — see below),
+6 SKIPPED** (destructive actions and AI-subscription-costing checks that are
+deliberately not re-run live; each cites the existing mocked test that
+covers it instead). Never invokes the Claude Code CLI, so it's safe to
+re-run anytime without spending AI usage.
+
 ## Demo walkthrough
 
 With all 4 pods running and the demo dataset seeded (`scripts/seed_demo.py`,

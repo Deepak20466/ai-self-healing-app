@@ -44,6 +44,9 @@ dev = [
   "ruff>=0.7",
   "mypy>=1.11",
   "honcho>=1.1",
+  # scripts/verify_all.py's socketio.AsyncClient needs aiohttp for its HTTP
+  # transport when testing chat live over a real (non-ASGI-in-process) URL.
+  "aiohttp>=3.10",
 ]
 
 [tool.setuptools.packages.find]
