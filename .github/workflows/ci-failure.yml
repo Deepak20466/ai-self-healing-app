@@ -17,12 +17,18 @@ jobs:
           python-version: "3.11"
 
       - name: POST the failed run to the healer webhook (starts the AI CI-fix flow)
+        # SOURCE_* (not GITHUB_*): GitHub Actions silently ignores a step's
+        # attempt to override its own reserved GITHUB_* env vars with the
+        # runner's real values for the CURRENTLY EXECUTING workflow (this
+        # one, ci-failure.yml) -- see ci_webhook_notify.py's comment. Using
+        # non-reserved names is the only way to actually pass through the
+        # original CI run's real run id/branch/sha/workflow name.
         env:
           HEALER_WEBHOOK_URL: ${{ vars.HEALER_WEBHOOK_URL }}
           WEBHOOK_SECRET: ${{ secrets.HEALER_WEBHOOK_SECRET }}
-          GITHUB_RUN_ID: ${{ github.event.workflow_run.id }}
-          GITHUB_WORKFLOW: ${{ github.event.workflow_run.name }}
-          GITHUB_REF_NAME: ${{ github.event.workflow_run.head_branch }}
-          GITHUB_SHA: ${{ github.event.workflow_run.head_sha }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_WORKFLOW: ${{ github.event.workflow_run.name }}
+          SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
           PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
         run: python scripts/ci_webhook_notify.py --status finished --conclusion failure

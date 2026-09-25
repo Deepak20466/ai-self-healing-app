@@ -30,6 +30,44 @@ def sign(secret: str, body: bytes, timestamp: int) -> str:
     return f"t={timestamp},v1={digest}"
 
 
+def build_payload(env: dict[str, str], *, status: str, conclusion: str | None) -> dict[str, object]:
+    """Build the webhook JSON body from `env`.
+
+    SOURCE_* (set only by ci-failure.yml) always wins over the ambient
+    GITHUB_* vars: GitHub Actions does NOT let a step's `env:` block override
+    its own reserved GITHUB_* names (GITHUB_RUN_ID, GITHUB_REF_NAME,
+    GITHUB_SHA, GITHUB_WORKFLOW) -- the runner injects its own values for the
+    CURRENTLY EXECUTING workflow after step env is applied, silently
+    discarding any override. ci-failure.yml is workflow_run-triggered, so
+    without this, every field here would describe ci-failure.yml's own run
+    (branch "main", its own run_id/sha/workflow name) instead of the CI run
+    that actually failed -- reproduced for real running the live CI
+    self-healing demo, see CLAUDE.md. ci.yml's own start/finish calls never
+    set SOURCE_*, so they correctly fall through to the ambient GITHUB_*
+    vars, which describe ci.yml's own run as intended there.
+    """
+    run_id = int(env.get("SOURCE_RUN_ID") or env.get("GITHUB_RUN_ID", "0"))
+    workflow = env.get("SOURCE_WORKFLOW") or env.get("GITHUB_WORKFLOW", "ci.yml")
+    branch = (
+        env.get("SOURCE_BRANCH") or env.get("GITHUB_HEAD_REF") or env.get("GITHUB_REF_NAME", "main")
+    )
+    sha = env.get("SOURCE_SHA") or env.get("GITHUB_SHA", "0" * 40)
+    pr_number_env = env.get("PR_NUMBER")
+
+    payload: dict[str, object] = {
+        "run_id": run_id,
+        "workflow": workflow,
+        "branch": branch,
+        "sha": sha,
+        "status": "in_progress" if status == "started" else "completed",
+    }
+    if pr_number_env:
+        payload["pr_number"] = int(pr_number_env)
+    if conclusion:
+        payload["conclusion"] = conclusion
+    return payload
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--status", required=True, choices=["started", "finished"])
@@ -43,23 +81,8 @@ def main() -> int:
         return 0
 
     repo = os.environ.get("GITHUB_REPOSITORY", "")
-    run_id = int(os.environ.get("GITHUB_RUN_ID", "0"))
-    workflow = os.environ.get("GITHUB_WORKFLOW", "ci.yml")
-    branch = os.environ.get("GITHUB_HEAD_REF") or os.environ.get("GITHUB_REF_NAME", "main")
-    sha = os.environ.get("GITHUB_SHA", "0" * 40)
-    pr_number_env = os.environ.get("PR_NUMBER")
-
-    payload: dict[str, object] = {
-        "run_id": run_id,
-        "workflow": workflow,
-        "branch": branch,
-        "sha": sha,
-        "status": "in_progress" if args.status == "started" else "completed",
-    }
-    if pr_number_env:
-        payload["pr_number"] = int(pr_number_env)
-    if args.conclusion:
-        payload["conclusion"] = args.conclusion
+    payload = build_payload(dict(os.environ), status=args.status, conclusion=args.conclusion)
+    run_id = payload["run_id"]
 
     body = json.dumps(payload).encode("utf-8")
     timestamp = int(time.time())
