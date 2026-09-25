@@ -21,12 +21,18 @@ logger = get_logger(__name__)
 
 class SentinelClient:
     def __init__(
-        self, client: httpx.AsyncClient | None = None, base_url: str | None = None
+        self,
+        client: httpx.AsyncClient | None = None,
+        base_url: str | None = None,
+        ingest_token: str | None = None,
     ) -> None:
         self._owns_client = client is None
+        token = ingest_token if ingest_token is not None else settings.sentinel_ingest_token
+        headers = {"Authorization": f"Bearer {token}"} if token else None
         self._client = client or httpx.AsyncClient(
             base_url=base_url or settings.sentinel_base_url,
             timeout=settings.error_report_timeout_seconds,
+            headers=headers,
         )
 
     async def report_error(self, captured: CapturedError) -> None:

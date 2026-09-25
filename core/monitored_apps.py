@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -66,3 +67,20 @@ async def sync_monitored_apps(
         row = (await session.execute(stmt)).scalar_one()
         rows.append(row)
     return rows
+
+
+async def get_app_by_name(session: AsyncSession, name: str) -> MonitoredApp | None:
+    """Look up a registered app by its unique `name` (e.g. "target_app")."""
+    stmt = select(MonitoredApp).where(MonitoredApp.name == name)
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def get_app_by_ingest_token(session: AsyncSession, token: str) -> MonitoredApp | None:
+    """Resolve which app an ingest request belongs to, from its bearer token.
+
+    This is the only thing the token grants: attribution of an error/metric
+    report to a specific `monitored_apps` row. Never trust a caller-supplied
+    app name/id in the payload itself for this.
+    """
+    stmt = select(MonitoredApp).where(MonitoredApp.ingest_token == token)
+    return (await session.execute(stmt)).scalar_one_or_none()

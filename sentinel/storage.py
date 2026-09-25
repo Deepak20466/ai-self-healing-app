@@ -71,8 +71,14 @@ async def _audit(
     await session.flush()
 
 
-async def record_error(session: AsyncSession, captured: CapturedError) -> Error:
-    """Store a captured runtime error, deduped by fingerprint, and maybe enqueue a fix."""
+async def record_error(
+    session: AsyncSession, captured: CapturedError, *, app_id: int | None = None
+) -> Error:
+    """Store a captured runtime error, deduped by fingerprint, and maybe enqueue a fix.
+
+    `app_id` (multi-app support) is resolved server-side by the ingest route
+    from the request's bearer token, never trusted from the payload itself.
+    """
     fingerprint = fingerprint_error(
         captured.exception_type, captured.file_path, captured.function_name
     )
@@ -99,6 +105,7 @@ async def record_error(session: AsyncSession, captured: CapturedError) -> Error:
             occurrence_count=1,
             first_seen_at=captured.occurred_at,
             last_seen_at=captured.occurred_at,
+            app_id=app_id,
         )
         session.add(error)
     else:
@@ -125,6 +132,7 @@ async def record_error(session: AsyncSession, captured: CapturedError) -> Error:
             type=HealJobType.RUNTIME_ERROR,
             fingerprint=fingerprint,
             source_error_id=error.id,
+            app_id=app_id,
         )
         heal_job_id = job.id
 
@@ -157,6 +165,7 @@ async def record_contract_violation(
     file_path: str,
     line_number: int,
     occurred_at: datetime | None = None,
+    app_id: int | None = None,
 ) -> ContractViolation:
     """Store a silent-bug (contract mismatch), deduped by (endpoint, case)."""
     now = occurred_at or datetime.now(UTC)
@@ -181,6 +190,7 @@ async def record_contract_violation(
             occurrence_count=1,
             first_seen_at=now,
             last_seen_at=now,
+            app_id=app_id,
         )
         session.add(violation)
     else:
@@ -200,6 +210,7 @@ async def record_contract_violation(
             type=HealJobType.CONTRACT_VIOLATION,
             fingerprint=fingerprint,
             source_contract_violation_id=violation.id,
+            app_id=app_id,
         )
         heal_job_id = job.id
 

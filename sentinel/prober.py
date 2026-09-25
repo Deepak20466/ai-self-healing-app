@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from apps.target_app.contracts import CONTRACT_CASES, ContractCase, find_violations
 from core.config import settings
 from core.db import async_session_factory
+from core.monitored_apps import get_app_by_name
 from sentinel import storage
 
 
@@ -50,6 +51,10 @@ async def probe_once(client: httpx.AsyncClient) -> list[ProbeResult]:
 
 async def persist_results(session: AsyncSession, results: list[ProbeResult]) -> None:
     """Record every violation in `results`. Caller owns the session's lifecycle."""
+    if not any(result.is_violation for result in results):
+        return
+    target_app = await get_app_by_name(session, "target_app")
+    app_id = target_app.id if target_app else None
     for result in results:
         if not result.is_violation:
             continue
@@ -61,6 +66,7 @@ async def persist_results(session: AsyncSession, results: list[ProbeResult]) -> 
             actual=result.actual,
             file_path=result.case.source_file,
             line_number=result.case.source_line,
+            app_id=app_id,
         )
 
 

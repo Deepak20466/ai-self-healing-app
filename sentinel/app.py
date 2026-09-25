@@ -17,6 +17,8 @@ from core.config import settings
 from core.db import dispose_engine, get_db
 from core.hmac_utils import InvalidSignatureError, verify_signature
 from core.logging import configure_logging, get_logger
+from core.models import MonitoredApp
+from core.monitored_apps import get_app_by_ingest_token
 from sentinel import storage
 from sentinel.anomaly import AnomalyDetector, run_anomaly_loop
 from sentinel.capture import CapturedError
@@ -62,11 +64,33 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok", "pod": "sentinel"}
 
 
+async def _resolve_reporting_app(request: Request, session: AsyncSession) -> MonitoredApp | None:
+    """Resolve which `monitored_apps` row this ingest request came from.
+
+    The bearer token is optional (not enforced with a 401) so a monitored
+    app that hasn't been registered in `config/monitored_apps.yaml` yet
+    still gets its errors captured, just unattributed (`app_id=None`) --
+    the same behavior every app had before multi-app support existed. An
+    unrecognized token is treated the same as no token, for the same reason
+    (never let a stale/misconfigured token silently stop error capture).
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None
+    token = auth_header.removeprefix("Bearer ").strip()
+    if not token:
+        return None
+    return await get_app_by_ingest_token(session, token)
+
+
 @app.post("/ingest/error", status_code=status.HTTP_202_ACCEPTED)
 async def ingest_error(
-    captured: CapturedError, session: AsyncSession = Depends(get_db)
+    request: Request, captured: CapturedError, session: AsyncSession = Depends(get_db)
 ) -> dict[str, object]:
-    error = await storage.record_error(session, captured)
+    reporting_app = await _resolve_reporting_app(request, session)
+    error = await storage.record_error(
+        session, captured, app_id=reporting_app.id if reporting_app else None
+    )
     return {"error_id": error.id, "fingerprint": error.fingerprint}
 
 

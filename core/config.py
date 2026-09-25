@@ -140,6 +140,11 @@ class Settings(BaseSettings):
     anomaly_error_rate_threshold: float = 0.05
     anomaly_latency_multiplier_threshold: float = 2.0
     anomaly_cooldown_seconds: int = 600
+    #: Sent as `Authorization: Bearer <token>` by this process's own
+    #: SentinelClient (multi-app support) -- identifies which monitored app
+    #: an ingest report belongs to. Optional: an app that hasn't set this
+    #: still gets its errors captured, just unattributed (app_id=None).
+    sentinel_ingest_token: str | None = None
 
     @property
     def sentinel_base_url(self) -> str:

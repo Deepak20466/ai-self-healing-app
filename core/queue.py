@@ -36,6 +36,7 @@ async def enqueue_heal_job(
     source_contract_violation_id: int | None = None,
     source_pipeline_run_id: int | None = None,
     pr_number: int | None = None,
+    app_id: int | None = None,
 ) -> HealJob:
     """Insert a queued HealJob and NOTIFY listeners. Caller commits.
 
@@ -43,6 +44,11 @@ async def enqueue_heal_job(
     belongs to a specific PR) — set here, at insert time, rather than left to
     be backfilled later, so `healer.circuit_breaker.ci_fix_attempt_count_for_pr`
     can query it directly instead of joining through `pipeline_runs`.
+
+    `app_id` (multi-app support) identifies which `monitored_apps` row this
+    job belongs to — set at insert time from the source error/violation's
+    own `app_id`, never from a caller parameter downstream, so
+    `propose_patch`'s write-scope lookup stays server-side-only.
     """
     job = HealJob(
         type=type,
@@ -52,6 +58,7 @@ async def enqueue_heal_job(
         source_contract_violation_id=source_contract_violation_id,
         source_pipeline_run_id=source_pipeline_run_id,
         pr_number=pr_number,
+        app_id=app_id,
     )
     session.add(job)
     await session.flush()
