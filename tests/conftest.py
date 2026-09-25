@@ -178,6 +178,15 @@ def pytest_sessionstart(session: object) -> None:
 
     asyncio.run(seed())
 
+    async def _sync_apps() -> None:
+        from core.db import session_scope
+        from core.monitored_apps import sync_monitored_apps
+
+        async with session_scope() as db_session:
+            await sync_monitored_apps(db_session)
+
+    asyncio.run(_sync_apps())
+
 
 @pytest_asyncio.fixture
 async def db_session() -> AsyncGenerator[AsyncSession, None]:

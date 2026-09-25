@@ -22,6 +22,7 @@ dependencies = [
   "pydantic>=2.9,<3.0",
   "pydantic-settings>=2.5,<3.0",
   "psutil>=6.0",
+  "pyyaml>=6.0,<7.0",
 ]
 
 [project.optional-dependencies]
@@ -47,6 +48,7 @@ dev = [
   # scripts/verify_all.py's socketio.AsyncClient needs aiohttp for its HTTP
   # transport when testing chat live over a real (non-ASGI-in-process) URL.
   "aiohttp>=3.10",
+  "types-PyYAML>=6.0",
 ]
 
 [tool.setuptools.packages.find]

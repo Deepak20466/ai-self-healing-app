@@ -92,6 +92,40 @@ class BudgetCategory(enum.StrEnum):
     CHAT = "chat"
 
 
+class MonitoredApp(TimestampMixin, Base):
+    """A registered app the self-healing system watches (multi-app support).
+
+    `apps/target_app` is registered as the first row (see
+    `scripts/sync_monitored_apps.py` / `config/monitored_apps.yaml`) with
+    identical behavior to the pre-multi-app hardcoded defaults. Every write
+    scope (`propose_patch`), test/lint command and PR target repo comes from
+    this table, looked up server-side from the heal_job's `app_id` — never
+    trusted from a caller-supplied parameter, same principle as the
+    `apps/target_app`-only restriction it replaces.
+    """
+
+    __tablename__ = "monitored_apps"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    language: Mapped[str] = mapped_column(String(50), nullable=False)
+    #: Repo-relative path (e.g. "apps/target_app", "examples/node_app") --
+    #: every app registered so far lives in a subdirectory of this same repo.
+    local_repo_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    github_repo: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: Repo-relative write-scope prefixes (e.g. ["apps/target_app/"]) --
+    #: a list, not a single string, since a real app may span more than one
+    #: directory (e.g. a frontend + backend pair under one app name).
+    allowed_write_paths: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    test_command: Mapped[str] = mapped_column(Text, nullable=False)
+    lint_command: Mapped[str | None] = mapped_column(Text, nullable=True)
+    health_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    #: Per-app bearer token for `/ingest/error` and `/ingest/metric` --
+    #: identifies which app an incoming report belongs to server-side
+    #: (looked up by token), never from a caller-supplied app name/id.
+    ingest_token: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+
+
 class Error(TimestampMixin, Base):
     """A deduplicated runtime error, identified by `fingerprint`."""
 
@@ -120,6 +154,9 @@ class Error(TimestampMixin, Base):
     last_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    app_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("monitored_apps.id", ondelete="SET NULL"), nullable=True
+    )
 
     occurrences: Mapped[list[ErrorOccurrence]] = relationship(
         back_populates="error", cascade="all, delete-orphan"
@@ -128,6 +165,7 @@ class Error(TimestampMixin, Base):
     __table_args__ = (
         Index("ix_errors_status", "status"),
         Index("ix_errors_created_at", "created_at"),
+        Index("ix_errors_app_id", "app_id"),
     )
 
 
@@ -176,10 +214,14 @@ class ContractViolation(TimestampMixin, Base):
     last_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    app_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("monitored_apps.id", ondelete="SET NULL"), nullable=True
+    )
 
     __table_args__ = (
         Index("ix_contract_violations_status", "status"),
         Index("ix_contract_violations_created_at", "created_at"),
+        Index("ix_contract_violations_app_id", "app_id"),
     )
 
 
@@ -210,6 +252,9 @@ class HealJob(TimestampMixin, Base):
     )
     branch_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    app_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("monitored_apps.id", ondelete="SET NULL"), nullable=True
+    )
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -229,6 +274,7 @@ class HealJob(TimestampMixin, Base):
         Index("ix_heal_jobs_pr_number", "pr_number"),
         Index("ix_heal_jobs_created_at", "created_at"),
         Index("ix_heal_jobs_status_created_at", "status", "created_at"),
+        Index("ix_heal_jobs_app_id", "app_id"),
     )
 
 

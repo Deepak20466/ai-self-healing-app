@@ -1,0 +1,39 @@
+# Monitored apps registry (SPEC.md multi-app support). Each entry becomes a
+# row in the `monitored_apps` table via `scripts/sync_monitored_apps.py`
+# (also run automatically by pytest_sessionstart, see tests/conftest.py) --
+# this file is the human-editable source of truth, the DB row is what
+# every server-side lookup (propose_patch's write scope, run_tests, the
+# healer's worktree/PR target, sentinel's ingest-token auth) actually reads.
+#
+# `ingest_token` is not a secret in the usual sense (it identifies which app
+# an error report came from, it doesn't grant any privilege beyond "post an
+# error" -- see sentinel/app.py's ingest routes), so a fixed, readable value
+# checked into this file is fine, same as this repo's own demo dataset being
+# deterministic.
+#
+# apps:
+#   - name: unique short identifier, used in URLs/branch names -- keep it
+#       filesystem- and git-branch-safe (lowercase, hyphens/underscores only)
+#     language: informational, also selects OTLP stack-trace parsing (Step 2)
+#     local_repo_path: repo-relative directory this app lives in
+#     github_repo: owner/repo the healer opens PRs against for this app
+#     allowed_write_paths: repo-relative prefixes propose_patch may write to
+#       for this app's runtime_error/contract_violation jobs
+#     test_command: how the healer verifies a fix (run inside a worktree)
+#     lint_command: optional
+#     health_url: optional, for get_health()/smoke tests
+#     ingest_token: sent as `Authorization: Bearer <token>` to /ingest/*
+
+apps:
+  - name: target_app
+    language: python
+    local_repo_path: apps/target_app
+    github_repo: Deepak20466/ai-self-healing-app
+    allowed_write_paths:
+      - apps/target_app/
+    test_command: >-
+      pytest tests/test_target_app_bugs.py tests/test_target_app_routes.py
+      tests/test_sentinel_prober.py apps/target_app/test_delivery_estimate_timezone.py
+    lint_command: ruff check apps/target_app
+    health_url: http://127.0.0.1:8001/healthz
+    ingest_token: target-app-a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6
