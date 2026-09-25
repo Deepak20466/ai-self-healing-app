@@ -61,7 +61,7 @@ ignore = ["S101"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S105", "S106", "S603", "S607"]
-"scripts/*" = ["S105", "S106", "S603", "S607"]
+"scripts/*" = ["S105", "S106", "S603", "S607", "S310"]
 # Internal subprocess helpers with multiple call sites and a sensible
 # `timeout=` default; wrapping every caller in `asyncio.timeout()` instead
 # would add boilerplate at each of them for no real benefit here (unlike

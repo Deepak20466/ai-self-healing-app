@@ -17,6 +17,7 @@ coverage.xml
 metrics.json
 worktrees/
 releases/
+local_deploy_root/
 
 .vscode/*
 !.vscode/extensions.json

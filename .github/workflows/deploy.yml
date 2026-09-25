@@ -1,0 +1,74 @@
+name: Deploy
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report deploy started
+        continue-on-error: true
+        env:
+          HEALER_WEBHOOK_URL: ${{ vars.HEALER_WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.HEALER_WEBHOOK_SECRET }}
+        run: python3 scripts/ci_webhook_notify.py --status started
+
+      - name: Atomic release + migrate + restart on the cloud VM
+        id: release
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            SHA="${{ github.sha }}"
+            RELEASE_DIR="/opt/selfheal/releases/${SHA}"
+            sudo -u deploy mkdir -p "${RELEASE_DIR}"
+            sudo -u deploy git clone --depth 1 https://github.com/${{ github.repository }}.git "${RELEASE_DIR}/src"
+            sudo -u deploy bash -c "cd ${RELEASE_DIR}/src && git fetch --depth 1 origin ${SHA} && git checkout ${SHA}"
+            sudo -u deploy python3.11 -m venv "${RELEASE_DIR}/src/.venv"
+            sudo -u deploy "${RELEASE_DIR}/src/.venv/bin/pip" install --upgrade pip
+            sudo -u deploy "${RELEASE_DIR}/src/.venv/bin/pip" install -e "${RELEASE_DIR}/src"
+            sudo -u deploy ln -sfn /opt/selfheal/shared/.env "${RELEASE_DIR}/src/.env"
+            sudo -u deploy bash -c "cd ${RELEASE_DIR}/src && ./.venv/bin/alembic upgrade head"
+            PREVIOUS=$(readlink -f /opt/selfheal/current || true)
+            echo "${PREVIOUS}" | sudo -u deploy tee /opt/selfheal/previous_release > /dev/null || true
+            sudo -u deploy ln -sfn "${RELEASE_DIR}/src" /opt/selfheal/current
+            sudo systemctl restart selfheal-app selfheal-sentinel selfheal-mcp selfheal-healer
+            sleep 5
+            "${RELEASE_DIR}/src/.venv/bin/python" "${RELEASE_DIR}/src/scripts/smoke_test.py" \
+              --base-url http://localhost:8001 --sentinel-url http://localhost:8002 \
+              --mcp-url http://localhost:8003 --healer-url http://localhost:8000
+
+      - name: Roll back on smoke test failure
+        if: failure() && steps.release.outcome == 'failure'
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            PREVIOUS=$(cat /opt/selfheal/previous_release 2>/dev/null || true)
+            if [ -n "${PREVIOUS}" ]; then
+              sudo -u deploy ln -sfn "${PREVIOUS}" /opt/selfheal/current
+              sudo systemctl restart selfheal-app selfheal-sentinel selfheal-mcp selfheal-healer
+              echo "Rolled back to ${PREVIOUS}"
+            else
+              echo "No previous release recorded; nothing to roll back to."
+            fi
+
+      - name: Report deploy result
+        if: always()
+        continue-on-error: true
+        env:
+          HEALER_WEBHOOK_URL: ${{ vars.HEALER_WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.HEALER_WEBHOOK_SECRET }}
+          JOB_CONCLUSION: ${{ job.status }}
+        run: python3 scripts/ci_webhook_notify.py --status finished --conclusion "$JOB_CONCLUSION"

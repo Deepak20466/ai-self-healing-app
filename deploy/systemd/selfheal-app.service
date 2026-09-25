@@ -1,0 +1,24 @@
+[Unit]
+Description=selfheal app-pod (monitored demo app)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/selfheal/current
+EnvironmentFile=/opt/selfheal/shared/.env
+ExecStart=/opt/selfheal/current/.venv/bin/uvicorn apps.target_app.main:app --host 127.0.0.1 --port 8001
+Restart=on-failure
+RestartSec=3
+# Low-RAM constraint (SPEC.md HARD CONSTRAINTS #3): one uvicorn worker,
+# small SQLAlchemy pool. 200MB is generous headroom per pod, not a target.
+MemoryMax=200M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/selfheal
+
+[Install]
+WantedBy=multi-user.target

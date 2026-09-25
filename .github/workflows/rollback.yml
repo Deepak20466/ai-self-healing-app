@@ -1,0 +1,56 @@
+name: Rollback
+
+# Callable from chat via the MCP `trigger_rollback` tool (workflow_dispatch),
+# or manually from the Actions tab. SPEC.md SECURITY: destructive actions
+# require confirmation — that gate lives in `healer/chat_agent.py` /
+# `mcp_server/confirmation.py` *before* this workflow is ever dispatched;
+# this workflow itself just performs the flip-back + smoke test.
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Environment to roll back (e.g. production)"
+        required: true
+        default: "production"
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.env }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Flip current -> previous release and restart
+        id: rollback
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            PREVIOUS=$(cat /opt/selfheal/previous_release 2>/dev/null || true)
+            if [ -z "${PREVIOUS}" ]; then
+              echo "No previous release recorded; cannot roll back." >&2
+              exit 1
+            fi
+            sudo -u deploy ln -sfn "${PREVIOUS}" /opt/selfheal/current
+            sudo systemctl restart selfheal-app selfheal-sentinel selfheal-mcp selfheal-healer
+            sleep 5
+            "${PREVIOUS}/.venv/bin/python" "${PREVIOUS}/scripts/smoke_test.py" \
+              --base-url http://localhost:8001 --sentinel-url http://localhost:8002 \
+              --mcp-url http://localhost:8003 --healer-url http://localhost:8000
+            echo "Rolled back to ${PREVIOUS}"
+
+      - name: Report rollback result to the healer webhook (streams to chat)
+        if: always()
+        continue-on-error: true
+        env:
+          HEALER_WEBHOOK_URL: ${{ vars.HEALER_WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.HEALER_WEBHOOK_SECRET }}
+          JOB_CONCLUSION: ${{ job.status }}
+        run: python3 scripts/ci_webhook_notify.py --status finished --conclusion "$JOB_CONCLUSION"

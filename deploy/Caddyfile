@@ -1,0 +1,38 @@
+# SPEC.md CLOUD DEPLOYMENT: auto-HTTPS reverse proxy in front of the 4 pods.
+#
+# Only healer-pod (chat/dashboard UI + Socket.io) and sentinel-pod (the
+# public CI webhook `/webhooks/ci`) need to be reachable from the internet;
+# app-pod and mcp-pod stay on localhost-only ports, reached only by the
+# other pods. Caddy terminates TLS and gets a cert automatically via Let's
+# Encrypt for a real domain.
+#
+# `scripts/provision_vm.sh` generates the real `/etc/caddy/Caddyfile` from
+# this template, substituting an IP-only `:80` address block instead when no
+# domain is supplied (Caddy can't issue a TLS cert for a bare IP, and an
+# empty site address is invalid Caddyfile syntax, so both cases can't live
+# in one static file with a plain env-var substitution — see that script).
+# This checked-in copy is the domain-based version, for reference/review.
+
+example.com {
+	encode gzip
+
+	# sentinel-pod: only the CI webhook and its own healthz need to be public.
+	handle /webhooks/ci {
+		reverse_proxy 127.0.0.1:8002
+	}
+	handle /sentinel-healthz {
+		reverse_proxy 127.0.0.1:8002/healthz
+	}
+
+	# healer-pod: chat/dashboard UI, REST API, and the Socket.io channel.
+	handle /socket.io/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+	handle {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	log {
+		output file /var/log/caddy/selfheal-access.log
+	}
+}

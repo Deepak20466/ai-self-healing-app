@@ -1,0 +1,22 @@
+[Unit]
+Description=selfheal mcp-pod (MCP tool server, streamable HTTP)
+After=network.target postgresql.service selfheal-app.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/selfheal/current
+EnvironmentFile=/opt/selfheal/shared/.env
+ExecStart=/opt/selfheal/current/.venv/bin/python -m mcp_server.http_main
+Restart=on-failure
+RestartSec=3
+MemoryMax=200M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/selfheal
+
+[Install]
+WantedBy=multi-user.target

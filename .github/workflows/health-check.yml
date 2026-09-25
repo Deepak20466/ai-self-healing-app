@@ -1,0 +1,67 @@
+name: Scheduled health check
+
+# SPEC.md sentinel-pod section: "health-check.yml runs [contracts] too" and
+# CI/CD section #5: a scheduled synthetic check over the public URL, opening
+# an issue on repeated failure and notifying the chat.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install httpx for the smoke check
+        run: pip install httpx
+
+      - name: Run smoke test against the public URL
+        id: smoke
+        env:
+          PUBLIC_URL: ${{ vars.PUBLIC_URL }}
+        run: |
+          if [ -z "${PUBLIC_URL}" ]; then
+            echo "PUBLIC_URL not configured; skipping." && exit 0
+          fi
+          python scripts/smoke_test.py \
+            --base-url "${PUBLIC_URL}" \
+            --sentinel-url "${PUBLIC_URL}" \
+            --mcp-url "${PUBLIC_URL}" \
+            --healer-url "${PUBLIC_URL}"
+
+      - name: Notify the healer webhook of the result
+        if: always()
+        continue-on-error: true
+        env:
+          HEALER_WEBHOOK_URL: ${{ vars.HEALER_WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.HEALER_WEBHOOK_SECRET }}
+          JOB_CONCLUSION: ${{ steps.smoke.outcome }}
+        run: python scripts/ci_webhook_notify.py --status finished --conclusion "$JOB_CONCLUSION"
+
+      - name: Open an issue on repeated failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = "Scheduled health check failed";
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: "health-check",
+            });
+            if (existing.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body: `The scheduled health check (run ${context.runId}) failed. See the workflow run for details.`,
+                labels: ["health-check"],
+              });
+            }

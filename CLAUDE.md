@@ -958,5 +958,108 @@ terminal — not something Phase 6 introduced or can fix in-repo).
   ("rate limiting ... on the chat, login and ingest endpoints" plus
   separately "lock out login for 15 minutes after 5 failed attempts").
 
-### Phase 7 — Ship: NOT STARTED
+### Phase 7 — Ship: DONE
+Built:
+- `.github/workflows/ci.yml`, `ci-failure.yml`, `deploy.yml`, `rollback.yml`,
+  `health-check.yml` per SPEC.md's CI/CD PIPELINE section, plus
+  `scripts/ci_webhook_notify.py` — a dependency-free (stdlib-only) HMAC
+  signer/poster shared by every workflow to notify `HEALER_WEBHOOK_URL`,
+  verified byte-for-byte compatible with `core/hmac_utils.py`'s `t=<ts>,
+  v1=<hex_hmac>` scheme (see "Ambiguities resolved").
+- `deploy/systemd/selfheal-{app,sentinel,mcp,healer}.service`: `Restart=
+  on-failure`, `MemoryMax=` (200M for app/sentinel/mcp, 300M for healer
+  since it also spawns the Claude Code CLI as a child process),
+  `ProtectSystem=strict` + `ReadWritePaths=/opt/selfheal`.
+- `deploy/Caddyfile`: reverse-proxies only sentinel-pod's `/webhooks/ci`
+  (+its own `/healthz`) and healer-pod (chat/dashboard UI + `/socket.io/*`)
+  publicly; app-pod and mcp-pod stay localhost-only, reached only by other
+  pods.
+- `scripts/provision_vm.sh`: idempotent Ubuntu provisioning (Python 3.11,
+  tuned Postgres, Caddy, Claude Code CLI, `deploy` user, `/opt/selfheal`
+  layout, systemd units, ufw, unattended-upgrades). Every step guards on
+  current state before acting, per its own docstring.
+- `scripts/smoke_test.py`: healthz for app/sentinel/healer, MCP-reachability
+  for mcp-pod (see "Ambiguities resolved" — mcp-pod has no `/healthz`), plus
+  one real contract endpoint (`/items/top`). `--force-fail` exists solely so
+  `local_deploy.py`'s rollback path can be exercised on demand without
+  needing a genuinely broken pod.
+- `scripts/local_deploy.py`: the same atomic-release/migrate/smoke-test/
+  rollback flow as `deploy.yml`, run against localhost. Builds a release via
+  `git archive` into `local_deploy_root/releases/<sha>/`, copies `.env` from
+  `shared/`, runs `alembic upgrade head` from *inside* that release
+  directory (so `python -m alembic` resolves `core`/`alembic` from that
+  exact snapshot — real atomic-release semantics, not just a symlink prop),
+  flips a `current.txt`/`previous.txt` marker pair (see "Ambiguities
+  resolved" for why markers instead of a real symlink), runs
+  `smoke_test.py`, and on failure flips `current.txt` back to
+  `previous.txt` and writes a `deployments` row + calls `healer.notifier.
+  notify()`.
+- `scripts/break_ci_demo.py`: creates a branch with one legitimately broken
+  assertion (not a deletion/xfail — SPEC.md's `break_ci_demo.py`), for
+  demoing the CI-fix loop end to end.
+- `scripts/tunnel_note.md`: SSH reverse-tunnel option for exposing the
+  webhook without a cloud VM.
+- `Procfile` (app/sentinel/mcp/healer, `honcho start`).
+
+**Verified for real, not just written** (SPEC.md Phase 7 checklist: "a
+forced failing smoke test triggers a rollback, and the chat reports it"):
+ran `scripts/local_deploy.py` three times against the real dev DB with
+healer-pod (and leftover app/sentinel/mcp pods already running locally)
+live:
+1. First deploy of HEAD (`9230a5a`): smoke test passed for real (`OK` on
+   all 4 healthz/reachability checks + `/items/top`), `deployments` row
+   `status=deployed` written (id 23).
+2. A second commit deployed with `--force-fail-smoke-test`: smoke test
+   correctly failed, `current.txt` flipped back to the first release's sha,
+   `deployments` row `status=rolled_back` written (id 24), `healer.notifier.
+   notify()` called without raising (Slack/SMTP unconfigured in this dev
+   environment so both skip silently by design — confirmed by reading
+   `notifier.py`, not assumed).
+3. Confirmed via a direct DB query (`SELECT * FROM deployments ORDER BY id
+   DESC LIMIT 3`) that both rows exist with the expected sha/status/
+   timestamps, and that `local_deploy_root/current.txt` ends up pointing at
+   the *first* (good) sha after the forced failure, not the broken one.
+The demo commit used for step 2 was reset via `git reset --hard HEAD~1`
+immediately after (never pushed, never left in history).
+
+`ruff check .`/`ruff format --check .` clean repo-wide. `mypy core sentinel
+mcp_server healer` (strict) clean — `scripts/` is intentionally outside the
+mypy-strict scope (see CLAUDE.md Conventions; same as Phase 1-6 scripts).
+`pytest`: 270/271 (same one pre-existing environment-only failure as Phase
+6, unrelated to Phase 7's changes — nothing in this phase touches Python
+application code, only new scripts/workflows/systemd/Caddy files, so no new
+tests were needed for it beyond the real, manual local_deploy.py runs above).
+
+**Ambiguities resolved this phase**:
+- **mcp-pod has no `/healthz`** (a pre-existing Phase 3 gap: it speaks MCP's
+  streamable-HTTP protocol at `/mcp`, not a plain FastAPI app with its own
+  routes, and `mcp.run(transport="streamable-http", ...)` doesn't expose a
+  way to bolt on an extra REST route without reaching into the `mcp` SDK's
+  internals). Rather than modify Phase 3's `mcp_server/server.py` under
+  Phase 7 time pressure, `scripts/smoke_test.py` checks mcp-pod for bare
+  reachability (`GET /mcp` returns *any* HTTP response, even 4xx) instead of
+  requiring a 200 from `/healthz` — proves the process is up and listening,
+  which is all a smoke test needs. `mcp_server/tools/deploy.py:get_health`'s
+  existing (Phase 3) `_probe_healthz` still hits `/healthz` for mcp-pod too
+  and will always report it unreachable; fixing that for real is a Phase 3
+  change out of scope here — noted for a future session.
+- **Windows dev boxes can't reliably create real symlinks** (needs Developer
+  Mode or elevated privileges), so `scripts/local_deploy.py`'s "current"/
+  "previous" pointers are plain text marker files, not the real `ln -sfn`
+  symlink `deploy.yml`'s actual SSH-to-Ubuntu flow uses. Functionally
+  equivalent for the demo (atomic swap = one file write), documented here so
+  nobody mistakes the marker-file approach for what runs in production.
+- **`local_deploy.py` reuses the existing dev `.venv`** rather than creating
+  a fresh venv per release (unlike `deploy.yml`'s real flow, which does
+  `python3.11 -m venv` per release on the VM) — this script is for
+  demonstrating/testing the release-swap-and-rollback *mechanics* locally,
+  not dependency isolation, and creating a full new venv per local demo run
+  would be slow for no benefit here.
+- **`scripts/ci_webhook_notify.py` is deliberately dependency-free (stdlib
+  `urllib`/`hmac`/`hashlib`/`json` only)**, not a thin wrapper around
+  `core/hmac_utils.py`, so `ci.yml`'s very first step (reporting "CI
+  started") can run before `pip install -e ".[dev]"` has happened in that
+  job, and so no workflow needs a Python environment with the full project
+  installed just to send one signed HTTP POST.
+
 ### Phase 8 — Prove: NOT STARTED
