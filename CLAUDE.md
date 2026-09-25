@@ -1468,9 +1468,15 @@ convention directly on the model) — so there is exactly one
 unmodified once write-scope is correctly restricted to the app's own
 subdirectory (done in sub-step 4 above). `MonitoredApp.github_repo` exists
 per-row for forward compatibility/clarity, not because it's exercised
-differently today. If a genuinely separate repo is ever registered, that
-would need its own worktree-remote/PR-target wiring — not built, since
-nothing in the current scope needs it.
+differently today.
+
+**Update (see "Connect-a-repo" below): a genuinely separate repo IS now
+supported.** `healer/worktree.py:create_worktree_for_connected_app` +
+`healer/agent_free.py`'s `is_connected_app` branch and `mcp_server/
+github_client.py`'s per-instance `repo` override are exactly the
+worktree-remote/PR-target wiring this paragraph originally said wasn't
+built — built as part of the connect-a-repo feature, not this multi-app
+step, but it supersedes this note.
 
 **Not yet started** (next session should pick up here):
 - **Step 2: any language via OpenTelemetry** — sentinel OTLP/HTTP ingest
@@ -1487,3 +1493,173 @@ nothing in the current scope needs it.
   multi-app + OTLP checks.
 - The live CI self-healing proof (PR #14) predates this multi-app work and
   was correctly *not* repeated.
+
+### Connect-a-repo: "paste a URL → health report → AI fix PRs" — DONE
+
+A follow-up feature request, not in SPEC.md and independent of the
+multi-app/OpenTelemetry work above (that work's apps live inside this repo;
+this feature's apps are genuinely external repos). Still free, no new paid
+services.
+
+Built:
+- `alembic/versions/0004_connect_a_repo.py`: new `findings` table (dedup by
+  `fingerprint`, same shape as `errors`/`contract_violations`) plus
+  `monitored_apps.repo_url`/`auto_fix_high_severity`/`last_scanned_at`/
+  `health_score`.
+- `core/repo_connect.py`: `connect_repo()` — verifies `GITHUB_TOKEN` access
+  (`check_repo_access`, a clear message naming the fix on 403/404), clones
+  into `connected_apps/<name>/` (git-ignored, its own independent git repo),
+  auto-detects language/test/lint command from the manifest
+  (`pyproject.toml`/`requirements.txt` → python, `package.json` → js reading
+  its own `scripts.test`/`scripts.lint`, `go.mod` → go), and inserts the
+  `MonitoredApp` row directly (no YAML involved for these apps).
+- `core/scanner.py`: `run_scan()` — installs deps, runs tests/lint/
+  type-check/dependency-audit, all scoped to the app's own directory
+  (`_app_dir` rejects anything outside `connected_apps/`) with a timeout and
+  capped output per command. **Python apps get a real per-app virtualenv**
+  (`<app_dir>/.selfheal_venv/`, `_ensure_app_venv`) with pytest/ruff/mypy/
+  pip-audit installed into it — every command runs through that venv's own
+  `python -m`, never a bare `pytest`/`ruff` resolved from whatever's on
+  PATH. JS apps get the equivalent isolation for free from `npm install`'s
+  own `node_modules/`. Parsers: `parse_ruff_json`/`parse_mypy_json`/
+  `parse_pip_audit_json`/`parse_npm_audit_json`. `compute_health_score` is a
+  simple documented heuristic (100 minus a per-finding severity penalty,
+  minus 20 if tests fail), not a claim of code quality.
+- `healer/findings_actions.py`: `request_fix_for_finding` turns a `Finding`
+  into an ordinary `runtime_error` heal_job (a synthetic `Error` row sharing
+  the finding's own fingerprint) — zero changes needed to the existing
+  runtime heal loop, guardrails, or verification logic.
+  `maybe_auto_fix_high_severity` wires in the "auto-fix high-severity
+  findings" toggle (default off) after each scan.
+- `healer/onboarding.py`: a **deterministic, no-LLM** one-file PR (via new
+  `GitHubClient.get_branch_sha`/`create_branch`/`create_or_update_file` —
+  the Git Data/Contents API, no local clone needed) adding a dependency-free
+  error-reporting snippet (`selfheal_error_reporter.py`/`.js`) to the
+  connected repo, wired to that app's own `ingest_token`.
+- `healer/app.py`: `POST /api/apps` (connect + kick off a background scan),
+  `GET /api/apps`/`GET /api/apps/{id}`, `POST /api/apps/{id}/scan`,
+  `PATCH /api/apps/{id}` (the auto-fix toggle), `POST /api/findings/{id}/fix`,
+  `POST /api/apps/{id}/onboard-pr`. Scan progress streams over the existing
+  Socket.io connection (`scan_progress` event: `{app_id, stage, percent}`).
+- `web/app.js` + `web/style.css`: a new **Apps** tab — "Add app" form,
+  connected-apps list (health score, open findings, live progress bar), and
+  a per-app detail page (findings table with a **Fix** button per finding,
+  the auto-fix toggle, rescan/onboard-PR buttons).
+- `scripts/verify_all.py` gained `check_connect_a_repo` (schema reachability
+  always; `/api/apps` auth + content checks when a public URL/password are
+  given) — deliberately never clones/scans a real repo itself (too slow/
+  networked for a verifier meant to be re-run freely); the real flow is
+  covered by the tests below plus a real manual smoke run (see "Real
+  end-to-end verification" below).
+
+**Real, previously-external-repo-only case now supported**: unlike the
+multi-app work above (every app lives inside this repo, so `git worktree
+add` against this repo's own `.git` always worked), a connected app is a
+genuinely separate git repository. `healer/worktree.py:
+create_worktree_for_connected_app` clones from the app's own
+`connected_apps/<name>/` checkout (fast, local, no network) into a fresh
+worktree instead of using `git worktree add`; `remove_plain_clone` cleans it
+up. `healer/agent_free.py:run_heal_job_free` branches on `app.repo_url is
+not None` to pick this path, pushes to `https://x-access-token:<token>@
+github.com/<app.github_repo>.git` instead of `origin`, and opens the PR
+against that repo's own real default branch (fetched via `GitHubClient.
+get_repo()`). `healer/worker.py` now builds `GitHubClient(repo=app.
+github_repo)` per job from the job's own app, not the global `GITHUB_REPO`
+setting. CI-fix jobs for a connected app are out of scope (no GitHub Actions
+running under this project's control there) — only the runtime-fix ("Fix"
+button) path was extended.
+
+**Real bug found and fixed via live smoke-testing, not just unit tests**:
+the first version of `core/scanner.py` ran bare `pytest`/`ruff`/`mypy`/
+`pip-audit` subject to whatever happened to be resolvable on PATH for the
+shell subprocess — which, depending on how the healer-pod process was
+launched, was often *nothing* (a real cloned repo's scan failed with
+"'pytest' is not recognized...") or, worse, *this project's own* installed
+tools. Reproduced by actually cloning a real public GitHub repo
+(`octocat/Hello-World`) through the live API and watching it fail. Fixed
+with the per-app venv described above — and even after adding the venv,
+`_ensure_app_venv`'s first version still forgot to list `pytest` itself
+among the tools it installs into that venv (`_SCANNER_TOOLS` only had
+`ruff`, `mypy`, `pip-audit`), so every Python app's test step still failed,
+just with a different, easy-to-miss error ("No module named pytest") —
+caught by then testing against a real fixture Python project with a
+genuinely passing test and noticing `tests_passed` came back `False`
+instead of `True`. `tests/test_scanner.py::
+test_run_scan_isolates_a_real_python_app_in_its_own_venv` is a real
+(unmocked) regression test for exactly this — creates a real venv, installs
+the real tools, and asserts a trivially-passing test actually reports as
+passing. It's slow (~60-120s: a fresh venv + 4 package installs) but
+deliberate: a mocked version of this test would never have caught either
+bug, since both were about what actually happens when the real subprocess
+commands run.
+
+**Ambiguities resolved**:
+- **A `Finding`'s "Fix" reuses the runtime-error heal loop via a synthetic
+  `Error` row**, rather than teaching `healer/agent_free.py` a third source
+  kind. `get_error` (the first MCP tool the fix agent calls) then just
+  works unchanged. The tradeoff: a dependency-vulnerability finding (no
+  file/line) gets `file_path=app.local_repo_path, line_number=0` on its
+  synthetic `Error` row — a placeholder the fix agent's prompt can still
+  reason about via the finding's own `message`, not a precise location.
+- **`allowed_write_paths=["<local_repo_path>/"]` for a connected app is
+  just `["connected_apps/<name>/"]`** — `mcp_server/sandbox.py`'s existing
+  `check_writable`/`check_diff_paths_writable` needed *zero* changes,
+  because they only ever validate the relative-path *string* from a diff
+  against a prefix list; they never assume that string resolves under
+  `REPO_ROOT` for real (the actual file lives under `WORKTREES_ROOT`
+  instead, once `create_worktree_for_connected_app` clones the app in) —
+  confirmed by reading `check_writable` closely before assuming a sandbox
+  change was needed.
+- **The scanner's health score is a simple, explicitly-documented
+  heuristic**, not a real code-quality metric: SPEC-extension terms like
+  "score" and "test pass rate" don't define a formula, so
+  `compute_health_score` picks the simplest defensible one (100 minus a
+  per-finding severity penalty, minus 20 for a failing test suite, clamped
+  to [0, 100]) and says so in its docstring — avoids the score being
+  mistaken for something more rigorous than it is.
+- **Onboarding is deterministic (no LLM call) on purpose.** Reliably having
+  an AI agent auto-wire error-reporting middleware into an *arbitrary,
+  unknown* framework/entrypoint is a much harder and less reliable problem
+  than fixing a known bug with a regression test to prove it — a fixed
+  template plus an explicit "call this from your error handler" PR body is
+  simpler and actually reliable, in keeping with SPEC.md's general "pick
+  the simplest robust option" guidance extended to this feature.
+
+Verified (tests + a real manual run, no mocking for the manual part):
+- `tests/test_repo_connect.py` (16 tests: URL parsing, name slugging, stack
+  detection from a real `tmp_path` manifest, the access-check error message
+  via `respx`), `tests/test_scanner.py` (13 tests: parser unit tests, the
+  `_app_dir` containment guard, the health-score heuristic, and the real
+  unmocked venv-isolation integration test described above),
+  `tests/test_healer_worktree.py` (+1: `create_worktree_for_connected_app`
+  against a real local git repo), `tests/test_healer_worker.py` (+1: a
+  multi-app job's `GitHubClient` is built with that app's own
+  `github_repo`), `tests/test_healer_connect_repo_api.py` (7 tests: auth
+  gating, connect success/failure, list/detail, the auto-fix toggle, the
+  fix-a-finding-enqueues-a-real-heal_job flow, the onboarding-PR endpoint).
+- **Real, live manual run** (no pods' worth of mocking): started all 4 pods
+  for real, connected the real public repo `octocat/Hello-World` through
+  the live `/api/apps` endpoint (real GitHub API call, real `git clone`,
+  real scan), confirmed `GET /api/apps`/`GET /api/apps/{id}` return the
+  right shape, clicked "Fix" on the resulting finding through the real API
+  and confirmed a real `heal_job` row was enqueued with the finding's own
+  fingerprint — then created a second, local-only fixture Python project
+  (a `requirements.txt` + one trivially-passing test) and ran a real scan
+  against it directly, which is what surfaced and let me fix the two
+  isolation bugs above. All test-only rows/directories from this manual run
+  were cleaned up afterward (not left in the dev/test databases or
+  `connected_apps/`).
+
+`ruff check .`/`ruff format --check .` clean repo-wide. `mypy core sentinel
+mcp_server healer` (strict) clean. `pytest`: 325/326 (one pre-existing,
+environment-only Windows ProactorEventLoop flake in
+`test_healer_agent_free.py`, documented extensively earlier in this file —
+unrelated to this feature, reproduces identically on a clean stash of these
+changes).
+
+**Not done / deferred**: CI-fix (not just runtime-fix) for a connected
+external repo — would need GitHub Actions running in that repo and a
+webhook pointed back at this system, out of scope for this pass. The
+onboarding snippet's "next step" (actually wiring `report_error()`/
+`reportError()` into the app's own error handler) is intentionally left to
+the operator, not automated — see "ambiguities resolved" above.

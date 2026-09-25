@@ -792,6 +792,75 @@ async def check_metrics(report: Report, public_url: str | None, admin_password: 
         report.add("metrics: /api/metrics page via public URL", "SKIPPED", "no public URL/password")
 
 
+async def check_connect_a_repo(
+    report: Report, public_url: str | None, admin_password: str | None
+) -> None:
+    """ "Connect a repo" extension: schema is present, the app registered from
+    `config/monitored_apps.yaml` shows up in the API, and unauthenticated
+    access is still rejected. Deliberately does NOT connect/clone/scan a real
+    repo here (that hits real GitHub and takes 60-120s for a real per-app
+    venv -- too slow/networked for a verifier meant to be re-run freely);
+    that whole flow is covered end-to-end by tests/test_repo_connect.py,
+    tests/test_scanner.py and tests/test_healer_connect_repo_api.py, plus a
+    real manual smoke run (see CLAUDE.md's connect-a-repo log entry)."""
+    async with session_scope() as session:
+        try:
+            from core.models import Finding, MonitoredApp
+
+            findings_ok = True
+            await session.execute(select(Finding).limit(1))
+            apps = (await session.execute(select(MonitoredApp))).scalars().all()
+            has_repo_url_column = True
+            _ = [a.repo_url for a in apps]  # touches the column; raises if missing
+        except Exception as exc:  # noqa: BLE001
+            findings_ok = False
+            has_repo_url_column = False
+            report.add("connect-a-repo: schema present", "FAIL", str(exc))
+        else:
+            report.add(
+                "connect-a-repo: schema present",
+                "PASS" if findings_ok and has_repo_url_column else "FAIL",
+                f"findings table + monitored_apps.repo_url reachable, {len(apps)} app(s)",
+            )
+
+    if not (public_url and admin_password):
+        report.add(
+            "connect-a-repo: /api/apps reachable",
+            "SKIPPED",
+            "no public tunnel URL / --admin-password given",
+        )
+        return
+
+    async with httpx.AsyncClient(timeout=10.0, base_url=public_url) as client:
+        try:
+            unauth = await client.get("/api/apps")
+            report.add(
+                "connect-a-repo: /api/apps requires auth",
+                "PASS" if unauth.status_code == 401 else "FAIL",
+                f"-> {unauth.status_code}",
+            )
+        except httpx.HTTPError as exc:
+            report.add("connect-a-repo: /api/apps requires auth", "FAIL", str(exc))
+            return
+
+        login = await client.post(
+            "/api/auth/login", json={"username": "admin", "password": admin_password}
+        )
+        if login.status_code != 200:
+            report.add("connect-a-repo: /api/apps returns apps", "SKIPPED", "login failed")
+            return
+        try:
+            resp = await client.get("/api/apps")
+            names = [a.get("name") for a in resp.json()] if resp.status_code == 200 else []
+            report.add(
+                "connect-a-repo: /api/apps returns apps",
+                "PASS" if resp.status_code == 200 and "target_app" in names else "FAIL",
+                f"-> {resp.status_code}, apps: {names}",
+            )
+        except httpx.HTTPError as exc:
+            report.add("connect-a-repo: /api/apps returns apps", "FAIL", str(exc))
+
+
 def check_no_docker(report: Report) -> None:
     hits = []
     for pattern in (
@@ -845,6 +914,7 @@ async def main() -> int:
     await check_local_deploy(report)
     await check_github(report)
     await check_metrics(report, public_url, args.admin_password)
+    await check_connect_a_repo(report, public_url, args.admin_password)
     check_no_docker(report)
 
     # Criteria satisfied by existing, already-real evidence rather than a

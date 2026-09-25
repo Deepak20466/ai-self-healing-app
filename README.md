@@ -235,6 +235,46 @@ This was run for real during Phase 7 (see CLAUDE.md's Phase 7 log for the
 exact `deployments` rows and console output) — a `rolled_back` deployment
 row was written and `healer.notifier.notify()` fired without raising.
 
+## Connect any repo → health report → AI fix PRs
+
+Beyond the built-in `target_app` demo, the dashboard's **Apps** tab can
+connect *any* GitHub repo your `GITHUB_TOKEN` can see and start monitoring
+it — no code changes, no separate deployment, still 100% free:
+
+1. **Add app**: paste a repo URL (e.g. `https://github.com/owner/repo`).
+   The system confirms `GITHUB_TOKEN` can access it (a clear error tells you
+   to add the repo to the token's access list if not), clones it into
+   `connected_apps/<name>/` (git-ignored — a real, separate checkout, never
+   mixed with this repo's own history), and auto-detects its language,
+   test command, and lint command from its manifest (`pyproject.toml`/
+   `requirements.txt`, `package.json`, `go.mod`).
+2. **Instant scan** runs immediately (and again anytime via "Rescan now"):
+   installs the app's own dependencies into a dedicated per-app virtualenv
+   (`.selfheal_venv/`, or its own `node_modules/` for a Node app — so one
+   connected app's dependency versions can never collide with another's or
+   with this project's own), then runs its tests, a linter (ruff for
+   Python), a type checker (mypy for Python), and a free dependency
+   vulnerability scan (`pip-audit` / `npm audit`). Every finding (file,
+   line, severity, message) is stored in the `findings` table; progress
+   streams live over Socket.io.
+3. **Health report**: the app's detail page shows a 0-100 health score,
+   the finding list by severity, and the last scan time.
+4. **Fix**: click **Fix** on any finding to open a `runtime_error` heal_job
+   for it — same guardrails, same worktree/circuit-breaker/patch-size rules
+   as every other heal job — which opens a PR directly against *that app's*
+   own GitHub repo. The **"Auto-fix high-severity findings"** toggle (off by
+   default) does this automatically for new high/critical findings after
+   each scan.
+5. **Onboarding PR**: one click opens a PR adding a small, dependency-free
+   error-reporting snippet to the connected repo (no LLM call — a fixed
+   template picked by detected language), so once merged and wired up, live
+   runtime errors in that app flow into this system's detection loop too.
+
+See `core/repo_connect.py` (clone/detect/register), `core/scanner.py` (the
+isolated scan), and `healer/onboarding.py` for the implementation; a repo
+without a Python/Node manifest still scans (language `unknown`), it just has
+nothing to install.
+
 ## Re-running the demo
 
 Each of the 7 seeded bugs in `apps/target_app/bugs.py` only reproduces once:
