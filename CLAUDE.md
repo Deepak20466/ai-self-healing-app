@@ -1217,3 +1217,42 @@ rebased PR #10's branch (`autofix/0a9375e7f2e4-325`) onto the now-current
 API: PR #10 now shows exactly 2 changed files (`apps/target_app/bugs.py`,
 `apps/target_app/test_delivery_estimate_timezone.py`, +52/-8), matching the
 healer's actual fix.
+
+### Post-Phase-8 — public demo via Cloudflare Tunnel: DONE
+
+No cloud VM available, so `scripts/start_public_demo.ps1`/
+`stop_public_demo.ps1` expose the local pods publicly using Cloudflare quick
+tunnels (`cloudflared tunnel --url ...` — no account, no Docker, no DNS).
+**Only healer-pod (8000, UI/chat) and sentinel-pod's `/webhooks/ci` (8002)
+are tunneled**; the MCP server (8003) is never exposed since it has no auth
+of its own (it trusts being reachable only from the same host as the
+healer), and neither is the target app (8001) or Postgres (5432).
+`start_public_demo.ps1` refuses to start if `ADMIN_PASSWORD_HASH` isn't a
+real argon2 hash, `SESSION_SECRET` is unset, or `AUTO_MERGE=true` — see that
+script's `Test-EnvLooksReal`. `HEALER_WEBHOOK_URL`/`PUBLIC_URL` GitHub repo
+variables are updated to that run's tunnel URLs automatically (quick tunnel
+URLs are ephemeral, a new one every restart); `DEPLOY_HOST` is deliberately
+left alone/unset so `deploy.yml` keeps skipping cleanly, matching Phase 7's
+existing "skip cleanly when unconfigured" guardrail.
+
+**Real bug found and fixed**: `.env`'s `ENVIRONMENT=development` default
+suppresses the session cookie's `Secure` flag
+(`healer/app.py:140: secure=settings.environment != "development"`) — fine
+for `localhost`, but wrong the moment the app is reachable over the
+tunnel's real HTTPS. Set `ENVIRONMENT=production` before running a public
+demo (the start script doesn't do this for you, since it can't tell dev
+intent from demo intent — do it once in `.env` and leave it).
+
+**Verified for real through the live tunnel** (not just locally): a wrong
+login password returns 401 with no cookie set; unauthenticated GETs to
+`/api/metrics`, `/api/errors`, `/api/health`, `/api/deployments`,
+`/api/chat/history` all return 401; a correctly-HMAC-signed `/webhooks/ci`
+POST (built with `core.hmac_utils.sign_payload`, header `X-Signature`, exact
+byte-for-byte body — a heredoc's trailing newline silently broke the
+signature during testing, worth remembering if a manual webhook test ever
+mysteriously 401s) returns 200 and is recorded; an unsigned or
+tampered-signature request returns 401. `GITHUB_REPO`'s `.env` value is
+`Deepak20466/ai-self-healing-app`; `sentinel/schemas.py:CIWebhookPayload`
+requires `run_id`/`workflow`/`branch`/`sha`/`status` (not a raw GitHub
+Actions webhook shape) — use that shape for any future manual webhook test
+against this endpoint.

@@ -240,6 +240,50 @@ Both modes are idempotent: if the target is already at the original seeded
 state, the script prints a notice and does nothing (no empty commit, no
 duplicate PR).
 
+## Public demo via Cloudflare Tunnel
+
+No cloud VM? Expose your local pods publicly over HTTPS with a Cloudflare
+quick tunnel — no Cloudflare account, no Docker, no DNS setup.
+
+**Only the healer UI (port 8000) and the sentinel CI webhook (port 8002) are
+exposed.** The MCP server (8003), the target app (8001), and Postgres never
+are — the MCP server has no auth of its own (it's meant to be reached only
+by the healer, which runs on the same host), so tunneling it would let
+anyone on the internet call `propose_patch`/`run_tests`/etc. directly.
+
+URLs change every time the tunnel restarts (a quick tunnel has no stable
+address), so this is for live demos, not a permanent deployment — for that,
+see "Cloud deploy" below.
+
+**Prerequisites**: `winget install Cloudflare.cloudflared`, `gh auth login`,
+and a real `ADMIN_PASSWORD_HASH` in `.env` (`python scripts/hash_password.py`)
+— the start script refuses to run without one.
+
+```powershell
+.\scripts\start_public_demo.ps1
+```
+
+This starts all 4 pods, opens two `cloudflared tunnel --url` quick tunnels,
+prints both public URLs, and updates the `HEALER_WEBHOOK_URL`/`PUBLIC_URL`
+GitHub repo variables so `ci.yml` reports to the live webhook tunnel and
+`deploy.yml`'s notifications point at the live UI. `DEPLOY_HOST` is left
+alone — keep it unset so `deploy.yml` keeps skipping cleanly (this is a
+tunnel demo, not a real deploy target).
+
+Stop everything with:
+
+```powershell
+.\scripts\stop_public_demo.ps1
+```
+
+Because a Cloudflare quick tunnel does full HTTPS termination, the session
+cookie's `Secure` flag matters here — `ENVIRONMENT` must be `production` (not
+`development`) in `.env` for `healer/app.py` to set it. Verified: with
+`ENVIRONMENT=production`, an unauthenticated request to `/api/metrics`,
+`/api/errors`, `/api/health`, `/api/deployments`, or `/api/chat/history`
+through the tunnel returns 401; a signed `/webhooks/ci` POST returns 200,
+an unsigned or tampered one returns 401.
+
 ## Cloud deploy in ~10 minutes
 
 1. Spin up any Ubuntu 22.04/24.04 VM with 1-2GB RAM (AWS EC2, GCP e2-small,
