@@ -15,6 +15,7 @@ coverage.xml
 *.env.local
 
 metrics.json
+ram_measurement.json
 worktrees/
 releases/
 local_deploy_root/
