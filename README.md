@@ -74,33 +74,70 @@ Set `ADMIN_PASSWORD_HASH` (from the command above) and `SESSION_SECRET` in
 `.env` before starting healer-pod — the chat/dashboard/metrics UI is
 unauthenticated-401 without them.
 
-## AI backend: free mode vs. API mode
+## AI backend: pluggable (Claude Code / Codex / Gemini CLIs, or the Anthropic API)
 
 The healer (`healer/`) drives every automated fix (and the AI chat) through
-one of two interchangeable backends, selected by `USE_CLAUDE_CODE` in `.env`:
+one of **four** interchangeable backends, selected by `AI_BACKEND` in `.env`:
 
-- **Free mode (default, `USE_CLAUDE_CODE=true`).** Uses the local Claude
-  Code CLI on your own Claude subscription login — no API key, no per-token
-  billing. One-time setup: run `claude` once in this repo and log in
-  interactively. After that, `python -m healer.worker` (or the combined
-  `healer.app` pod, which runs the worker loop in-process — see below) just
-  works.
-- **API mode (`USE_CLAUDE_CODE=false`).** Uses the official `anthropic` SDK
-  and requires `ANTHROPIC_API_KEY`. Install the optional extra first:
-  `pip install .[api]`.
+| `AI_BACKEND` | Module | Auth | Status |
+|---|---|---|---|
+| `claude_cli` (default) | `healer/agent_free.py` | local Claude Code CLI, your Claude subscription login | **live-verified** (real PRs — see below) |
+| `codex_cli` | `healer/agent_codex.py` | local OpenAI Codex CLI, your ChatGPT/API login | **documented-only, untested live** — see caveat below |
+| `gemini_cli` | `healer/agent_gemini.py` | local Google Gemini CLI, your Google account login | **documented-only, untested live** — see caveat below |
+| `api` | `healer/runtime_agent.py` + `healer/ci_agent.py` | `ANTHROPIC_API_KEY`, official `anthropic` SDK | tested (mocked), no real end-to-end PR yet — see CLAUDE.md Phase 4 |
 
-Both backends share the same queue, git-worktree lifecycle, PR/issue
+The old `USE_CLAUDE_CODE` boolean still works as a backwards-compatible
+alias (`true` → `ai_backend=claude_cli`, `false` → `ai_backend=api`) — see
+`core/config.py`'s `_derive_ai_backend_from_legacy_flag` for exactly how the
+two settings interact if both are present. New setups should set
+`AI_BACKEND` directly.
+
+- **`claude_cli` (default, recommended).** Uses the local Claude Code CLI on
+  your own Claude subscription login — no API key, no per-token billing.
+  One-time setup: run `claude` once in this repo and log in interactively.
+  After that, `python -m healer.worker` (or the combined `healer.app` pod,
+  which runs the worker loop in-process — see below) just works.
+- **`codex_cli` / `gemini_cli`.** Same idea for OpenAI's `codex` and
+  Google's `gemini` CLIs, respectively — one-time interactive login, then
+  the worker drives them non-interactively. **Neither CLI was installed on
+  the machine these backends were built on** (`codex --help`/`gemini --help`
+  both fail with "command not found" — checked directly), so
+  `healer/agent_codex.py`/`healer/agent_gemini.py` are built from each
+  project's public documentation, not a live `--help` dump, and have never
+  been run against a real install. Each module's own docstring spells out
+  exactly what's assumed vs. verified, including a real, documented gap for
+  Codex CLI specifically: it has no per-invocation equivalent of Claude
+  Code's `--allowedTools`/`--disallowedTools` to restrict it to only the
+  selfheal MCP server, so `agent_codex.py` uses a `sandbox_mode="read-only"`
+  Codex config instead (its own built-in file-write/shell tools can't
+  modify anything; the only way it can make a lasting change is by calling
+  `propose_patch` through MCP) — a real mitigation, but not the same
+  guarantee `--disallowedTools` gives Claude Code, and not confirmed
+  against a live install. **If you install either CLI, re-verify this
+  module against it before trusting it in anything but a sandboxed local
+  test** — see CLAUDE.md's "Pluggable AI backend" entry for what to check.
+- **`api`.** Uses the official `anthropic` SDK and requires
+  `ANTHROPIC_API_KEY`. Install the optional extra first: `pip install
+  .[api]`.
+
+All four backends share the same queue, git-worktree lifecycle, PR/issue
 creation, chat routing, and guardrails (patch-scope sandboxing, anti-cheat
-checks, circuit breakers, budget caps) — see `healer/agent_free.py`'s module
-docstring for exactly how free mode's verification differs from API mode's,
-and why that difference doesn't weaken any guardrail.
+checks, circuit breakers, budget caps) — **the guardrails live entirely in
+the MCP server (`mcp_server/`), never in the agent modules**, so a new,
+less-trustworthy CLI backend can only ever be a different way to *call* an
+LLM that talks to the same sandboxed tools, never a way around them. See
+`healer/agent_free.py`'s module docstring for exactly how free-mode
+verification differs from API mode's, and why that difference doesn't
+weaken any guardrail — `agent_codex.py`/`agent_gemini.py` follow the same
+principle.
 
-**A note on unattended use of a consumer subscription (free mode):** running
-`claude` unattended, continuously, on a server is a different usage pattern
-than interactive use, and should be checked against Anthropic's terms before
-running that way in production for real. **API mode is the intended
-production option** for a server that runs autonomously; free mode is meant
-for local development and demos where a human is around.
+**A note on unattended use of a consumer subscription (any CLI backend):**
+running a CLI unattended, continuously, on a server is a different usage
+pattern than interactive use, and should be checked against the relevant
+provider's terms before running that way in production for real. **API
+mode is the intended production option** for a server that runs
+autonomously; the CLI backends are meant for local development and demos
+where a human is around.
 
 ## Running the pods
 
@@ -136,10 +173,15 @@ admin password you hashed above.
 ```
 
 pytest always points at a throwaway `selfheal_test` database and mocks the
-Anthropic API, the Claude Code CLI subprocess, and GitHub — see CLAUDE.md for
-details. **271 tests, 270 passing** as of the last commit (one failure is an
-environment-only artifact — a different local process already listening on
-a pod's port — not a code defect; see CLAUDE.md Phase 6/7 logs).
+Anthropic API, every CLI backend's subprocess (Claude Code/Codex/Gemini),
+and GitHub — see CLAUDE.md for details. **358 tests, typically 357-358
+passing** as of the last commit — the occasional single failure is a known,
+pre-existing Windows-only flake in the Windows `ProactorEventLoop`'s
+connection teardown under pytest-asyncio's session-scoped loop (shows up as
+`RuntimeError: Event loop is closed` during a test's own DB-connection
+cleanup, on a different test each run depending on timing — not a code
+defect; see CLAUDE.md's dated "Pluggable AI backend" and Phase 5+ log
+entries).
 
 ## Proof: a real end-to-end free-mode PR
 
@@ -385,7 +427,7 @@ an unsigned or tampered one returns 401.
 | `DEPLOY_USER` | `deploy.yml`, `rollback.yml` | usually `deploy` |
 | `DEPLOY_SSH_KEY` | `deploy.yml`, `rollback.yml` | private key for `DEPLOY_USER` |
 | `HEALER_WEBHOOK_SECRET` | all workflows | must match `.env`'s `HEALER_WEBHOOK_SECRET` |
-| `ANTHROPIC_API_KEY` | none directly | only needed in `.env` if `USE_CLAUDE_CODE=false` |
+| `ANTHROPIC_API_KEY` | none directly | only needed in `.env` if `AI_BACKEND=api` |
 
 **Variables** (same page, "Variables" tab):
 
@@ -395,9 +437,15 @@ an unsigned or tampered one returns 401.
 | `PUBLIC_URL` | `health-check.yml` | the public base URL to probe every 15 min |
 
 **`.env` on the VM** (`/opt/selfheal/shared/.env`, never committed):
-`USE_CLAUDE_CODE`, `CLAUDE_CLI_PATH`/`CLAUDE_CLI_TIMEOUT_S`/
-`CLAUDE_CLI_MAX_TURNS`/`MAX_CLI_CALLS_PER_DAY` (free mode), or
-`ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL` (API mode); `GITHUB_TOKEN`
+`AI_BACKEND` (`claude_cli`/`codex_cli`/`gemini_cli`/`api` — `USE_CLAUDE_CODE`
+still works as a legacy alias for `claude_cli`/`api`), `CLAUDE_CLI_PATH`/
+`CLAUDE_CLI_TIMEOUT_S`/`CLAUDE_CLI_MAX_TURNS` (`claude_cli`),
+`CODEX_CLI_PATH`/`CODEX_CLI_TIMEOUT_S`/`CODEX_CLI_MAX_TURNS` (`codex_cli`,
+untested live — see the AI backend section above),
+`GEMINI_CLI_PATH`/`GEMINI_CLI_TIMEOUT_S`/`GEMINI_CLI_MAX_TURNS`
+(`gemini_cli`, same caveat), `MAX_CLI_CALLS_PER_DAY` (shared by all three
+CLI backends), or `ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL` (`api` mode);
+`GITHUB_TOKEN`
 (fine-grained: Contents, Pull requests, Issues, Actions read/write) and
 `GITHUB_REPO`; `DATABASE_URL`/`TEST_DATABASE_URL`; `ADMIN_PASSWORD_HASH`;
 `SESSION_SECRET`; `HEALER_WEBHOOK_SECRET`; the cost caps

@@ -4,19 +4,29 @@ equivalently `python -m healer.main`).
 Dequeues `heal_jobs` with `SKIP LOCKED`, woken by `LISTEN/NOTIFY` (SPEC.md:
 "no polling spin") with a bounded fallback wait so a missed/raced NOTIFY
 can't stall the worker forever. Handles all three `HealJobType`s, dispatched
-by job type to one of two AI backends selected once at startup by
-`settings.use_claude_code` (SPEC.md AI BACKENDS):
+by job type to one of four pluggable AI backends selected once at startup by
+`settings.ai_backend` (`settings.use_claude_code` still works too, as a
+backwards-compatible alias derived into `ai_backend` in `core/config.py` —
+see that module for exactly how):
 
-- Free mode (default): `healer.agent_free.run_heal_job_free`/
+- `"claude_cli"` (default): `healer.agent_free.run_heal_job_free`/
   `run_ci_heal_job_free`, driving the fix loop through the local Claude Code
   CLI on the user's subscription login — no `anthropic_client` needed.
-- API mode: `healer.runtime_agent.run_heal_job`/`healer.ci_agent.
+- `"codex_cli"`: `healer.agent_codex.run_heal_job_codex`/
+  `run_ci_heal_job_codex`, the local OpenAI Codex CLI. See that module's
+  docstring for its "untested against a real install" status.
+- `"gemini_cli"`: `healer.agent_gemini.run_heal_job_gemini`/
+  `run_ci_heal_job_gemini`, the local Google Gemini CLI. Same caveat.
+- `"api"`: `healer.runtime_agent.run_heal_job`/`healer.ci_agent.
   run_ci_heal_job` via the `anthropic` SDK (an optional extra, imported
   lazily by `healer.anthropic_client.build_anthropic_client`).
 
-Both backends share the same `(job_id, *, mcp, github, remote)`-shaped
-interface (API mode's just also takes `anthropic_client`), so this dispatch
-is the only place that needs to know which backend is active.
+All four backends share the same `(job_id, *, mcp, github, remote)`-shaped
+interface (API mode's just also takes `anthropic_client`, bound in ahead of
+time via `functools.partial`), so this dispatch is the only place that needs
+to know which backend is active — every import is lazy (inside the matching
+branch), so a machine running one backend never needs the others' CLIs
+installed or their modules imported at all.
 """
 
 from __future__ import annotations
@@ -59,25 +69,49 @@ class _JobRunners:
 
 
 def _select_backend() -> _JobRunners:
-    if settings.use_claude_code:
+    backend = settings.ai_backend
+
+    if backend == "claude_cli":
         from healer.agent_free import run_ci_heal_job_free, run_heal_job_free
 
-        logger.info("worker.backend_selected", backend="free (Claude Code CLI)")
+        logger.info("worker.backend_selected", backend="claude_cli (Claude Code CLI)")
         return _JobRunners(runtime_or_contract=run_heal_job_free, ci_failure=run_ci_heal_job_free)
 
-    from functools import partial
+    if backend == "codex_cli":
+        from healer.agent_codex import run_ci_heal_job_codex, run_heal_job_codex
 
-    from healer.anthropic_client import build_anthropic_client
-    from healer.ci_agent import run_ci_heal_job
-    from healer.runtime_agent import run_heal_job
+        logger.info("worker.backend_selected", backend="codex_cli (OpenAI Codex CLI)")
+        return _JobRunners(runtime_or_contract=run_heal_job_codex, ci_failure=run_ci_heal_job_codex)
 
-    anthropic_client = build_anthropic_client()
-    logger.info(
-        "worker.backend_selected", backend="api (anthropic SDK)", model=settings.anthropic_model
-    )
-    return _JobRunners(
-        runtime_or_contract=partial(run_heal_job, anthropic_client=anthropic_client),
-        ci_failure=partial(run_ci_heal_job, anthropic_client=anthropic_client),
+    if backend == "gemini_cli":
+        from healer.agent_gemini import run_ci_heal_job_gemini, run_heal_job_gemini
+
+        logger.info("worker.backend_selected", backend="gemini_cli (Google Gemini CLI)")
+        return _JobRunners(
+            runtime_or_contract=run_heal_job_gemini, ci_failure=run_ci_heal_job_gemini
+        )
+
+    if backend == "api":
+        from functools import partial
+
+        from healer.anthropic_client import build_anthropic_client
+        from healer.ci_agent import run_ci_heal_job
+        from healer.runtime_agent import run_heal_job
+
+        anthropic_client = build_anthropic_client()
+        logger.info(
+            "worker.backend_selected",
+            backend="api (anthropic SDK)",
+            model=settings.anthropic_model,
+        )
+        return _JobRunners(
+            runtime_or_contract=partial(run_heal_job, anthropic_client=anthropic_client),
+            ci_failure=partial(run_ci_heal_job, anthropic_client=anthropic_client),
+        )
+
+    raise ValueError(
+        f"unknown AI_BACKEND {backend!r}; expected one of "
+        "'claude_cli', 'codex_cli', 'gemini_cli', 'api'"
     )
 
 

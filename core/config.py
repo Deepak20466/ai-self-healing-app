@@ -11,7 +11,7 @@ from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Absolute, not ".env": this module is imported by code that can run with a
@@ -55,16 +55,41 @@ class Settings(BaseSettings):
     healer_port: int = 8000
 
     # --- AI backend selection ------------------------------------------------
-    # Free mode (default): healer/agent_free.py drives the fix loop through the
-    # local Claude Code CLI on the user's own subscription login, no API key.
-    # API mode: healer/runtime_agent.py + healer/ci_agent.py via the `anthropic`
-    # SDK, which requires anthropic_api_key below and is only imported lazily
-    # (see healer/anthropic_client.py) since `anthropic` is an optional extra.
+    # `ai_backend` picks which of four backends healer/worker.py's
+    # _select_backend() dispatches to:
+    #   - "claude_cli" (default): healer/agent_free.py, the local Claude Code
+    #     CLI on the user's own subscription login, no API key.
+    #   - "codex_cli": healer/agent_codex.py, the local OpenAI Codex CLI.
+    #   - "gemini_cli": healer/agent_gemini.py, the local Google Gemini CLI.
+    #   - "api": healer/runtime_agent.py + healer/ci_agent.py via the
+    #     `anthropic` SDK, which requires anthropic_api_key below and is only
+    #     imported lazily (see healer/anthropic_client.py) since `anthropic`
+    #     is an optional extra.
+    # `use_claude_code` is the original (Phase 5+) boolean flag, kept as a
+    # backwards-compatible alias: see `_derive_ai_backend_from_legacy_flag`
+    # below for exactly how the two interact. New deployments should set
+    # AI_BACKEND directly; USE_CLAUDE_CODE keeps working for anyone who
+    # already has it in their .env.
+    ai_backend: str = "claude_cli"
     use_claude_code: bool = True
     claude_cli_path: str | None = None  # None = look up "claude" on PATH
     claude_cli_timeout_s: int = 600
     claude_cli_max_turns: int = 30
     max_cli_calls_per_day: int = 50
+
+    # --- Codex CLI (ai_backend="codex_cli" only) ------------------------------
+    # See healer/agent_codex.py's module docstring for the (documented-only,
+    # not verified against a real install on this machine) flags/config this
+    # backend relies on.
+    codex_cli_path: str | None = None  # None = look up "codex" on PATH
+    codex_cli_timeout_s: int = 600
+    codex_cli_max_turns: int = 30
+
+    # --- Gemini CLI (ai_backend="gemini_cli" only) ----------------------------
+    # See healer/agent_gemini.py's module docstring for the same caveat.
+    gemini_cli_path: str | None = None  # None = look up "gemini" on PATH
+    gemini_cli_timeout_s: int = 600
+    gemini_cli_max_turns: int = 30
 
     # --- Anthropic / Claude (API mode only) -----------------------------------
     anthropic_api_key: str | None = None
@@ -149,6 +174,32 @@ class Settings(BaseSettings):
     #: an ingest report belongs to. Optional: an app that hasn't set this
     #: still gets its errors captured, just unattributed (app_id=None).
     sentinel_ingest_token: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_ai_backend_from_legacy_flag(cls, data: object) -> object:
+        """Backwards compatibility: `USE_CLAUDE_CODE` still works if set.
+
+        pydantic-settings merges every source (env, `.env`, init kwargs) into
+        one dict *before* running "before" model validators, so `data` here
+        already reflects whatever the environment explicitly set — a key is
+        present in `data` iff it was explicitly provided somewhere, never
+        just because the field has a default. That's what lets this
+        distinguish "USE_CLAUDE_CODE was explicitly set and AI_BACKEND
+        wasn't" (derive ai_backend from it) from "neither was set" (leave
+        ai_backend at its own "claude_cli" default) and from "both were set"
+        (AI_BACKEND wins outright — an explicit new-style setting should
+        never be silently overridden by the old one).
+        """
+        if not isinstance(data, dict):
+            return data
+        has_legacy = "use_claude_code" in data
+        has_new = "ai_backend" in data
+        if has_legacy and not has_new:
+            raw = str(data["use_claude_code"]).strip().lower()
+            is_true = raw in ("1", "true", "yes", "on")
+            data = {**data, "ai_backend": "claude_cli" if is_true else "api"}
+        return data
 
     @property
     def allowed_repo_owners_list(self) -> list[str]:

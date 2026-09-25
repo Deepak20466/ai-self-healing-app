@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from core.config import settings as core_settings
 from core.db import session_scope
 from core.models import HealJob, HealJobStatus, HealJobType, MonitoredApp
 from core.queue import dequeue_heal_job, enqueue_heal_job
@@ -147,3 +148,49 @@ async def test_process_next_job_uses_the_jobs_own_app_github_repo(
     async with session_scope() as session:
         refreshed = await session.get(HealJob, job_id)
         assert refreshed is not None
+
+
+@pytest.mark.parametrize(
+    ("backend", "module_name", "runtime_fn", "ci_fn"),
+    [
+        ("claude_cli", "healer.agent_free", "run_heal_job_free", "run_ci_heal_job_free"),
+        ("codex_cli", "healer.agent_codex", "run_heal_job_codex", "run_ci_heal_job_codex"),
+        ("gemini_cli", "healer.agent_gemini", "run_heal_job_gemini", "run_ci_heal_job_gemini"),
+    ],
+)
+def test_select_backend_dispatches_free_mode_backends_by_ai_backend_setting(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    module_name: str,
+    runtime_fn: str,
+    ci_fn: str,
+) -> None:
+    """`_select_backend` must resolve to the right module's functions for
+    each of the three free-mode `AI_BACKEND` values, importing lazily (so
+    selecting one backend never requires another backend's CLI/module)."""
+    monkeypatch.setattr(core_settings, "ai_backend", backend)
+
+    runners = worker_module._select_backend()
+
+    module = __import__(module_name, fromlist=[runtime_fn, ci_fn])
+    assert runners.runtime_or_contract is getattr(module, runtime_fn)
+    assert runners.ci_failure is getattr(module, ci_fn)
+
+
+def test_select_backend_api_mode_builds_anthropic_client_and_binds_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(core_settings, "ai_backend", "api")
+    monkeypatch.setattr(core_settings, "anthropic_api_key", "sk-test-fake-key-not-real")
+
+    runners = worker_module._select_backend()
+
+    assert runners.runtime_or_contract.func.__name__ == "run_heal_job"  # type: ignore[attr-defined]
+    assert runners.ci_failure.func.__name__ == "run_ci_heal_job"  # type: ignore[attr-defined]
+
+
+def test_select_backend_rejects_unknown_ai_backend_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(core_settings, "ai_backend", "not-a-real-backend")
+
+    with pytest.raises(ValueError, match="unknown AI_BACKEND"):
+        worker_module._select_backend()

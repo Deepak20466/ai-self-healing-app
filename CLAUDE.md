@@ -1695,3 +1695,194 @@ push-less response now correctly fails it.
 mcp_server healer` (strict) clean. `pytest`: 328/329 (the one failure is the
 pre-existing, already-documented Windows ProactorEventLoop flake in
 `test_healer_agent_free.py`, unrelated to this change).
+
+### 2026-09-26 — Pluggable AI backend (Codex CLI, Gemini CLI)
+
+Follow-up request, not in SPEC.md: make the healer's AI backend pluggable
+beyond the existing free-mode-Claude-Code-CLI / API-mode-Anthropic-SDK pair,
+adding OpenAI's Codex CLI and Google's Gemini CLI as two more selectable
+backends.
+
+Built:
+- `core/config.py`: new `ai_backend: str` setting (`"claude_cli"` (default)
+  | `"codex_cli"` | `"gemini_cli"` | `"api"`), plus per-backend
+  `codex_cli_path`/`codex_cli_timeout_s`/`codex_cli_max_turns` and
+  `gemini_cli_path`/`gemini_cli_timeout_s`/`gemini_cli_max_turns` (mirroring
+  the existing `claude_cli_*` settings). The old `use_claude_code: bool`
+  setting is kept, working as a backwards-compatible alias via a new
+  `@model_validator(mode="before")` classmethod
+  (`_derive_ai_backend_from_legacy_flag`): if `USE_CLAUDE_CODE` is present
+  in the merged env/`.env`/init-kwargs data and `AI_BACKEND` is not, it
+  derives `ai_backend` (`true` -> `"claude_cli"`, `false` -> `"api"`); if
+  both are present, `AI_BACKEND` wins outright (an explicit new-style
+  setting is never silently overridden by the legacy one); if neither is
+  present, `ai_backend` just keeps its own `"claude_cli"` default. Verified
+  directly (not just by reading pydantic-settings' docs) that a "before"
+  model validator on `BaseSettings` receives the fully-merged dict *before*
+  defaults are applied, so "was this key explicitly set anywhere" is
+  reliably distinguishable from "is this field's default value" — a
+  standalone script exercising all three cases (legacy-only, new-only,
+  both) confirmed the expected `ai_backend` in each case before this was
+  wired into the real `Settings` class.
+- `healer/cli_common.py` (new, shared): factors out the parts of
+  `healer/agent_free.py`'s CLI-subprocess plumbing that have nothing to do
+  with which specific CLI is being launched — the Windows `.cmd`/`.bat`-shim
+  workaround (`kill_process_tree`/`is_windows_shim`/`windows_shim_command`,
+  copied logic, not imported, so `agent_codex.py`/`agent_gemini.py` have no
+  dependency on `agent_free.py`'s internals — see that module for why the
+  shim handling is necessary at all), a generic `CLIError` exception
+  hierarchy (`CLINotFoundError`/`CLINotLoggedInError`/`CLIUsageLimitError`/
+  `CLITimeoutError`/`CLIMalformedOutputError`), and `strip_env_vars`.
+  **`agent_free.py` itself was deliberately left untouched** — it's a
+  load-bearing, already-tested Phase 5+ module with its own tested
+  `ClaudeCLI*` exception names and `CLIResult` dataclass; only the two new
+  backend modules import from `cli_common.py`.
+- `healer/agent_codex.py` (new): OpenAI Codex CLI backend. Exposes
+  `run_heal_job_codex`/`run_ci_heal_job_codex` (same `(job_id, *, mcp,
+  github, remote)` signature as `agent_free.py`'s equivalents) and
+  `run_codex_cli` (the low-level subprocess wrapper, mirroring
+  `run_claude_cli`). Reuses `agent_free.CLIResult` (not a separate
+  structurally-identical dataclass — needed so the shared, imported-as-is
+  `agent_free._verify_and_summarize`/`_runtime_prompt`/`_ci_prompt`
+  functions type-check against it) and `agent_free._cli_calls_today`/
+  `_is_cli_budget_paused` (reused directly rather than duplicated, so
+  `tests/conftest.py`'s existing `isolated_cli_call_date` fixture, which
+  monkeypatches `healer.agent_free.datetime`, isolates this backend's tests
+  too with no new fixture needed — this was a real bug caught by running
+  the new tests: an early version defined its own `_cli_calls_today` using
+  its own `datetime` import, which the shared fixture never touched, so
+  every e2e test saw a spurious `PAUSED_BUDGET` from stale
+  `cli_invocation` rows left by earlier runs against the real current UTC
+  date). `codex exec -` (stdin prompt) `--json` is Codex's non-interactive
+  mode; unlike Claude Code's `--output-format json` (one JSON object),
+  `--json` emits **newline-delimited JSON events**, so `run_codex_cli`
+  parses every line and keeps the last `task_complete`/`agent_message`/
+  `error`-typed event as the result.
+- `healer/agent_gemini.py` (new): Google Gemini CLI backend, same shape
+  (`run_heal_job_gemini`/`run_ci_heal_job_gemini`/`run_gemini_cli`). Prompt
+  via stdin (Gemini CLI runs non-interactively whenever stdin is piped, per
+  its docs), `--output-format json` (a single JSON object, like Claude
+  Code's — `response`/`stats.models.<model>.tokens.{prompt,candidates,
+  cached}` is the documented shape this module parses, falling back to a
+  flat `usage` shape if that's what a given version actually returns).
+- `healer/worker.py`: `_select_backend()` now dispatches on
+  `settings.ai_backend` across all four values (was a two-way `if
+  settings.use_claude_code` check), each branch importing its backend
+  lazily — selecting one backend never requires another backend's module
+  (or CLI) to even be importable/installed. An unrecognized `AI_BACKEND`
+  value raises `ValueError` at worker startup rather than silently falling
+  through to a default, so a typo in `.env` fails loudly instead of quietly
+  running the wrong backend.
+- Tests: `tests/test_healer_agent_codex.py`/`tests/test_healer_agent_gemini.py`
+  (32 new tests total), mirroring `tests/test_healer_agent_free.py`'s
+  structure exactly — `run_codex_cli`/`run_gemini_cli` unit tests against a
+  mocked subprocess (success/timeout/not-found/not-logged-in/usage-limit/
+  malformed-output, plus one test per backend confirming the MCP-restriction
+  config file it writes has the right shape/content), and end-to-end
+  `run_heal_job_codex`/`run_heal_job_gemini` tests against a real MCP
+  server, real git worktrees, and a throwaway git remote, with only the
+  low-level CLI call itself monkeypatched (same "the fake performs its
+  edits via real `git apply`/`mcp.call_tool` before returning a scripted
+  result, so the code's own post-hoc verification is what's actually being
+  tested" principle `test_healer_agent_free.py` established). Also added
+  `tests/test_healer_worker.py::
+  test_select_backend_dispatches_free_mode_backends_by_ai_backend_setting`
+  (parametrized over all three CLI backends), a matching `api`-mode test,
+  and an unknown-`AI_BACKEND`-value test.
+
+**What's live-verified vs. documented-only, stated plainly:**
+- `claude_cli` (unchanged, pre-existing): live-verified — real PRs (#10,
+  #14) opened by the real CLI against real bugs, see earlier phase-log
+  entries.
+- `codex_cli`/`gemini_cli` (this session's work): **documented-only,
+  never run against a real install.** `codex --help` and `gemini --help`
+  were both checked directly on this machine before writing either module
+  and both failed with "command not found" (no npm/pip install of either
+  present) — confirmed via Bash, not assumed. Everything about each CLI's
+  actual flags, JSON/JSONL output shape, and MCP-restriction mechanism is
+  built from that CLI's own public documentation (cited in each module's
+  docstring) as of this session, via live web search rather than from
+  training-data recall specifically because CLAUDE.md's Phase 4 log already
+  has a documented incident of a guessed-from-training-data model/tool slug
+  turning out to be wrong. A real, non-hypothetical limitation was found
+  during that research and is called out explicitly in
+  `agent_codex.py`'s docstring rather than glossed over: Codex CLI's
+  non-interactive `exec` mode has no documented way to allow MCP tool calls
+  without either (a) an interactive approval prompt that can't be answered
+  with stdin already closed, or (b) `--dangerously-bypass-approvals-and-
+  sandbox`, which disables *all* sandboxing, not just MCP approval — citing
+  `openai/codex` issue #24135. This codebase's answer is `sandbox_mode=
+  "read-only"` + `approval_policy="never"` in a per-invocation `CODEX_HOME`
+  (Codex's own built-in write/shell tools become no-ops under a read-only
+  sandbox, so the *only* way it can make a lasting change is through
+  `propose_patch` via MCP) — a real, narrower mitigation than the documented
+  bypass flag, but explicitly **not** the same tool-level guarantee
+  `--disallowedTools` gives Claude Code, and not confirmed against a live
+  `codex` binary. Before trusting either new backend beyond a sandboxed
+  local test: install the real CLI, re-run this session's own
+  live-verification pattern (the same "trigger a seeded bug, let the healer
+  work it, confirm a real PR" check documented under "Post-Phase-8 — real
+  end-to-end free-mode PR" above), and fix whatever's wrong in the relevant
+  module + its docstring. Do not assume either module is correct just
+  because its mocked tests pass — the mocked tests, by construction, can
+  only confirm this module's *own* logic handles a given wire shape
+  correctly, never that the real CLI actually produces that shape (the
+  Phase 5+ `claude_cli` backend itself had two bugs — the `cmd.exe`
+  double-quoting bug and the `.mcp.json` cwd-resolution bug — that were
+  invisible to its mocked test suite and only surfaced by running a real
+  job against the real CLI; see that phase's log).
+- `api` mode: unchanged by this session, still only tested with a mocked
+  Anthropic client (no real end-to-end PR via API mode yet — see Phase 4's
+  "still not completed" note, which remains accurate).
+
+**Ambiguities resolved this session**:
+- **`ai_backend` derivation happens in a `model_validator(mode="before")`,
+  not a `@property`** — a computed property can't change what
+  `settings.ai_backend` *is* (other code reads the field directly), and a
+  `model_validator(mode="after")` would run too late to let a plain string
+  default (`"claude_cli"`) coexist with "was this explicitly set" detection
+  the way `mode="before"`'s access to the raw pre-validation dict does.
+- **Both new CLI backends reuse `agent_free.CLIResult` as their own
+  `CLIResult`** (`CLIResult = agent_free.CLIResult`, not a separate
+  dataclass with identical fields) rather than each defining their own.
+  Discovered via mypy strict, not by design upfront: `_verify_and_summarize`
+  (imported unchanged from `agent_free.py`, since its logic — inspect the
+  worktree's diff, call the shared `run_tests` MCP tool — has zero
+  backend-specific behavior) is typed against `agent_free.CLIResult`
+  specifically; a structurally-identical-but-distinct dataclass in each new
+  module failed mypy's nominal typing (`incompatible type
+  "agent_codex.CLIResult"; expected "agent_free.CLIResult"`). Reusing the
+  same class is both the mypy fix and, in hindsight, the more honest
+  design — there's nothing backend-specific about what fields a parsed CLI
+  result needs to carry.
+- **`MAX_CLI_CALLS_PER_DAY` is a single cap shared across whichever CLI
+  backend is active, not a separate per-backend counter** — all three CLI
+  backends write the same `cli_invocation` `audit_log` action name (with a
+  `details.backend` field distinguishing which one, for observability), and
+  `_is_cli_budget_paused` counts that action name since UTC midnight
+  regardless of backend. This is intentional, not an oversight: exactly one
+  backend is active per deployment (`AI_BACKEND` is a single startup-time
+  setting), so a per-backend counter would never actually differ from the
+  shared one in practice, and sharing avoids adding three more settings for
+  a distinction that can't currently occur.
+- **`healer/cli_common.py`'s Windows-shim helpers are copied from
+  `agent_free.py`, not imported from it** (`agent_codex.py`/
+  `agent_gemini.py` depend only on `cli_common.py`, never on
+  `agent_free.py`'s internals for this part) — a deliberate tradeoff of a
+  small amount of duplication for keeping the three CLI backends
+  independent of each other; `agent_free.py`'s own copy is unchanged and
+  untouched by this session.
+
+`ruff check .`/`ruff format --check .` clean repo-wide. `mypy core sentinel
+mcp_server healer` (strict) clean. `pytest`: 358 tests collected, 357-358
+passing across repeat runs — the one occasional failure is the same
+pre-existing Windows ProactorEventLoop flake every prior session's log
+documents (`RuntimeError: Event loop is closed` during a test's own DB
+connection teardown), landing on a *different* test each run depending on
+timing (once on `test_healer_agent_codex.py`'s end-to-end test, once
+nowhere at all) — confirmed as the pre-existing issue, not something this
+session's changes introduced, by reproducing it standalone against the
+unmodified `test_healer_agent_free.py::
+test_run_heal_job_free_fixes_zero_division_error_end_to_end` (same
+`AttributeError`/`RuntimeError` signature, same "isolated run reproduces it
+every time, full-suite run mostly doesn't" pattern).
