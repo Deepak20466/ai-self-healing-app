@@ -1120,10 +1120,75 @@ pod's port from an earlier manual session — gone once those processes were
 stopped for the RAM measurement above, confirming it really was
 environmental and not a latent bug).
 
-**This closes SPEC.md's BUILD ORDER.** All 8 phases are done. The two
-honestly-reported open items for a future session (neither blocks the
-acceptance criteria that *can* be verified without paid infrastructure):
-(1) a real Ubuntu VM RAM re-measurement (this session only had a Windows
-dev machine), and (2) a real end-to-end PR opened by the healer against a
-paid model/real Anthropic credits (Phase 4's log already explains why every
-free-tier LLM attempt hit a rate limit rather than a real bug in this repo).
+**This closes SPEC.md's BUILD ORDER.** All 8 phases are done. One
+honestly-reported open item for a future session (doesn't block the
+acceptance criteria that *can* be verified without paid infrastructure): a
+real Ubuntu VM RAM re-measurement (this session only had a Windows dev
+machine).
+
+### Post-Phase-8 — real end-to-end free-mode PR: DONE
+
+**Real PR opened by the healer, in free mode, no paid API**:
+[PR #10](https://github.com/Deepak20466/ai-self-healing-app/pull/10) —
+`healer/agent_free.py`'s `run_heal_job_free` correctly diagnosed and fixed
+Phase 2's seeded timezone contract violation (`/orders/102/delivery-
+estimate`): `bugs.py:estimate_delivery_date` read `order.created_at.date()`
+directly, and Postgres normalizes `timestamptz` to UTC on read regardless of
+insert offset — the fix converts to the storefront timezone first
+(`.astimezone(STOREFRONT_TZ).date()`), with a new self-contained regression
+test (`apps/target_app/test_delivery_estimate_timezone.py`) proving it
+failed before and passes after. One attempt, 28 CLI turns, ~$2.15 of Claude
+subscription usage, zero Anthropic API cost. (The PR's diff looks huge on
+GitHub only because its branch base predates this session's Phase 6-8
+merges — GitHub is diffing against a stale base; the healer's actual change
+is `bugs.py` (8 lines) + the new test file (44 lines).)
+
+**Two more real, previously-undiscovered bugs found and fixed this
+session** (on top of Phase 5+'s already-fixed circuit-breaker and
+job-attempt-counting bugs), both blocking every real free-mode heal
+attempt:
+
+1. **The `cmd.exe` shim launch fix from Phase 5+ was itself broken.**
+   `create_subprocess_exec` flattens any argv list into one command-line
+   string via `list2cmdline` before calling `CreateProcess` — Windows has no
+   real argv. The Phase 5+ fix pre-built a fully-quoted `cmd.exe /d /s /c
+   "<cmd>"` string and passed it as a single argv *element*, which
+   `list2cmdline` then re-escaped (corrupting the embedded quotes) when
+   flattening the whole list a second time — reproduced live as "the
+   network path was not found." Fixed in `healer/agent_free.py` by
+   switching to `asyncio.create_subprocess_shell` with that same pre-built
+   string: shell mode passes it straight to `CreateProcess` with no second
+   quoting pass. Verified directly against a real worktree + real `claude`
+   CLI call, not just the mocked unit test (which never caught this, since
+   it mocks `create_subprocess_exec` entirely and so never exercises
+   `list2cmdline`'s real behavior).
+2. **`.mcp.json`'s stdio server broke inside a worktree.** The CLI
+   subprocess always runs with `cwd` set to the fix-attempt's git worktree.
+   `.mcp.json` spawned `python -m mcp_server.server` as a stdio child of
+   that same CLI process, inheriting the same `cwd` — and `-m` prepends the
+   *current directory* to `sys.path`, so that subprocess imported the
+   worktree's own checked-out copy of `mcp_server/sandbox.py` (a worktree is
+   a full checkout) instead of the real repo's copy. `sandbox.py`'s
+   `REPO_ROOT = Path(__file__).resolve().parents[1]` then resolved to the
+   *worktree* root, so every `resolve_worktree_dir` call computed
+   `WORKTREES_ROOT` as `<worktree>/worktrees` — which never exists — and
+   every `propose_patch`/`run_tests` call failed with "Worktree does not
+   exist", for the entire duration of every attempt. Reproduced directly by
+   importing `mcp_server.sandbox` with `cwd` set to a real worktree.
+   Fixed by pointing `.mcp.json` at mcp-pod's already-running HTTP endpoint
+   (`http://127.0.0.1:8003/mcp`) instead of spawning a fresh stdio server
+   per CLI call — this also matches the real 4-pod production architecture
+   (mcp-pod is already a long-running process with the correct `REPO_ROOT`
+   baked in at its own startup, decoupled from any CLI's `cwd`). Tradeoff:
+   using `.mcp.json` for interactive Claude Code work in VS Code now also
+   requires mcp-pod running on port 8003, not just a bare `python -m
+   mcp_server.server`; worth it to eliminate a cwd-dependent footgun that
+   silently broke 100% of real free-mode heal attempts.
+
+Both bugs were invisible to the existing mocked test suite (mocking
+`create_subprocess_exec`/`run_claude_cli` entirely means neither
+`list2cmdline`'s real flattening behavior nor `.mcp.json`'s real subprocess
+resolution is ever exercised) — they only surfaced by actually running a
+live job against the real `claude` CLI. If free-mode heal attempts start
+silently failing again, re-verify both of these directly against a real
+worktree before assuming the bug is elsewhere.

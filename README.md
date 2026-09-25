@@ -141,6 +141,21 @@ details. **271 tests, 270 passing** as of the last commit (one failure is an
 environment-only artifact — a different local process already listening on
 a pod's port — not a code defect; see CLAUDE.md Phase 6/7 logs).
 
+## Proof: a real end-to-end free-mode PR
+
+[**PR #10**](https://github.com/Deepak20466/ai-self-healing-app/pull/10) —
+opened by the healer running in free mode (local Claude Code CLI, no
+Anthropic API key, no per-token billing), against this repo's own seeded
+timezone contract-violation bug. One attempt, 28 CLI turns, ~$2.15 of Claude
+subscription usage. The healer correctly root-caused a real
+timezone-handling bug (Postgres normalizes `timestamptz` to UTC on read, so
+reading `.date()` without converting to the storefront's timezone first
+silently returns the wrong calendar day), fixed it, and proved the fix with
+a new regression test that fails before and passes after — see CLAUDE.md's
+"Post-Phase-8" log entry for the full root-cause writeup and two real
+Windows-specific bugs this run uncovered and fixed in `healer/agent_free.py`
+and `.mcp.json`.
+
 ## Demo walkthrough
 
 With all 4 pods running and the demo dataset seeded (`scripts/seed_demo.py`,

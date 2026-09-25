@@ -7,11 +7,24 @@ CLI (the user's own subscription login) instead of the `anthropic` SDK.
 block, and execute it via `mcp.call_tool(...)` — which is what lets them
 override `heal_job_id`/`worktree`/`run_id` on every single tool call before
 it runs (see those modules' docstrings). The Claude Code CLI manages its own
-agent loop internally over its own MCP connection (spawned via `.mcp.json`,
-scoped to `--allowedTools "mcp__selfheal__*"` and no built-in edit/write/
-shell tools), so this process only ever sees the CLI's *final* JSON result —
-it cannot intercept, inspect, or rewrite an individual tool call the model
-makes mid-conversation.
+agent loop internally over its own MCP connection (per `.mcp.json`, an HTTP
+connection to the already-running mcp-pod, scoped to `--allowedTools
+"mcp__selfheal__*"` and no built-in edit/write/shell tools), so this process
+only ever sees the CLI's *final* JSON result — it cannot intercept, inspect,
+or rewrite an individual tool call the model makes mid-conversation.
+
+`.mcp.json` deliberately points at mcp-pod's HTTP endpoint rather than
+spawning a fresh `python -m mcp_server.server` stdio subprocess per CLI
+call: the CLI subprocess here always runs with `cwd` set to a fix-attempt's
+git worktree (so file edits/tests happen there), and a stdio server spawned
+by `python -m mcp_server.server` with that same `cwd` resolves the
+`mcp_server` package from the *worktree's own* checked-out copy (`-m`
+prepends cwd to `sys.path`), giving `sandbox.py`'s `REPO_ROOT` the worktree
+path instead of the real repo root — every `resolve_worktree_dir` call then
+fails with "Worktree does not exist" (reproduced directly; this broke every
+real free-mode heal attempt whose CLI needed `propose_patch`/`run_tests`).
+The HTTP mcp-pod process starts once, from the real repo root, so it has no
+such cwd-dependence.
 
 This does not weaken any of SPEC.md's actual guardrails, because none of
 them depend on that interception:
@@ -164,9 +177,9 @@ async def _kill_process_tree(pid: int) -> None:
     """Best-effort: kill `pid` and its descendants.
 
     Plain `Process.kill()` only signals the immediate child — on Windows in
-    particular, a hung `claude` process may itself have spawned the MCP
-    server subprocess (per `.mcp.json`), which would otherwise survive a
-    timeout and keep holding a DB connection / file locks indefinitely.
+    particular, `claude` is launched via a `cmd.exe` shim wrapper, so
+    killing only the top-level pid leaves the real `claude.exe` process (and
+    anything it spawned) running indefinitely after a timeout.
     """
     if sys.platform == "win32":
         proc = await asyncio.create_subprocess_exec(
