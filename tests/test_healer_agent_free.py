@@ -181,32 +181,40 @@ async def test_run_claude_cli_wraps_a_windows_cmd_shim_correctly(
     """`asyncio.create_subprocess_exec` can't launch a `.cmd`/`.bat` file
     directly on Windows (no shell, no PATHEXT resolution) — this is the real
     shape `shutil.which("claude")` resolves to for an npm-installed CLI on
-    Windows, so that case goes through `create_subprocess_shell` instead.
-    Verifies the command line quotes just the path (a path with a space is
-    the real-world case: `C:\\Users\\Someone Spaced\\...\\claude.cmd`) with
-    no extra outer wrapping — confirmed directly against both `asyncio.
-    create_subprocess_shell` and `subprocess.run(shell=True)` that this exact
-    form is what Windows' cmd.exe actually parses correctly; an earlier,
-    "helpfully" double-quote-wrapped version of this looked more defensive
-    but silently broke it instead.
+    Windows. Verified via `cmd.exe /c <path> <args...>` passed as a real argv
+    list (still `create_subprocess_exec`, never `shell=True`) — no manual
+    quoting of a path with a space (the real-world case:
+    `C:\\Users\\Someone Spaced\\...\\claude.cmd`) is needed since each
+    argument stays its own array element. A hand-built command-line string
+    got this wrong once for real (job 313: "'C:\\Users\\K' is not
+    recognized", an unquoted space split the path mid-token).
     """
     monkeypatch.setattr(agent_free.sys, "platform", "win32")
     monkeypatch.setattr(
         "healer.agent_free.shutil.which", lambda _name: r"C:\fake dir\npm\claude.cmd"
     )
     fake = _FakeExec(process=_FakeProcess(stdout_bytes=_success_stdout()))
-    monkeypatch.setattr(asyncio, "create_subprocess_shell", fake)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake)
 
     await run_claude_cli("prompt", cwd=REPO_ROOT)
 
     assert len(fake.calls) == 1
-    (command_line,) = fake.calls[0]["args"]
-    assert command_line == (
-        '"C:\\fake dir\\npm\\claude.cmd" -p --output-format json --mcp-config '
-        f'"{REPO_ROOT / ".mcp.json"}" --strict-mcp-config --allowedTools '
-        "mcp__selfheal__* --disallowedTools "
-        "Bash,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch --max-turns 30"
-    )
+    argv = list(fake.calls[0]["args"])
+    assert argv[:3] == ["cmd.exe", "/c", r"C:\fake dir\npm\claude.cmd"]
+    assert argv[3:] == [
+        "-p",
+        "--output-format",
+        "json",
+        "--mcp-config",
+        str(REPO_ROOT / ".mcp.json"),
+        "--strict-mcp-config",
+        "--allowedTools",
+        "mcp__selfheal__*",
+        "--disallowedTools",
+        "Bash,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch",
+        "--max-turns",
+        "30",
+    ]
 
 
 async def test_run_claude_cli_does_not_shell_wrap_a_plain_exe(

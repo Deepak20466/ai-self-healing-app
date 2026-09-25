@@ -48,7 +48,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -190,32 +189,22 @@ def _is_windows_shim(resolved: str) -> bool:
     return sys.platform == "win32" and resolved.lower().endswith((".cmd", ".bat"))
 
 
-def _windows_shim_command_line(resolved: str, rest_args: list[str]) -> str:
-    """Build the command line for launching a `.cmd`/`.bat` shim via
-    `asyncio.create_subprocess_shell` (which on Windows already runs the
-    string through `cmd.exe /c` itself — this never spawns a shell twice).
+def _windows_shim_argv(resolved: str, rest_args: list[str]) -> list[str]:
+    """Build the argv for launching a `.cmd`/`.bat` shim via `cmd.exe /c`.
 
     An npm-installed `claude` resolves (via `shutil.which`, which honors
     PATHEXT) to a `claude.cmd` shim, not a `.exe`. `asyncio.
     create_subprocess_exec` calls `CreateProcess` directly with no shell and
     no PATHEXT resolution, so it cannot launch a `.cmd`/`.bat` file at all
-    (`WinError 193`, "not a valid Win32 application") — only `create_
-    subprocess_shell` can. A quoted path containing spaces followed by
-    unquoted args (`"C:\\path with spaces\\x.cmd" -p ...`) parses correctly
-    here (verified directly against both `asyncio.create_subprocess_shell`
-    and plain `subprocess.run(shell=True)` on this codebase's target
-    platform) — no extra outer quote-wrapping needed, and adding one (an
-    earlier version of this function did) actually breaks it, since cmd then
-    treats the whole doubly-wrapped string as one literal (unquoted)
-    executable name instead of stripping to the inner quoted path.
-
-    This is safe from shell injection: every value that ends up in this
-    string is code-controlled (a resolved filesystem path, this module's own
-    literal CLI flags, an int) — the actual prompt never touches argv or this
-    string at all (see the module docstring: it goes over stdin).
+    (`WinError 193`, "not a valid Win32 application"). Passing `cmd.exe /c
+    <path> <args...>` as a real argv list (still via `create_subprocess_exec`,
+    never `shell=True`) lets `cmd.exe` do the `.cmd` dispatch while each
+    argument keeps its own array element — no manual quoting/escaping of
+    paths with spaces, which a hand-built command-line string got wrong once
+    already (see job 313's "'C:\\Users\\K' is not recognized" failure: an
+    unquoted space in the resolved path broke `cmd`'s own tokenizing).
     """
-    quoted_path = f'"{resolved}"' if " " in resolved else resolved
-    return f"{quoted_path} {subprocess.list2cmdline(rest_args)}".rstrip()
+    return ["cmd.exe", "/c", resolved, *rest_args]
 
 
 async def run_claude_cli(
@@ -271,10 +260,8 @@ async def run_claude_cli(
 
     try:
         if _is_windows_shim(resolved_cli):
-            command_line = _windows_shim_command_line(resolved_cli, rest_args)
-            process = await asyncio.create_subprocess_shell(  # noqa: S604
-                command_line, **subprocess_kwargs
-            )
+            argv = _windows_shim_argv(resolved_cli, rest_args)
+            process = await asyncio.create_subprocess_exec(*argv, **subprocess_kwargs)
         else:
             process = await asyncio.create_subprocess_exec(
                 resolved_cli, *rest_args, **subprocess_kwargs
