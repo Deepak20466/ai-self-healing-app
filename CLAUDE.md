@@ -1307,3 +1307,90 @@ seeded `/trigger/*` bug) matches on `Error.function_name`, not
 `exception_type` — the timeout bug's exception class varies by platform
 (`ConnectTimeout` here), while `function_name` (`check_item_price`, etc.) is
 stable and directly names the exact function in `bugs.py` that raised it.
+
+### Post-Phase-8 — live CI self-healing, run for real end to end: DONE
+
+**[PR #14](https://github.com/Deepak20466/ai-self-healing-app/pull/14)** —
+`scripts/break_ci_demo.py` broke a real test assertion, pushed to a new
+branch/PR, `ci.yml` failed for real, `ci-failure.yml` notified the healer
+over the public Cloudflare tunnel from the earlier "public demo" session,
+and the healer's free-mode CI-fix agent (`run_ci_heal_job_free`) correctly
+classified the failure as real (not flaky), pushed a
+[fix commit](https://github.com/Deepak20466/ai-self-healing-app/commit/5142307175294aa32cc0cd8bbce157b4fd188dd8)
+restoring the broken assertion, and posted a PR comment with its root-cause
+analysis and test evidence. CI went green automatically on the fix commit.
+One real Claude Code CLI attempt, no mocking anywhere in the loop.
+
+**Three previously-latent infrastructure bugs found and fixed this run —
+all invisible until a real webhook/queue/worker cycle actually ran, exactly
+like the two Windows-specific `agent_free.py`/`.mcp.json` bugs the original
+PR #10 run uncovered:**
+
+1. **GitHub repo had zero secrets configured.** `HEALER_WEBHOOK_SECRET` was
+   never set as a GitHub Actions secret (only ever in local `.env`), so
+   `ci-failure.yml`'s webhook step silently no-op'd (`ci_webhook_notify.py`
+   skips cleanly when `WEBHOOK_SECRET` is empty — by design, so a workflow
+   never fails over a missing notification config — but that also means a
+   *forgotten* secret produces zero visible symptoms). Fixed by `gh secret
+   set HEALER_WEBHOOK_SECRET` from the local `.env` value.
+2. **Dev machine's system clock was ~13 minutes behind real UTC.** The
+   webhook's HMAC scheme (`core/hmac_utils.py`) has a 5-minute replay
+   window; GitHub Actions signs with the real time, so every otherwise-valid
+   signed request was rejected as "outside the replay window" — visible as
+   401s in sentinel's access log even after the secret was correctly set.
+   `w32tm /resync` failed (no NTP path in this sandboxed environment) and
+   directly setting the clock was correctly blocked by Claude Code's own
+   "Security Weaken" guardrail — the fix was simply waiting for Windows'
+   own background time sync to catch up, then re-running the failed CI job
+   so a fresh signature was generated inside the (now correct) replay
+   window. **If a webhook mysteriously 401s despite a correct secret, check
+   clock drift before assuming the secret is wrong.**
+3. **`ci-failure.yml` sent the wrong branch/run_id to the webhook — a real,
+   previously-undiscovered bug, not an environment issue.** GitHub Actions
+   does not allow a step's `env:` block to override its own reserved
+   `GITHUB_*` names (`GITHUB_RUN_ID`, `GITHUB_REF_NAME`, `GITHUB_SHA`,
+   `GITHUB_WORKFLOW`) — the runner injects its own values for whichever
+   workflow is *currently executing* (`ci-failure.yml` itself, since it's
+   `workflow_run`-triggered) after step env is applied, silently discarding
+   the override. Every field except `PR_NUMBER` (a genuinely custom name)
+   described `ci-failure.yml`'s own run instead of the CI run that actually
+   failed — branch came through as `"main"` (ci-failure.yml's own checkout
+   ref) instead of the PR's real branch, which made
+   `healer/worktree.py:create_worktree_for_branch` try to check out `main`
+   (already in use by the main checkout) and crash before a single Claude
+   CLI call. Fixed with non-reserved `SOURCE_*` env var names in
+   `ci-failure.yml`, with `ci_webhook_notify.py:build_payload()` preferring
+   them and falling back to the ambient `GITHUB_*` vars (correct for
+   `ci.yml`'s own start/finish calls, which never set `SOURCE_*`). Added
+   `tests/test_ci_webhook_notify.py`. **Never trust a step's `env:` block to
+   override a reserved `GITHUB_*` variable — use a custom name instead.**
+4. **Worker busy-spin/starvation when the global hourly heal-job cap is
+   open.** `healer/worker.py:_process_next_job` requeued the capped job but
+   returned `True` ("a job was claimed, retry immediately") instead of
+   `False` — since `dequeue_heal_job` is FIFO, the *same* just-requeued job
+   was immediately dequeued again, hit the cap again, forever: 100% CPU,
+   thousands of identical `worker.global_hourly_cap_hit` log lines, and
+   every other queued job (including this run's own PR #14 fix job)
+   starved for as long as the cap stayed open. This session's own heavy
+   `verify_all.py` testing (15+ runtime-error jobs in under an hour) is what
+   actually tripped the real cap (`max_heal_jobs_per_hour_global=10`) and
+   exposed the bug — a legitimate guardrail working as designed, just with
+   a broken backoff path. Fixed to return `False` so the main loop's
+   existing notify/fallback wait applies instead of spinning. Added
+   `tests/test_healer_worker.py`.
+
+**Process note, not a code bug**: restarting healer-pod mid-flight (to pick
+up fix #3/#4 above) killed an in-progress attempt for a *different* job
+without that job's exception handler ever running, leaving it orphaned in a
+non-terminal status (`ci_fixing`) that `dequeue_heal_job` can never
+re-claim (it only selects `QUEUED` rows) — manually reset that job back to
+`QUEUED` to recover. Separately, this session also manually reset a
+*different*, genuinely in-flight job's bookkeeping by mistake, based on a
+misread of `started_at` — the running attempt's own in-memory state was
+unaffected (it doesn't re-read `attempt_count` mid-flight) and it correctly
+overwrote the premature reset with the real outcome, but it's a good
+reminder: **before resetting an in-flight heal_job's status, correlate
+`started_at` against the current healer-pod process's actual start time
+and check for live `claude.exe` processes** — a recent `started_at` from
+*before* your own restart is a strong sign the current process is still
+legitimately working it, not an orphan from a killed one.

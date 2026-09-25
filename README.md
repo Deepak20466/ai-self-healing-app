@@ -156,6 +156,22 @@ a new regression test that fails before and passes after — see CLAUDE.md's
 Windows-specific bugs this run uncovered and fixed in `healer/agent_free.py`
 and `.mcp.json`.
 
+[**PR #14**](https://github.com/Deepak20466/ai-self-healing-app/pull/14) —
+the CI self-healing loop, run for real end to end: `scripts/break_ci_demo.py`
+deliberately broke a test's assertion, `ci.yml` failed, `ci-failure.yml`
+notified the healer over a public Cloudflare tunnel, and the healer's
+free-mode CI-fix agent classified the failure as real (not flaky), pushed a
+[fix commit](https://github.com/Deepak20466/ai-self-healing-app/commit/5142307175294aa32cc0cd8bbce157b4fd188dd8)
+restoring the correct assertion, and posted a
+[PR comment](https://github.com/Deepak20466/ai-self-healing-app/pull/14#issuecomment-5839147186)
+with its root-cause analysis and test evidence — no test deleted or
+weakened. CI went green automatically on the fix commit. This run also
+surfaced and fixed two real, previously-latent infrastructure bugs (see
+CLAUDE.md's "Post-Phase-8 — live CI self-healing" entry): GitHub Actions
+silently discarding a workflow's attempt to override its own reserved
+`GITHUB_*` env vars, and a worker busy-spin/starvation bug when the global
+hourly heal-job cap is open.
+
 ## Verification
 
 [**VERIFICATION.md**](VERIFICATION.md) — an automated verifier

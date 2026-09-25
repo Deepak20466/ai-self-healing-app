@@ -20,6 +20,12 @@ any AI subscription usage.
 **Result of the last run: 63 PASS, 1 FAIL, 6 SKIPPED.** Stable across repeat
 runs (re-run twice back to back with identical PASS/FAIL/SKIPPED counts).
 
+**Update**: the "CI self-healing" row below was SKIPPED at that run (would
+have cost real Claude subscription usage to demonstrate live). It has since
+been run for real — see [PR #14](https://github.com/Deepak20466/ai-self-healing-app/pull/14)
+and README's "Proof" section — so that specific criterion is now PASS via a
+real, unmocked run, not just the mocked test suite noted below.
+
 ## Results
 
 | Feature | Status | Evidence |
