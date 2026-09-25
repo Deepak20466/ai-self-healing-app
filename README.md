@@ -207,6 +207,39 @@ This was run for real during Phase 7 (see CLAUDE.md's Phase 7 log for the
 exact `deployments` rows and console output) — a `rolled_back` deployment
 row was written and `healer.notifier.notify()` fired without raising.
 
+## Re-running the demo
+
+Each of the 7 seeded bugs in `apps/target_app/bugs.py` only reproduces once:
+if the healer actually opens a PR that fixes one (like
+[PR #10](https://github.com/Deepak20466/ai-self-healing-app/pull/10),
+fixing bug #5) and that PR gets merged, `main` loses that bug, and every
+future `/trigger/*` call for it — and the sentinel prober test that catches
+it — stops demonstrating anything.
+
+`scripts/reset_demo_bugs.py` is the reset switch. It restores
+`apps/target_app/bugs.py` plus the three test files that assert each bug's
+*broken* behavior (`tests/test_target_app_bugs.py`,
+`tests/test_target_app_routes.py`, `tests/test_sentinel_prober.py`) from the
+pristine snapshots checked into `scripts/demo_bug_originals/`.
+`apps/target_app/contracts.py` is never touched — its `expected` values are
+always the *correct* answer, bug or no bug, so it never needs resetting.
+
+```powershell
+# Default: never touches main directly. Fetches origin/main, restores the
+# files on a disposable git worktree, commits on a "demo-reset" branch,
+# force-pushes only that branch, and opens (or updates) a PR titled
+# "Reset demo bugs" for a human to review and merge.
+.venv\Scripts\python scripts\reset_demo_bugs.py
+
+# --local: just rewrite the files in this checkout, no git/GitHub calls at
+# all -- for iterating on a demo locally before you're ready to open a PR.
+.venv\Scripts\python scripts\reset_demo_bugs.py --local
+```
+
+Both modes are idempotent: if the target is already at the original seeded
+state, the script prints a notice and does nothing (no empty commit, no
+duplicate PR).
+
 ## Cloud deploy in ~10 minutes
 
 1. Spin up any Ubuntu 22.04/24.04 VM with 1-2GB RAM (AWS EC2, GCP e2-small,
