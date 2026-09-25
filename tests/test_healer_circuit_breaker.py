@@ -24,11 +24,14 @@ from healer.circuit_breaker import (
 )
 
 
-async def _insert_job(fingerprint: str) -> None:
+async def _insert_job(fingerprint: str, *, attempt_count: int = 1) -> None:
     async with session_scope() as session:
         session.add(
             HealJob(
-                type=HealJobType.RUNTIME_ERROR, status=HealJobStatus.QUEUED, fingerprint=fingerprint
+                type=HealJobType.RUNTIME_ERROR,
+                status=HealJobStatus.QUEUED,
+                fingerprint=fingerprint,
+                attempt_count=attempt_count,
             )
         )
 
@@ -52,22 +55,35 @@ def _random_pr_number() -> int:
     return uuid.uuid4().int % 1_000_000_000
 
 
-async def test_fingerprint_circuit_stays_closed_at_the_cap() -> None:
+async def test_fingerprint_circuit_stays_closed_below_the_cap() -> None:
     fingerprint = f"circuit-test-{uuid.uuid4().hex}"
-    for _ in range(3):
+    for _ in range(2):
         await _insert_job(fingerprint)
 
     async with session_scope() as session:
         assert await fingerprint_circuit_open(session, fingerprint, max_attempts=3) is False
 
 
-async def test_fingerprint_circuit_opens_over_the_cap() -> None:
+async def test_fingerprint_circuit_opens_at_the_cap() -> None:
     fingerprint = f"circuit-test-{uuid.uuid4().hex}"
-    for _ in range(4):
+    for _ in range(3):
         await _insert_job(fingerprint)
 
     async with session_scope() as session:
         assert await fingerprint_circuit_open(session, fingerprint, max_attempts=3) is True
+
+
+async def test_fingerprint_circuit_ignores_jobs_with_no_real_attempts() -> None:
+    """A job that never actually ran an attempt (e.g. it was itself refused by
+    another guardrail before running) must not count against the cap - see
+    circuit_breaker.py's module docstring for the cascading-lockout bug this
+    guards against."""
+    fingerprint = f"circuit-test-{uuid.uuid4().hex}"
+    for _ in range(5):
+        await _insert_job(fingerprint, attempt_count=0)
+
+    async with session_scope() as session:
+        assert await fingerprint_circuit_open(session, fingerprint, max_attempts=3) is False
 
 
 async def test_fingerprint_circuit_ignores_other_fingerprints() -> None:

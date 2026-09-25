@@ -215,6 +215,7 @@ async def run_claude_cli(
     max_turns: int | None = None,
     timeout_s: int | None = None,
     cli_path: str | None = None,
+    allowed_tools: str | None = None,
 ) -> CLIResult:
     """Run one non-interactive Claude Code CLI turn and parse its JSON result.
 
@@ -223,6 +224,11 @@ async def run_claude_cli(
     own MCP server is reachable (`--strict-mcp-config` plus an explicit
     `--mcp-config`), restricted to its tools (`--allowedTools`) with every
     built-in edit/write/shell/web tool explicitly denied.
+
+    `allowed_tools` overrides the default `mcp__selfheal__*` (heal-job use):
+    `healer/chat_agent.py` passes a narrower, read-only list for chat so an
+    injected instruction in chat-supplied data has no destructive tool to
+    even attempt to call — enforced here in code, not by asking nicely.
     """
     resolved_cli = shutil.which(cli_path or settings.claude_cli_path or "claude") or (
         cli_path or settings.claude_cli_path or "claude"
@@ -239,7 +245,7 @@ async def run_claude_cli(
         str(mcp_config),
         "--strict-mcp-config",
         "--allowedTools",
-        _ALLOWED_TOOLS,
+        allowed_tools or _ALLOWED_TOOLS,
         "--disallowedTools",
         _DISALLOWED_TOOLS,
         "--max-turns",
