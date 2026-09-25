@@ -29,16 +29,23 @@ def _headers() -> dict[str, str]:
     }
 
 
-def _repo_or_raise() -> str:
-    if not settings.github_repo:
-        raise GitHubClientError("GITHUB_REPO is not configured")
-    return settings.github_repo
-
-
 class GitHubClient:
-    def __init__(self, client: httpx.AsyncClient | None = None) -> None:
+    """`repo` overrides `GITHUB_REPO` for this instance (`owner/repo`) — used for
+    connect-a-repo (multi-app) flows where each `MonitoredApp` may target a
+    different GitHub repo than the default `settings.github_repo`. Omitted,
+    this behaves exactly as before (single hardcoded repo from `.env`).
+    """
+
+    def __init__(self, client: httpx.AsyncClient | None = None, *, repo: str | None = None) -> None:
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(base_url=GITHUB_API_BASE, timeout=15.0)
+        self._repo_override = repo
+
+    def _repo_or_raise(self) -> str:
+        repo = self._repo_override or settings.github_repo
+        if not repo:
+            raise GitHubClientError("GITHUB_REPO is not configured")
+        return repo
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -58,10 +65,18 @@ class GitHubClient:
             )
         return response
 
+    async def get_repo(self, repo: str | None = None) -> dict[str, Any]:
+        """Fetch repo metadata — used by the "connect a repo" flow to confirm
+        `GITHUB_TOKEN` can actually see this repo before cloning/registering it."""
+        target = repo or self._repo_or_raise()
+        response = await self._request("GET", f"/repos/{target}")
+        data: dict[str, Any] = response.json()
+        return data
+
     async def list_workflow_runs(
         self, *, branch: str | None = None, status: str | None = None
     ) -> list[dict[str, Any]]:
-        repo = _repo_or_raise()
+        repo = self._repo_or_raise()
         params: dict[str, str] = {}
         if branch:
             params["branch"] = branch
@@ -72,45 +87,45 @@ class GitHubClient:
         return runs
 
     async def get_workflow_run(self, run_id: int) -> dict[str, Any]:
-        repo = _repo_or_raise()
+        repo = self._repo_or_raise()
         response = await self._request("GET", f"/repos/{repo}/actions/runs/{run_id}")
         data: dict[str, Any] = response.json()
         return data
 
     async def list_jobs_for_run(self, run_id: int) -> list[dict[str, Any]]:
-        repo = _repo_or_raise()
+        repo = self._repo_or_raise()
         response = await self._request("GET", f"/repos/{repo}/actions/runs/{run_id}/jobs")
         jobs: list[dict[str, Any]] = response.json().get("jobs", [])
         return jobs
 
     async def get_job_logs_text(self, job_id: int) -> str:
-        repo = _repo_or_raise()
+        repo = self._repo_or_raise()
         response = await self._request("GET", f"/repos/{repo}/actions/jobs/{job_id}/logs")
         return response.text
 
     async def rerun_workflow(self, run_id: int, *, failed_only: bool = True) -> None:
-        repo = _repo_or_raise()
+        repo = self._repo_or_raise()
         suffix = "rerun-failed-jobs" if failed_only else "rerun"
         await self._request("POST", f"/repos/{repo}/actions/runs/{run_id}/{suffix}")
 
     async def cancel_workflow(self, run_id: int) -> None:
-        repo = _repo_or_raise()
+        repo = self._repo_or_raise()
         await self._request("POST", f"/repos/{repo}/actions/runs/{run_id}/cancel")
 
     async def get_pull_request(self, pr_number: int) -> dict[str, Any]:
-        repo = _repo_or_raise()
+        repo = self._repo_or_raise()
         response = await self._request("GET", f"/repos/{repo}/pulls/{pr_number}")
         data: dict[str, Any] = response.json()
         return data
 
     async def list_pull_request_reviews(self, pr_number: int) -> list[dict[str, Any]]:
-        repo = _repo_or_raise()
+        repo = self._repo_or_raise()
         response = await self._request("GET", f"/repos/{repo}/pulls/{pr_number}/reviews")
         reviews: list[dict[str, Any]] = response.json()
         return reviews
 
     async def list_check_runs(self, sha: str) -> list[dict[str, Any]]:
-        repo = _repo_or_raise()
+        repo = self._repo_or_raise()
         response = await self._request("GET", f"/repos/{repo}/commits/{sha}/check-runs")
         runs: list[dict[str, Any]] = response.json().get("check_runs", [])
         return runs
@@ -118,7 +133,7 @@ class GitHubClient:
     async def dispatch_workflow(
         self, workflow_file: str, *, ref: str, inputs: dict[str, str] | None = None
     ) -> None:
-        repo = _repo_or_raise()
+        repo = self._repo_or_raise()
         payload: dict[str, Any] = {"ref": ref}
         if inputs:
             payload["inputs"] = inputs
@@ -136,7 +151,7 @@ class GitHubClient:
         directly from `healer/github_ops.py`, the same way `tools/cicd.py`
         already imports `GitHubClient` directly rather than going through MCP.
         """
-        repo = _repo_or_raise()
+        repo = self._repo_or_raise()
         response = await self._request(
             "POST",
             f"/repos/{repo}/pulls",
@@ -147,7 +162,7 @@ class GitHubClient:
 
     async def add_labels(self, issue_or_pr_number: int, labels: list[str]) -> None:
         """Add labels to a PR or issue (PRs are issues for labeling purposes)."""
-        repo = _repo_or_raise()
+        repo = self._repo_or_raise()
         await self._request(
             "POST",
             f"/repos/{repo}/issues/{issue_or_pr_number}/labels",
@@ -159,7 +174,7 @@ class GitHubClient:
     ) -> dict[str, Any]:
         """Open an issue — SPEC.md's "low confidence" fallback when a heal attempt
         can't produce a verified fix (used instead of opening a PR)."""
-        repo = _repo_or_raise()
+        repo = self._repo_or_raise()
         payload: dict[str, Any] = {"title": title, "body": body}
         if labels:
             payload["labels"] = labels
@@ -169,7 +184,7 @@ class GitHubClient:
 
     async def create_issue_comment(self, issue_or_pr_number: int, body: str) -> None:
         """Post a comment on an issue or PR (Phase 5 posts CI-fix evidence here)."""
-        repo = _repo_or_raise()
+        repo = self._repo_or_raise()
         await self._request(
             "POST", f"/repos/{repo}/issues/{issue_or_pr_number}/comments", json={"body": body}
         )

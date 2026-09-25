@@ -20,6 +20,7 @@ verification_report.json
 worktrees/
 releases/
 local_deploy_root/
+connected_apps/
 
 .vscode/*
 !.vscode/extensions.json

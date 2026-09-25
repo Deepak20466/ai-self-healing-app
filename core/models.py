@@ -92,6 +92,27 @@ class BudgetCategory(enum.StrEnum):
     CHAT = "chat"
 
 
+class FindingCategory(enum.StrEnum):
+    TEST = "test"
+    LINT = "lint"
+    TYPE_CHECK = "type_check"
+    DEPENDENCY = "dependency"
+
+
+class FindingSeverity(enum.StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class FindingStatus(enum.StrEnum):
+    OPEN = "open"
+    FIX_REQUESTED = "fix_requested"
+    RESOLVED = "resolved"
+    IGNORED = "ignored"
+
+
 class MonitoredApp(TimestampMixin, Base):
     """A registered app the self-healing system watches (multi-app support).
 
@@ -124,6 +145,78 @@ class MonitoredApp(TimestampMixin, Base):
     #: identifies which app an incoming report belongs to server-side
     #: (looked up by token), never from a caller-supplied app name/id.
     ingest_token: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    #: Full HTTPS clone URL for a "connect a repo" app (None for apps
+    #: registered via config/monitored_apps.yaml, which live in this same
+    #: repo and have no separate remote to clone).
+    repo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    #: SPEC extension: "auto-fix high-severity" toggle, default OFF -- when
+    #: on, a scan that finds a new high/critical finding automatically opens
+    #: a heal_job for it instead of waiting for a manual "Fix" click.
+    auto_fix_high_severity: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    last_scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: 0-100, computed by core/scanner.py from the open findings' severities
+    #: and the test pass rate; None until the first scan completes.
+    health_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    findings: Mapped[list[Finding]] = relationship(
+        back_populates="app", cascade="all, delete-orphan"
+    )
+
+
+class Finding(TimestampMixin, Base):
+    """One scan finding for a connected app: a failing test, a lint/type
+    error, or a dependency vulnerability (core/scanner.py).
+
+    Deduplicated by `fingerprint` (app_id + tool + file_path + line_number +
+    message, hashed) the same way `errors`/`contract_violations` dedupe by
+    fingerprint -- a re-scan updates `last_seen_at`/`occurrence_count` on the
+    existing row instead of inserting a duplicate.
+    """
+
+    __tablename__ = "findings"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    app_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("monitored_apps.id", ondelete="CASCADE"), nullable=False
+    )
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    category: Mapped[FindingCategory] = mapped_column(
+        _pg_enum(FindingCategory, "finding_category"), nullable=False
+    )
+    severity: Mapped[FindingSeverity] = mapped_column(
+        _pg_enum(FindingSeverity, "finding_severity"), nullable=False
+    )
+    tool: Mapped[str] = mapped_column(String(64), nullable=False)
+    file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    line_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[FindingStatus] = mapped_column(
+        _pg_enum(FindingStatus, "finding_status"),
+        nullable=False,
+        default=FindingStatus.OPEN,
+        server_default=FindingStatus.OPEN.value,
+    )
+    heal_job_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("heal_jobs.id", ondelete="SET NULL"), nullable=True
+    )
+    occurrence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    app: Mapped[MonitoredApp] = relationship(back_populates="findings")
+
+    __table_args__ = (
+        UniqueConstraint("app_id", "fingerprint", name="uq_findings_app_id_fingerprint"),
+        Index("ix_findings_app_id", "app_id"),
+        Index("ix_findings_status", "status"),
+        Index("ix_findings_severity", "severity"),
+    )
 
 
 class Error(TimestampMixin, Base):

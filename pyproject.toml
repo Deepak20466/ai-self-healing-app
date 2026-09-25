@@ -54,6 +54,10 @@ dev = [
   # -- installed here so their tests can run.
   "flask>=3.0",
   "django>=5.0",
+  # "connect a repo" instant scan's free dependency-vulnerability check for
+  # Python apps (core/scanner.py) -- npm audit is used for Node apps, no
+  # extra dependency needed for that side.
+  "pip-audit>=2.7",
 ]
 
 [tool.setuptools.packages.find]
@@ -77,6 +81,7 @@ ignore = ["S101"]
 # would add boilerplate at each of them for no real benefit here (unlike
 # core/queue.py's single-caller HealJobListener.wait()).
 "mcp_server/git_utils.py" = ["ASYNC109"]
+"core/scanner.py" = ["ASYNC109"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's documented dependency-injection idiom is exactly `= Depends(...)`
