@@ -30,6 +30,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.config import settings
 from core.models import MonitoredApp
 from mcp_server.github_client import GitHubClient, GitHubClientError
 from mcp_server.sandbox import REPO_ROOT, to_repo_relative
@@ -76,13 +77,32 @@ def slugify_app_name(owner_repo: str) -> str:
 
 
 async def check_repo_access(owner_repo: str) -> dict[str, object]:
-    """Confirm `GITHUB_TOKEN` can see `owner_repo`. Raises a clear, user-facing
-    RepoConnectError (naming the fix) on any failure, per the feature spec:
-    "clear message telling me to add the repo to my token if denied".
+    """Confirm `GITHUB_TOKEN` can see `owner_repo`, has *push* (write) access
+    to it, and (if `ALLOWED_REPO_OWNERS` is configured) that its owner is on
+    the allow-list. Raises a clear, user-facing RepoConnectError (naming the
+    fix) on any failure, per the feature spec: "clear message telling me to
+    add the repo to my token if denied".
+
+    The push-access check is a safety gate, not just an access check:
+    connect-a-repo's scanner (core/scanner.py) and its "Fix" flow both
+    execute the repo's own code (installs deps, runs its test/lint commands,
+    and can push a fix commit) — allowing a repo the token can only *read*
+    would mean running arbitrary untrusted code with no way to ever land the
+    fix, and more importantly no signal that the operator actually owns/
+    trusts that repo enough to grant it push access in the first place.
     """
+    owner = owner_repo.split("/", 1)[0].lower()
+    allowed_owners = settings.allowed_repo_owners_list
+    if allowed_owners and owner not in allowed_owners:
+        raise RepoConnectError(
+            f"{owner_repo}'s owner {owner!r} is not in ALLOWED_REPO_OWNERS "
+            f"({', '.join(allowed_owners)}) — add it there first if this repo "
+            "should be connectable."
+        )
+
     async with GitHubClient() as client:
         try:
-            return await client.get_repo(owner_repo)
+            data = await client.get_repo(owner_repo)
         except GitHubClientError as exc:
             raise RepoConnectError(
                 f"Can't access {owner_repo} with the configured GITHUB_TOKEN "
@@ -91,6 +111,15 @@ async def check_repo_access(owner_repo: str) -> dict[str, object]:
                 "(GitHub Settings -> Developer settings -> Personal access "
                 "tokens) and try again."
             ) from exc
+
+    permissions = data.get("permissions")
+    has_push = isinstance(permissions, dict) and bool(permissions.get("push"))
+    if not has_push:
+        raise RepoConnectError(
+            f"GITHUB_TOKEN does not have write access to {owner_repo} — scans "
+            "execute the repo's code, so only repos you can push to are allowed"
+        )
+    return data
 
 
 async def _run_git(args: list[str], *, cwd: Path) -> None:

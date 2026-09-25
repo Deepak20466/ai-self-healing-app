@@ -8,6 +8,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from core.config import settings as config_settings
 from core.repo_connect import (
     RepoConnectError,
     app_fingerprint,
@@ -114,7 +115,66 @@ async def test_check_repo_access_denied_gives_a_clear_actionable_message(respx_m
 @pytest.mark.asyncio
 async def test_check_repo_access_succeeds_when_reachable(respx_mock) -> None:
     respx_mock.get("https://api.github.com/repos/someone/public-repo").mock(
-        return_value=httpx.Response(200, json={"full_name": "someone/public-repo"})
+        return_value=httpx.Response(
+            200, json={"full_name": "someone/public-repo", "permissions": {"push": True}}
+        )
+    )
+    data = await check_repo_access("someone/public-repo")
+    assert data["full_name"] == "someone/public-repo"
+
+
+@pytest.mark.asyncio
+async def test_check_repo_access_rejects_no_push_access(respx_mock) -> None:
+    respx_mock.get("https://api.github.com/repos/someone/readonly-repo").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "full_name": "someone/readonly-repo",
+                "permissions": {"push": False, "pull": True},
+            },
+        )
+    )
+    with pytest.raises(RepoConnectError) as exc_info:
+        await check_repo_access("someone/readonly-repo")
+    message = str(exc_info.value)
+    assert "does not have write access" in message
+    assert "someone/readonly-repo" in message
+
+
+@pytest.mark.asyncio
+async def test_check_repo_access_rejects_missing_permissions_field(respx_mock) -> None:
+    """No `permissions` object at all (e.g. an unauthenticated-shaped response)
+    must fail closed, not be treated as implicit access."""
+    respx_mock.get("https://api.github.com/repos/someone/no-perms-repo").mock(
+        return_value=httpx.Response(200, json={"full_name": "someone/no-perms-repo"})
+    )
+    with pytest.raises(RepoConnectError, match="does not have write access"):
+        await check_repo_access("someone/no-perms-repo")
+
+
+@pytest.mark.asyncio
+async def test_check_repo_access_rejects_owner_not_in_allowed_list(
+    respx_mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(config_settings, "allowed_repo_owners", "acme,someorg")
+    with pytest.raises(RepoConnectError) as exc_info:
+        await check_repo_access("someone/private-repo")
+    message = str(exc_info.value)
+    assert "ALLOWED_REPO_OWNERS" in message
+    assert "someone" in message
+    # Owner check happens before the GitHub call, so nothing was even mocked.
+    assert not respx_mock.calls
+
+
+@pytest.mark.asyncio
+async def test_check_repo_access_allows_owner_in_allowed_list(
+    respx_mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(config_settings, "allowed_repo_owners", "acme,someone")
+    respx_mock.get("https://api.github.com/repos/someone/public-repo").mock(
+        return_value=httpx.Response(
+            200, json={"full_name": "someone/public-repo", "permissions": {"push": True}}
+        )
     )
     data = await check_repo_access("someone/public-repo")
     assert data["full_name"] == "someone/public-repo"

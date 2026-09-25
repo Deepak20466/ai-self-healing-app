@@ -1663,3 +1663,35 @@ webhook pointed back at this system, out of scope for this pass. The
 onboarding snippet's "next step" (actually wiring `report_error()`/
 `reportError()` into the app's own error handler) is intentionally left to
 the operator, not automated — see "ambiguities resolved" above.
+
+### Connect-a-repo follow-up — push-access safety gate: DONE
+
+Connect-a-repo's scanner and "Fix" flow both execute the connected repo's
+own code (install deps, run its test/lint commands, push a fix commit) —
+so `core/repo_connect.py:check_repo_access` now rejects any repo the
+configured `GITHUB_TOKEN` can't actually *push* to, not just read. GitHub's
+`GET /repos/{owner}/{repo}` already returns a `permissions.push` boolean for
+an authenticated caller (`mcp_server/github_client.py:get_repo` was
+unchanged — it already returned the full JSON body); a missing
+`permissions` object (e.g. some unauthenticated-shaped response) fails
+closed rather than being treated as implicit access. Added an optional
+`ALLOWED_REPO_OWNERS` setting (`core/config.py`, comma-separated,
+`settings.allowed_repo_owners_list` does the split/lowercase/trim) as a
+second, independent gate: when set, only repos whose owner is on that list
+can be connected at all, checked *before* the GitHub call so a
+disallowed-owner attempt costs zero API calls. Both checks raise
+`RepoConnectError` with a message naming the exact fix (add push access, or
+add the owner to `ALLOWED_REPO_OWNERS`), surfaced to the UI as today via
+`healer/app.py`'s existing `POST /api/apps` -> 400 handling — no changes
+needed there. Tests: `tests/test_repo_connect.py` gained 5 new cases (push
+access granted+owner allowed -> success, push denied -> rejected, no
+`permissions` field at all -> rejected, owner not in
+`ALLOWED_REPO_OWNERS` -> rejected without even calling GitHub, owner in
+`ALLOWED_REPO_OWNERS` -> success); the pre-existing "succeeds when
+reachable" test was updated to include `permissions.push: true` since a
+push-less response now correctly fails it.
+
+`ruff check .`/`ruff format --check .` clean. `mypy core sentinel
+mcp_server healer` (strict) clean. `pytest`: 328/329 (the one failure is the
+pre-existing, already-documented Windows ProactorEventLoop flake in
+`test_healer_agent_free.py`, unrelated to this change).

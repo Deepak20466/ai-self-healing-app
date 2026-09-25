@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     # --- GitHub --------------------------------------------------------------
     github_token: str | None = None
     github_repo: str | None = None
+    #: Comma-separated list of GitHub owners/orgs connect-a-repo is allowed to
+    #: register, on top of the always-required push-access check (see
+    #: core/repo_connect.py:connect_repo). None/empty = no extra restriction.
+    allowed_repo_owners: str | None = None
 
     # --- Auth ------------------------------------------------------------
     admin_password_hash: str | None = None
@@ -145,6 +149,13 @@ class Settings(BaseSettings):
     #: an ingest report belongs to. Optional: an app that hasn't set this
     #: still gets its errors captured, just unattributed (app_id=None).
     sentinel_ingest_token: str | None = None
+
+    @property
+    def allowed_repo_owners_list(self) -> list[str]:
+        """`allowed_repo_owners` split/lowercased/trimmed, or [] if unset."""
+        if not self.allowed_repo_owners:
+            return []
+        return [o.strip().lower() for o in self.allowed_repo_owners.split(",") if o.strip()]
 
     @property
     def sentinel_base_url(self) -> str:
