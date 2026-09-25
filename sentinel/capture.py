@@ -53,14 +53,16 @@ def get_git_sha() -> str | None:
         return None
 
 
-def _select_frame(exc: BaseException) -> traceback.FrameSummary:
+def _select_frame(
+    exc: BaseException, in_app_markers: tuple[str, ...] = _IN_APP_MARKERS
+) -> traceback.FrameSummary:
     frames = traceback.extract_tb(exc.__traceback__)
     if not frames:
         return traceback.FrameSummary(filename="<unknown>", lineno=0, name="<unknown>")
 
     for frame in reversed(frames):
         normalized = frame.filename.replace("\\", "/")
-        if any(marker.replace("\\", "/") in normalized for marker in _IN_APP_MARKERS):
+        if any(marker.replace("\\", "/") in normalized for marker in in_app_markers):
             return frame
     return frames[-1]
 
@@ -73,10 +75,20 @@ def _relative_path(raw_path: str) -> str:
 
 
 def build_captured_error(
-    exc: BaseException, request_context: dict[str, Any] | None = None
+    exc: BaseException,
+    request_context: dict[str, Any] | None = None,
+    *,
+    in_app_markers: tuple[str, ...] | None = None,
 ) -> CapturedError:
-    """Build the wire payload for an exception, pinpointing the responsible frame."""
-    frame = _select_frame(exc)
+    """Build the wire payload for an exception, pinpointing the responsible frame.
+
+    `in_app_markers` (multi-app support) lets a non-target_app middleware
+    (Flask/Django integrations, or a future registered app under a
+    different directory) prefer its own in-app frames instead of
+    target_app's -- defaults to the original target_app markers so existing
+    behavior is unchanged when omitted.
+    """
+    frame = _select_frame(exc, in_app_markers or _IN_APP_MARKERS)
     formatted_traceback = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
 
     return CapturedError(

@@ -49,6 +49,11 @@ dev = [
   # transport when testing chat live over a real (non-ASGI-in-process) URL.
   "aiohttp>=3.10",
   "types-PyYAML>=6.0",
+  # sentinel/flask_middleware.py and sentinel/django_middleware.py are
+  # optional integrations, only actually imported by an app that uses them
+  # -- installed here so their tests can run.
+  "flask>=3.0",
+  "django>=5.0",
 ]
 
 [tool.setuptools.packages.find]
