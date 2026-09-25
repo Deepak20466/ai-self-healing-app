@@ -32,7 +32,7 @@ services:
   - type: web
     name: selfheal
     runtime: python
-    plan: starter
+    plan: free
     region: oregon
     buildCommand: pip install -e ".[api]"
     startCommand: bash scripts/render_start.sh
