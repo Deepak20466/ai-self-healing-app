@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-    "self-healing": {
-      "command": ".venv/Scripts/python.exe",
+    "selfheal": {
+      "command": "C:\\Users\\K Deepak\\AI-Powered Self-Healing\\.venv\\Scripts\\python.exe",
       "args": ["-m", "mcp_server.server"],
       "env": {}
     }

@@ -267,6 +267,40 @@ async def isolated_budget_date(monkeypatch: pytest.MonkeyPatch) -> None:
     yield
 
 
+@pytest_asyncio.fixture
+async def isolated_cli_call_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same isolation as `isolated_budget_date`, for `healer.agent_free`'s
+    MAX_CLI_CALLS_PER_DAY counter (a count of `cli_invocation` audit_log rows
+    created since UTC midnight — see agent_free.py's module docstring on why
+    that can't reuse `healer.budget`'s dollar-denominated `daily_spend`
+    table). Hit this for real: repeatedly re-running
+    tests/test_healer_agent_free.py against the shared selfheal_test DB
+    during development accumulated exactly `MAX_CLI_CALLS_PER_DAY` (50) real,
+    never-rolled-back `cli_invocation` rows for the real current date, which
+    then made every subsequent free-mode e2e test in the same file
+    incorrectly see the daily cap as already exhausted from its very first
+    attempt. Every test that exercises `run_heal_job_free`/
+    `run_ci_heal_job_free` needs this fixture for the same reason
+    `isolated_budget_date` is needed by any test calling `run_heal_job`/
+    `run_ci_heal_job`."""
+    from datetime import datetime
+
+    import healer.agent_free as agent_free_module
+
+    hash_val = uuid.uuid5(uuid.NAMESPACE_DNS, uuid.uuid4().hex).int
+    year = 2200 + (hash_val % 50)
+    month = 1 + (hash_val % 12)
+    day = 1 + ((hash_val // 12) % 28)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore
+            return datetime(year, month, day, tzinfo=tz)
+
+    monkeypatch.setattr(agent_free_module, "datetime", _FrozenDatetime)
+    yield
+
+
 @pytest.fixture
 def git_worktree() -> Generator[tuple[str, Path], None, None]:
     """Create a real `git worktree` under `worktrees/` for sandbox/git_utils tests."""

@@ -9,16 +9,26 @@ from __future__ import annotations
 
 from decimal import Decimal
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Absolute, not ".env": this module is imported by code that can run with a
+# cwd other than the repo root — notably healer/agent_free.py, which spawns
+# the `claude` CLI (and, via .mcp.json, a nested `python -m mcp_server.server`
+# that also imports this module) with cwd set to a fix worktree under
+# worktrees/<name>/, which has no .env of its own. A relative "./.env" would
+# silently resolve to nothing there and fall back to this class's defaults
+# (e.g. the default DATABASE_URL), not the real configured one.
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 
 
 class Settings(BaseSettings):
     """Typed, validated application settings loaded from the environment."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
@@ -44,7 +54,19 @@ class Settings(BaseSettings):
     mcp_port: int = 8003
     healer_port: int = 8000
 
-    # --- Anthropic / Claude ------------------------------------------------
+    # --- AI backend selection ------------------------------------------------
+    # Free mode (default): healer/agent_free.py drives the fix loop through the
+    # local Claude Code CLI on the user's own subscription login, no API key.
+    # API mode: healer/runtime_agent.py + healer/ci_agent.py via the `anthropic`
+    # SDK, which requires anthropic_api_key below and is only imported lazily
+    # (see healer/anthropic_client.py) since `anthropic` is an optional extra.
+    use_claude_code: bool = True
+    claude_cli_path: str | None = None  # None = look up "claude" on PATH
+    claude_cli_timeout_s: int = 600
+    claude_cli_max_turns: int = 30
+    max_cli_calls_per_day: int = 50
+
+    # --- Anthropic / Claude (API mode only) -----------------------------------
     anthropic_api_key: str | None = None
     anthropic_base_url: str | None = None  # e.g. https://openrouter.ai/api for OpenRouter
     anthropic_model: str = "claude-sonnet-5"

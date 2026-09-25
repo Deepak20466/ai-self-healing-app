@@ -733,6 +733,83 @@ correct mitigation for normal usage; today's collision odds were inflated by
 this session's rerun count specifically. Worth knowing about if it ever
 recurs, so it isn't mistaken for a regression.)
 
+### Phase 5+ — Free mode (Claude Code CLI backend): DONE
+A parallel implementation of the healer backend using Claude Code CLI instead
+of the Anthropic SDK — same queue, same MCP tools, same guardrails, no API
+key, no per-token billing.
+
+Built (`healer/`, `core/`, `mcp_server/`):
+- `healer/agent_free.py` (~990 lines): `run_claude_cli()` wraps the local
+  `claude` CLI via `asyncio.create_subprocess_exec`/`shell`, passes prompt via
+  stdin, parses JSON output (`-p --output-format json`), detects and raises
+  exceptions for not-logged-in/usage-limit/timeout/malformed-JSON scenarios.
+  `run_heal_job_free()` and `run_ci_heal_job_free()` parallel Phase 4/5's
+  runtime/CI healing respectively, calling the CLI and using the *same* MCP
+  `propose_patch`/`run_tests` tools for verification (verification is
+  code-enforced, not CLI-claimed). Budget tracking via `audit_log` rows
+  (action="cli_invocation"), not USD cost. System prompts unchanged from
+  Phase 4/5 — the difference is invocation method, not prompting.
+- `healer/worker.py` (modified): `_select_backend()` checks `USE_CLAUDE_CODE`
+  setting at startup, imports and returns the appropriate `run_heal_job`/
+  `run_ci_heal_job` from `agent_free` (free mode) or `runtime_agent`/
+  `ci_agent` (API mode).
+- `healer/anthropic_client.py` (modified): anthropic import moved inside
+  `TYPE_CHECKING`, only imported when API mode's `build_anthropic_client()`
+  is called — lazy, raises helpful "pip install .[api]" if missing.
+- `core/config.py` (modified): added 10 settings: `use_claude_code` (default
+  true), `claude_cli_path`, `claude_cli_timeout_s` (600), `claude_cli_max_turns`
+  (30), `max_cli_calls_per_day` (50). Anthropic settings made optional (default
+  `None`), only required in API mode. `.env` path made absolute (computes at
+  module load time) to survive cwd changes in worktrees.
+- `.mcp.json` (modified): server name changed to "selfheal", Python path made
+  absolute (full venv path), allowing CLI spawned with cwd=worktree to still
+  resolve the MCP server.
+- `pyproject.toml` (modified): anthropic moved from base deps to [api] optional
+  extra; still in [dev] for mypy TYPE_CHECKING verification.
+- `.env.example` and `README.md` (modified): documented both modes, one-time
+  setup (run `claude` once to log in), added new settings.
+
+Key technical challenges and solutions:
+- **Windows .cmd shim launch**: npm-installed `claude` resolves to `claude.cmd`,
+  which `create_subprocess_exec` can't launch (WinError 193, no shell, no
+  PATHEXT). Discovered and verified fix: use `create_subprocess_shell` with
+  properly quoted path: `f'"{resolved}" {subprocess.list2cmdline(rest_args)}'`
+  (path quoted, args handled by list2cmdline) — no outer wrapping, just
+  straightforward quoting.
+- **Environment variable isolation**: stripped ANTHROPIC_* env vars before
+  spawning CLI so testing/dev vars don't leak and force API auth instead of
+  subscription login.
+- **Worktree absolute path handling**: core/config.py now computes `.env` path
+  as absolute (`Path(__file__).resolve().parent.parent / ".env"`) to survive
+  cwd changes when CLI spawned in worktree directories.
+- **Regression test detection**: added `_touched_paths()` and
+  `_regression_test_path()` to auto-detect which test file the diff touches,
+  so `run_tests` only runs that file instead of entire suite (reduced test
+  time from 3+ min to 4.5s per attempt).
+- **Test DB isolation for CLI counters**: added `isolated_cli_call_date` fixture
+  (random synthetic year 2200-2249 per test run) to prevent collision on shared
+  `selfheal_test` DB when counting `audit_log` CLI invocations by date.
+
+Real end-to-end validation run (job 316, `/trigger/validation` bug):
+- All 3 attempts executed successfully (CLI ran, MCP tools called, git diffs
+  applied, tests ran).
+- No fix passed the regression test (expected for a validation bug with no
+  obvious single-edit fix), so job marked FAILED and fallback issue opened
+  (correct behavior).
+- Proves entire flow works: CLI invocation → MCP round trip → verification →
+  job state update → GitHub issue creation.
+
+Test changes: added 750+ lines to `tests/test_healer_agent_free.py` covering
+all CLI subprocess scenarios (Windows .cmd vs .exe, timeout, malformed JSON,
+not-logged-in detection, environment filtering), plus 4 end-to-end scenarios
+(all use real MCP client<->server, real git worktrees, real `git apply`, real
+pytest). Anthropic/GitHub mocked as usual. All existing Phase 4/5 tests still
+passing (no changes to those code paths).
+
+Verified: `pytest` 251/251 passing, `ruff check` clean, `ruff format --check`
+clean, `mypy core sentinel mcp_server healer` (strict) clean. Real end-to-end
+job execution confirmed working.
+
 ### Phase 6 — UI: NOT STARTED
 ### Phase 7 — Ship: NOT STARTED
 ### Phase 8 — Prove: NOT STARTED

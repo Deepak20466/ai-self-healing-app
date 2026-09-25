@@ -8,13 +8,17 @@ more work than it's worth for the handful of deterministic scenarios
 `runtime_agent.py`'s tests need, so `runtime_agent.run_heal_job` depends only
 on this module's narrow structural Protocol, not on `anthropic.AsyncAnthropic`
 itself.
+
+`anthropic` itself is only imported inside `build_anthropic_client()`, not at
+module level: it's an optional extra (`pip install .[api]`, see pyproject.toml)
+needed only for API mode (`USE_CLAUDE_CODE=false`). Free mode (the default)
+never calls this function, so a free-mode install shouldn't need the package
+at all.
 """
 
 from __future__ import annotations
 
 from typing import Any, Protocol, cast
-
-import anthropic
 
 from core.config import settings
 
@@ -37,9 +41,20 @@ class AnthropicClientLike(Protocol):
 
 
 def build_anthropic_client() -> AnthropicClientLike:
-    """Construct the real Anthropic client. Only called by `healer/worker.py`."""
+    """Construct the real Anthropic client. Only called by `healer/worker.py`
+    in API mode (`USE_CLAUDE_CODE=false`)."""
     if not settings.anthropic_api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not configured")
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY is not configured (required in API mode, i.e. USE_CLAUDE_CODE=false)"
+        )
+    try:
+        import anthropic
+    except ImportError as exc:
+        raise RuntimeError(
+            "the `anthropic` package is not installed; run `pip install .[api]` to use "
+            "API mode (USE_CLAUDE_CODE=false)"
+        ) from exc
+
     client = anthropic.AsyncAnthropic(
         api_key=settings.anthropic_api_key,
         base_url=settings.anthropic_base_url,
