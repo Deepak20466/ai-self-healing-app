@@ -28,7 +28,8 @@ from core.models import (
     OpenResolvedStatus,
     PipelineRun,
 )
-from core.queue import enqueue_heal_job
+from core.queue import enqueue_heal_job, notify_heal_job
+from healer.circuit_breaker import ci_fix_circuit_open
 from sentinel.capture import CapturedError
 from sentinel.fingerprint import fingerprint_contract_violation, fingerprint_error
 from sentinel.schemas import CIWebhookPayload
@@ -47,6 +48,15 @@ async def _has_in_flight_job(session: AsyncSession, fingerprint: str) -> bool:
         HealJob.fingerprint == fingerprint, HealJob.status.in_(_IN_FLIGHT_STATUSES)
     )
     return (await session.execute(stmt)).first() is not None
+
+
+async def _in_flight_ci_job(session: AsyncSession, fingerprint: str) -> HealJob | None:
+    stmt = select(HealJob).where(
+        HealJob.fingerprint == fingerprint,
+        HealJob.type == HealJobType.CI_FAILURE,
+        HealJob.status.in_(_IN_FLIGHT_STATUSES),
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def _audit(
@@ -212,7 +222,23 @@ async def record_contract_violation(
 
 
 async def record_pipeline_event(session: AsyncSession, payload: CIWebhookPayload) -> PipelineRun:
-    """Upsert a pipeline run by `run_id`, enqueueing a CI-fix job on failure."""
+    """Upsert a pipeline run by `run_id`, enqueueing (or requeuing) a CI-fix job on failure.
+
+    A PR can fail CI more than once while the healer is working on it — its
+    own fix commit gets a new CI run, which can fail again. SPEC.md's CI-fix
+    loop pushes to the *same* PR branch across attempts, so this reuses a
+    single in-flight `ci_failure` heal_job per (branch, pr_number)
+    fingerprint across those repeat failures (bumping its
+    `source_pipeline_run_id` to the new run and putting it back on the queue)
+    instead of inserting a new row per failure — see `healer.circuit_breaker`'s
+    module docstring for why the attempt-count breaker is built around that.
+    Once `healer.ci_agent.run_ci_heal_job` gives up (hits
+    `max_ci_fix_attempts_per_pr`), it marks the job `failed`, which is not an
+    in-flight status, so a *new* CI failure on that PR after that point
+    (e.g. once a human pushes their own commit) is simply left unenqueued —
+    the breaker below refuses it too, since it counts attempts for the whole
+    PR lifetime, not just the current job row.
+    """
     stmt = select(PipelineRun).where(PipelineRun.run_id == payload.run_id)
     run = (await session.execute(stmt)).scalar_one_or_none()
 
@@ -242,12 +268,23 @@ async def record_pipeline_event(session: AsyncSession, payload: CIWebhookPayload
     heal_job_id: int | None = None
     if payload.status == "completed" and payload.conclusion == "failure":
         fingerprint = f"ci:{payload.branch}:{payload.pr_number or 'none'}"
-        if not await _has_in_flight_job(session, fingerprint):
+        in_flight = await _in_flight_ci_job(session, fingerprint)
+        if in_flight is not None:
+            in_flight.source_pipeline_run_id = run.id
+            in_flight.status = HealJobStatus.QUEUED
+            in_flight.started_at = None
+            await session.flush()
+            await notify_heal_job(session, in_flight.id, HealJobType.CI_FAILURE)
+            heal_job_id = in_flight.id
+        elif payload.pr_number is None or not await ci_fix_circuit_open(
+            session, payload.pr_number, max_attempts=settings.max_ci_fix_attempts_per_pr
+        ):
             job = await enqueue_heal_job(
                 session,
                 type=HealJobType.CI_FAILURE,
                 fingerprint=fingerprint,
                 source_pipeline_run_id=run.id,
+                pr_number=payload.pr_number,
             )
             heal_job_id = job.id
 

@@ -18,6 +18,7 @@ from core.models import HealJob, HealJobType
 from mcp_server import git_utils
 from mcp_server.audit import audited_tool
 from mcp_server.instance import mcp
+from mcp_server.patch_guard import check_not_cheating, check_patch_limits
 from mcp_server.sandbox import (
     MAX_READ_FILE_BYTES,
     MAX_WRITE_FILE_BYTES,
@@ -188,7 +189,11 @@ async def propose_patch(heal_job_id: int, worktree: str, unified_diff: str) -> d
     never from a caller-supplied parameter — so a runtime_error/
     contract_violation job can only ever touch `apps/target_app/`, while a
     ci_failure job may touch anything outside the universal forbidden paths
-    (.env, .git/, .github/workflows/, alembic/versions/).
+    (.env, .git/, .github/workflows/, alembic/versions/). Every diff is also
+    checked against the patch-size limit and the anti-cheating rules
+    (mcp_server/patch_guard.py) before anything is applied — enforced here in
+    code so a prompt-injection payload in an error message can never talk the
+    calling agent into shipping an oversized or test-deleting "fix".
     """
     async with session_scope() as session:
         job = await session.get(HealJob, heal_job_id)
@@ -204,6 +209,8 @@ async def propose_patch(heal_job_id: int, worktree: str, unified_diff: str) -> d
 
     try:
         touched_paths = check_diff_paths_writable(unified_diff, allowed_prefix=allowed_prefix)
+        check_patch_limits(unified_diff, touched_paths)
+        check_not_cheating(unified_diff)
         worktree_dir = resolve_worktree_dir(worktree)
     except SandboxViolation as exc:
         raise ToolError(str(exc)) from exc

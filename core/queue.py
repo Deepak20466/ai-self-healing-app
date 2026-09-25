@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from types import TracebackType
 from typing import Self
@@ -34,8 +35,15 @@ async def enqueue_heal_job(
     source_error_id: int | None = None,
     source_contract_violation_id: int | None = None,
     source_pipeline_run_id: int | None = None,
+    pr_number: int | None = None,
 ) -> HealJob:
-    """Insert a queued HealJob and NOTIFY listeners. Caller commits."""
+    """Insert a queued HealJob and NOTIFY listeners. Caller commits.
+
+    `pr_number` is only meaningful for `ci_failure` jobs (a CI failure always
+    belongs to a specific PR) — set here, at insert time, rather than left to
+    be backfilled later, so `healer.circuit_breaker.ci_fix_attempt_count_for_pr`
+    can query it directly instead of joining through `pipeline_runs`.
+    """
     job = HealJob(
         type=type,
         status=HealJobStatus.QUEUED,
@@ -43,13 +51,21 @@ async def enqueue_heal_job(
         source_error_id=source_error_id,
         source_contract_violation_id=source_contract_violation_id,
         source_pipeline_run_id=source_pipeline_run_id,
+        pr_number=pr_number,
     )
     session.add(job)
     await session.flush()
 
-    payload = json.dumps({"id": job.id, "type": type.value})
-    await _notify(session, payload)
+    await notify_heal_job(session, job.id, type)
     return job
+
+
+async def notify_heal_job(session: AsyncSession, job_id: int, type: HealJobType) -> None:
+    """`pg_notify` for a job that's now (re)claimable — a fresh insert, or an
+    existing job whose status was reset back to `queued` (see
+    `sentinel.storage.record_pipeline_event`'s CI-fix requeue path)."""
+    payload = json.dumps({"id": job_id, "type": type.value})
+    await _notify(session, payload)
 
 
 async def _notify(session: AsyncSession, payload: str) -> None:
@@ -66,11 +82,16 @@ async def _notify(session: AsyncSession, payload: str) -> None:
     await driver_connection.execute("SELECT pg_notify($1, $2)", NOTIFY_CHANNEL, payload)
 
 
-async def dequeue_heal_job(session: AsyncSession) -> HealJob | None:
+async def dequeue_heal_job(
+    session: AsyncSession, *, types: Sequence[HealJobType] | None = None
+) -> HealJob | None:
     """Claim the oldest queued job, marking it `running`. Caller commits.
 
     Uses `FOR UPDATE SKIP LOCKED` so concurrent callers never block on, or
-    double-claim, the same row.
+    double-claim, the same row. `types`, when given, restricts which job
+    types this caller can claim — the single healer worker (`healer.worker`)
+    passes all three types and dispatches by `job.type`, but a test or
+    future second worker process could narrow this.
     """
     stmt = (
         select(HealJob)
@@ -79,6 +100,8 @@ async def dequeue_heal_job(session: AsyncSession) -> HealJob | None:
         .limit(1)
         .with_for_update(skip_locked=True)
     )
+    if types is not None:
+        stmt = stmt.where(HealJob.type.in_(types))
     job = (await session.execute(stmt)).scalar_one_or_none()
     if job is None:
         return None

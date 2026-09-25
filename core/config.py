@@ -30,6 +30,11 @@ class Settings(BaseSettings):
 
     # --- Database --------------------------------------------------------
     database_url: str = "postgresql+asyncpg://selfheal:selfheal@localhost:5432/selfheal"
+    # Only read by tests/conftest.py (to point the whole process at a
+    # throwaway DB before this module is ever imported) and documented here
+    # so `.env` has one obvious place to declare it. Application code must
+    # never read this field directly.
+    test_database_url: str | None = None
     db_pool_size: int = 5
     db_max_overflow: int = 2
 
@@ -41,6 +46,7 @@ class Settings(BaseSettings):
 
     # --- Anthropic / Claude ------------------------------------------------
     anthropic_api_key: str | None = None
+    anthropic_base_url: str | None = None  # e.g. https://openrouter.ai/api for OpenRouter
     anthropic_model: str = "claude-sonnet-5"
 
     # --- GitHub --------------------------------------------------------------

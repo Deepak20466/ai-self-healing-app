@@ -87,7 +87,10 @@ async def test_search_code_finds_a_known_string() -> None:
 
 
 async def test_search_code_returns_empty_for_no_matches() -> None:
-    results = await search_code("this_pattern_should_never_match_anything_xyz123")
+    # Built by concatenation, not a literal, so `git grep` (which searches
+    # tracked file *content*) can never match this test's own source line.
+    pattern = "this_pattern_should_never_" + "match_anything_xyz123"
+    results = await search_code(pattern)
     assert results == []
 
 

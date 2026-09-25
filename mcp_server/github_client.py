@@ -125,3 +125,51 @@ class GitHubClient:
         await self._request(
             "POST", f"/repos/{repo}/actions/workflows/{workflow_file}/dispatches", json=payload
         )
+
+    async def create_pull_request(
+        self, *, title: str, body: str, head: str, base: str = "main"
+    ) -> dict[str, Any]:
+        """Open a PR from `head` into `base`. Used by the healer, never surfaced as an MCP tool.
+
+        Not in SPEC.md's mcp-pod tool list — SPEC.md's healer-pod bullet has
+        the healer itself "commit ... push and open a PR", so this is called
+        directly from `healer/github_ops.py`, the same way `tools/cicd.py`
+        already imports `GitHubClient` directly rather than going through MCP.
+        """
+        repo = _repo_or_raise()
+        response = await self._request(
+            "POST",
+            f"/repos/{repo}/pulls",
+            json={"title": title, "body": body, "head": head, "base": base},
+        )
+        data: dict[str, Any] = response.json()
+        return data
+
+    async def add_labels(self, issue_or_pr_number: int, labels: list[str]) -> None:
+        """Add labels to a PR or issue (PRs are issues for labeling purposes)."""
+        repo = _repo_or_raise()
+        await self._request(
+            "POST",
+            f"/repos/{repo}/issues/{issue_or_pr_number}/labels",
+            json={"labels": labels},
+        )
+
+    async def create_issue(
+        self, *, title: str, body: str, labels: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Open an issue — SPEC.md's "low confidence" fallback when a heal attempt
+        can't produce a verified fix (used instead of opening a PR)."""
+        repo = _repo_or_raise()
+        payload: dict[str, Any] = {"title": title, "body": body}
+        if labels:
+            payload["labels"] = labels
+        response = await self._request("POST", f"/repos/{repo}/issues", json=payload)
+        data: dict[str, Any] = response.json()
+        return data
+
+    async def create_issue_comment(self, issue_or_pr_number: int, body: str) -> None:
+        """Post a comment on an issue or PR (Phase 5 posts CI-fix evidence here)."""
+        repo = _repo_or_raise()
+        await self._request(
+            "POST", f"/repos/{repo}/issues/{issue_or_pr_number}/comments", json={"body": body}
+        )

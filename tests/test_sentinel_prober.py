@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.target_app import seed_data
 from core.models import ContractViolation
+from sentinel.fingerprint import fingerprint_contract_violation
 from sentinel.prober import persist_results, probe_once
 
 
@@ -55,6 +56,11 @@ async def test_persisting_the_same_violation_twice_increments_occurrence_count(
     await persist_results(db_session, results)
     await persist_results(db_session, results)
 
-    stmt = select(ContractViolation).where(ContractViolation.endpoint == "/items/top")
+    # Scoped by the deterministic fingerprint (endpoint, case_name), not by
+    # endpoint alone - other tests (e.g. healer's off-by-one fix test) create
+    # their own real, differently-fingerprinted ContractViolation rows for
+    # this same "/items/top" endpoint in the shared selfheal_test DB.
+    fingerprint = fingerprint_contract_violation("/items/top", "top_items_by_rating")
+    stmt = select(ContractViolation).where(ContractViolation.fingerprint == fingerprint)
     violation = (await db_session.execute(stmt)).scalar_one()
     assert violation.occurrence_count == 2

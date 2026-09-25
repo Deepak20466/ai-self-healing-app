@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings as core_settings
 from core.hmac_utils import sign_payload
-from core.models import HealJob, HealJobType, PipelineRun
+from core.models import HealJob, HealJobStatus, HealJobType, PipelineRun
 
 WEBHOOK_SECRET = "test-webhook-secret"
 
@@ -109,6 +109,63 @@ async def test_replayed_old_signature_is_rejected(sentinel_http_client: httpx.As
         "/webhooks/ci", content=body, headers={"X-Signature": old_signature}
     )
     assert response.status_code == 401
+
+
+async def test_second_failure_on_same_pr_requeues_the_existing_job(
+    sentinel_http_client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """A PR's own fix-commit CI run can fail again while the healer is still
+    working on it (see healer.circuit_breaker's module docstring) — that
+    must reuse the existing in-flight heal_job, not create a second one."""
+    first_body = _payload(run_id=6100, branch="autofix/reuse-test", pr_number=77)
+    await sentinel_http_client.post(
+        "/webhooks/ci",
+        content=first_body,
+        headers={"X-Signature": sign_payload(first_body, WEBHOOK_SECRET)},
+    )
+
+    second_body = _payload(run_id=6101, branch="autofix/reuse-test", pr_number=77)
+    await sentinel_http_client.post(
+        "/webhooks/ci",
+        content=second_body,
+        headers={"X-Signature": sign_payload(second_body, WEBHOOK_SECRET)},
+    )
+
+    stmt = select(HealJob).where(HealJob.fingerprint == "ci:autofix/reuse-test:77")
+    jobs = (await db_session.execute(stmt)).scalars().all()
+    assert len(jobs) == 1
+
+    run_stmt = select(PipelineRun).where(PipelineRun.run_id == 6101)
+    run = (await db_session.execute(run_stmt)).scalar_one()
+    assert jobs[0].source_pipeline_run_id == run.id
+    assert jobs[0].status == HealJobStatus.QUEUED
+
+
+async def test_circuit_broken_pr_does_not_enqueue_a_new_job(
+    sentinel_http_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(core_settings, "max_ci_fix_attempts_per_pr", 1)
+
+    exhausted = HealJob(
+        type=HealJobType.CI_FAILURE,
+        status=HealJobStatus.FAILED,
+        fingerprint="ci:autofix/exhausted-test:88",
+        pr_number=88,
+        attempt_count=1,
+    )
+    db_session.add(exhausted)
+    await db_session.flush()
+
+    body = _payload(run_id=6200, branch="autofix/exhausted-test", pr_number=88)
+    await sentinel_http_client.post(
+        "/webhooks/ci", content=body, headers={"X-Signature": sign_payload(body, WEBHOOK_SECRET)}
+    )
+
+    stmt = select(HealJob).where(HealJob.fingerprint == "ci:autofix/exhausted-test:88")
+    jobs = (await db_session.execute(stmt)).scalars().all()
+    assert len(jobs) == 1  # only the pre-existing, exhausted one
 
 
 async def test_missing_webhook_secret_configuration_returns_503(

@@ -65,6 +65,7 @@ else
         APP_DB_PASSWORD="$("$VENV_PYTHON" -c 'import secrets,string; a=string.ascii_letters+string.digits; print("".join(secrets.choice(a) for _ in range(24)))')"
     fi
 
+    TEST_DB_NAME="${APP_DB_NAME}_test"
     PGPASSWORD="$PG_SUPERPASSWORD" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_SUPERUSER" -d postgres \
         -v ON_ERROR_STOP=1 -q <<SQL
 DO \$\$
@@ -76,6 +77,10 @@ BEGIN
    END IF;
 END
 \$\$;
+-- Grants CREATEDB (not SUPERUSER) so the pytest suite can create and drop its
+-- own throwaway "$TEST_DB_NAME" database on every run without ever touching
+-- Postgres superuser credentials again. See CLAUDE.md "Test database".
+ALTER ROLE $APP_DB_USER CREATEDB;
 SQL
 
     DB_EXISTS="$(PGPASSWORD="$PG_SUPERPASSWORD" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_SUPERUSER" -d postgres \
@@ -84,15 +89,28 @@ SQL
         PGPASSWORD="$PG_SUPERPASSWORD" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_SUPERUSER" -d postgres \
             -v ON_ERROR_STOP=1 -q -c "CREATE DATABASE $APP_DB_NAME OWNER $APP_DB_USER"
     fi
-    echo "Role '$APP_DB_USER' and database '$APP_DB_NAME' are ready."
+
+    TEST_DB_EXISTS="$(PGPASSWORD="$PG_SUPERPASSWORD" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_SUPERUSER" -d postgres \
+        -tAc "SELECT 1 FROM pg_database WHERE datname = '$TEST_DB_NAME'")"
+    if [ "$TEST_DB_EXISTS" != "1" ]; then
+        PGPASSWORD="$PG_SUPERPASSWORD" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_SUPERUSER" -d postgres \
+            -v ON_ERROR_STOP=1 -q -c "CREATE DATABASE $TEST_DB_NAME OWNER $APP_DB_USER"
+    fi
+    echo "Role '$APP_DB_USER' and databases '$APP_DB_NAME' / '$TEST_DB_NAME' are ready."
 
     DATABASE_URL="postgresql+asyncpg://${APP_DB_USER}:${APP_DB_PASSWORD}@${PG_HOST}:${PG_PORT}/${APP_DB_NAME}"
+    TEST_DATABASE_URL="postgresql+asyncpg://${APP_DB_USER}:${APP_DB_PASSWORD}@${PG_HOST}:${PG_PORT}/${TEST_DB_NAME}"
     if grep -q '^DATABASE_URL=' .env; then
         sed -i.bak "s#^DATABASE_URL=.*#DATABASE_URL=${DATABASE_URL}#" .env && rm -f .env.bak
     else
         echo "DATABASE_URL=${DATABASE_URL}" >> .env
     fi
-    echo "Wrote DATABASE_URL into .env"
+    if grep -q '^TEST_DATABASE_URL=' .env; then
+        sed -i.bak "s#^TEST_DATABASE_URL=.*#TEST_DATABASE_URL=${TEST_DATABASE_URL}#" .env && rm -f .env.bak
+    else
+        echo "TEST_DATABASE_URL=${TEST_DATABASE_URL}" >> .env
+    fi
+    echo "Wrote DATABASE_URL and TEST_DATABASE_URL into .env"
 fi
 
 echo

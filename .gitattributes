@@ -1,0 +1,8 @@
+# Force LF line endings on checkout regardless of core.autocrlf, so every
+# `git worktree add` (healer/CI-fix fix attempts included) checks out files
+# byte-identical to what `read_file`/`propose_patch` see and diff against.
+# Without this, Git for Windows' system-wide core.autocrlf=true silently
+# converts LF -> CRLF on checkout into a *new* worktree even though the
+# main working tree and the git blobs are LF-only, which breaks `git apply`
+# context matching for any diff built from `read_file`'s (LF) output.
+* text=auto eol=lf

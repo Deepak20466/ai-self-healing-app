@@ -29,6 +29,57 @@ session can resume without re-deriving context.
 - App database: role + db both named `selfheal` by default, created by
   `scripts/bootstrap.ps1` / `scripts/bootstrap.sh`.
 
+## Test database (never the dev DB)
+
+- **pytest never opens the dev `selfheal` database.** `tests/conftest.py`
+  forces `DATABASE_URL` to a throwaway `selfheal_test` database (an explicit
+  `TEST_DATABASE_URL` in `.env` wins if present; otherwise it derives
+  `<dbname>_test`) **before the first import** of `core.config`/`core.db`
+  anywhere in the process — both are module-level singletons bound at import
+  time, so this has to happen at the very top of `conftest.py`, ahead of
+  every other project import (see the big docstring there).
+- `pytest_sessionstart` then creates the test database if missing, runs
+  `alembic upgrade head` against it, and seeds the deterministic demo
+  dataset — automatically, every run, no manual step.
+- Creating the database requires the `selfheal` role to have `CREATEDB`.
+  `scripts/bootstrap.ps1` / `.sh` grant this (a normal SQL `ALTER ROLE ...
+  CREATEDB`, not a Postgres-auth weakening — still scram-sha-256, no
+  `pg_hba.conf` changes) and also pre-create `selfheal_test` and write
+  `TEST_DATABASE_URL` into `.env`, mirroring how they already handle
+  `DATABASE_URL`. If the role lacks the privilege, `pytest_sessionstart`
+  raises a clear `RuntimeError` telling the user to re-run bootstrap with
+  their superuser password — same pattern as the dev DB (see "Environment on
+  this machine" above), never routed around.
+- Per-test isolation is unchanged from Phase 2: the `db_session` fixture
+  (rollback-per-test via a savepoint) for most tests, and `core.db.
+  session_scope()` with randomized fingerprint/id suffixes for tests that
+  need a real cross-connection commit (queue `SKIP LOCKED`, MCP tools with no
+  DI). Both patterns now simply point at `selfheal_test` instead of `selfheal`.
+
+## Anthropic and GitHub are always mocked in tests
+
+- **No test may make a real Anthropic or GitHub API call.** Real calls only
+  happen when running the actual pods (`honcho start` / a single pod
+  entrypoint), never under `pytest`.
+- Belt: `tests/conftest.py` unconditionally overwrites `ANTHROPIC_API_KEY`,
+  `GITHUB_TOKEN` and `GITHUB_REPO` in `os.environ` with obviously-fake
+  values for the whole pytest process (even if the real ones are exported in
+  the ambient shell, e.g. to run the app in another terminal). If any code
+  path ever forgets to mock and reaches the real API, it fails closed with a
+  401 instead of silently spending money or opening a real PR.
+- Suspenders: every test that exercises `mcp_server/github_client.py` (and,
+  from Phase 4 on, `healer`'s Anthropic client) uses the `respx_mock`
+  fixture and registers explicit routes — respx patches the httpx transport
+  layer itself, so it's agnostic to which client library sits on top
+  (confirmed this works for the `anthropic` SDK too, since it's httpx-based
+  internally, the same way it already works for `mcp_server/github_client.py`
+  — see `tests/test_mcp_github_client.py`). respx's default
+  `assert_all_mocked=True` means an unmocked request raises instead of
+  passing through.
+- Never add a fixture or helper that constructs a real `anthropic.
+  AsyncAnthropic(...)` or a real, unmocked `GitHubClient()` call in a test.
+  Inject a fake/duck-typed client, or mock with `respx_mock`.
+
 ## Conventions
 
 - Python 3.11+ everywhere except the exceptions listed in SPEC.md.
@@ -340,8 +391,348 @@ will 404 until then. `mcp_server/http_main.py` (the Procfile entrypoint) has
 around `run_http()`, not meaningfully unit-testable; same pattern already
 accepted for other pods' entrypoints.
 
-### Phase 4 — Runtime healing: NOT STARTED
-### Phase 5 — CI healing: NOT STARTED
+### Phase 4 — Runtime healing: DONE (code + tests; real end-to-end PR run still pending)
+Built (`healer/`):
+- `costs.py` (per-model USD pricing for input/output/cache-write/cache-read
+  tokens, `Decimal`-based, falls back to Sonnet-5 rates with a warning for an
+  unrecognized model), `budget.py` (`daily_spend` pause-at-cap, latches once
+  tripped so a job never un-pauses mid-day even if cost momentarily reads
+  under budget again), `circuit_breaker.py` (per-fingerprint 24h attempt cap
+  + a separate global hourly job cap), `worktree.py` (git worktree
+  create/reset/commit-and-push/remove lifecycle, async subprocess wrappers,
+  30s timeout), `github_ops.py` (opens the auto-fix PR or, on failure/low
+  confidence, a `needs-human-review` issue), `anthropic_client.py`
+  (`AnthropicClientLike` Protocol + `build_anthropic_client()` factory - lets
+  `runtime_agent.py` depend on a narrow structural type instead of the real
+  SDK class, so tests inject a hand-built fake), `mcp_client.py`
+  (`MCPToolClient` wrapping `ClientSession`; `connect_in_memory()` for tests
+  via MCP's real in-memory transport, `connect_http()` for production),
+  `prompts.py` (system prompt + `<untrusted_data>`-wrapped initial messages,
+  the prompt-injection defense), `runtime_agent.py` (`run_heal_job()` - the
+  main tool-call loop: checks circuit breaker + budget before each of up to
+  3 attempts, proves a regression test fails-before-fix and passes-after,
+  caps 20 tool calls/attempt and 8000 tokens/response, tracks token usage
+  and cost per attempt, commits+pushes+opens a PR on success or opens an
+  issue on exhausted attempts), `worker.py` (`run_worker()` - dequeues
+  `runtime_error`/`contract_violation` jobs via `core.queue`'s
+  LISTEN/NOTIFY-backed listener, falls back to a 30s poll, checks the global
+  hourly circuit before claiming work).
+- `tests/conftest.py` gained `fake_git_remote` (a throwaway local bare repo
+  added as a git remote, so `commit_and_push` tests never touch the real
+  `origin`) and the shared `isolated_budget_date` fixture (see "Ambiguities
+  resolved" below for why every `daily_spend`-touching test needs it).
+- 21 new tests across `test_healer_costs.py`, `test_healer_budget.py`,
+  `test_healer_circuit_breaker.py`, `test_healer_worktree.py`,
+  `test_healer_mcp_client.py`, and `test_healer_runtime_agent.py` (4
+  end-to-end scenarios: fixes a real `ZeroDivisionError`, fixes a real
+  off-by-one contract violation, an injection payload in the error message
+  causes no test deletion, exceeding the daily budget pauses the job before
+  any Anthropic call). Anthropic is a hand-built fake scripting the exact
+  tool-call sequence (real wire-format scripting via `respx` isn't worth it
+  for these deterministic scenarios); everything else in the e2e tests is
+  real - a real MCP client<->server round trip over `connect_in_memory`,
+  real git worktrees, real `git apply`, real `pytest` subprocess runs, and a
+  real `HealJob`/`Error`/`ContractViolation` row. GitHub is mocked via
+  `respx`; `git push` goes to `fake_git_remote`.
+
+Verified: `pytest` 226/226 passing (twice in a row, including the isolated
+end-to-end tests), `ruff check .`/`ruff format --check .` clean, `mypy core
+sentinel mcp_server healer` (strict) clean.
+
+**Ambiguities resolved this phase**:
+- **`daily_spend` rows are real, cross-connection commits (via
+  `session_scope()`), never rolled back like `db_session`-backed tests** -
+  so any test that calls `is_budget_paused`/`record_spend` against "today"
+  pollutes the *real* shared `selfheal_test` row for that category, which
+  then corrupts every other test (in the same run or a later one) reading
+  "today" for that same category. Hit this for real: a hardcoded synthetic
+  future date (`2099-01-01`) reused across several manual re-runs during
+  development accumulated `spend_usd`/`paused=True` on that fixed row just
+  as surely as "today" would have. Fixed with a shared, opt-in
+  `isolated_budget_date` fixture (`tests/conftest.py`) that monkeypatches
+  `healer.budget.datetime` to a synthetic date derived fresh from
+  `uuid.uuid5(uuid.NAMESPACE_DNS, uuid.uuid4().hex)` every time the fixture
+  runs (year 2200-2249) - a *random* date, not a fixed one, so repeated runs
+  (including CI runs on the same calendar day) can never collide with each
+  other or with production data. Every test that calls `run_heal_job` (not
+  just the budget-specific tests) takes this fixture, since `run_heal_job`
+  itself calls `is_budget_paused`/`record_spend` internally.
+
+**Real end-to-end run attempted this session — infra confirmed working, LLM
+availability is the actual blocker.** Manually started all 4 pods (`uvicorn
+apps.target_app.main:app`, `uvicorn sentinel.app:app`, `python -m
+mcp_server.http_main`, `python -m healer.worker`; the first two need
+`uvicorn`, not `python -m`, since their entrypoint modules only expose a
+factory-built `app`, no `if __name__ == "__main__"` block — Phase 7's
+Procfile should account for this), triggered `/trigger/zero`, and let the
+healer work a real `ZeroDivisionError` `heal_job` against several different
+LLM backends through OpenRouter (`ANTHROPIC_BASE_URL=https://openrouter.ai/api`):
+
+- `meta-llama/llama-3.3-70b-instruct:free` → 404, free slug no longer served
+- `openai/gpt-4o` (paid) → 402, OpenRouter account had insufficient credit
+  for the 8000-token response cap (`CLAUDE_MAX_TOKENS` in
+  `runtime_agent.py` — separate from `settings.max_tokens_per_job`, which
+  caps *total* tokens across a whole job's attempts, not the per-request
+  size)
+- `poolside/laguna-s-2.1:free` → 429, upstream-shared rate limit
+- `qwen/qwen-2.5-coder-32b-instruct:free` → 404, free slug no longer served
+- `google/gemini-2.0-flash-exp:free` → 404, no endpoints (guessed from
+  training data rather than queried live — don't do this; see below)
+- `cohere/north-mini-code:free` → got furthest: real tool-call round trips
+  against a real MCP server and a real git worktree, but hit OpenRouter's
+  shared 15 req/min cap partway through a single attempt's ~15-20 rapid
+  sequential tool calls, and failed the job
+
+**Root cause, not per-model bad luck**: the healer's tool-call loop issues
+many rapid sequential LLM requests within a single attempt (up to 20 tool
+calls, SPEC.md's cap). Every OpenRouter free-tier slug shares capacity
+across all their users and caps it around 15-20 req/min — structurally
+incompatible with this loop shape regardless of which free model is
+selected. A paid model (dedicated, non-shared rate limits) or the real
+Anthropic API is the actual fix, not trying more free slugs.
+
+**Don't guess OpenRouter model slugs from training data** — they drift
+constantly (renamed, deprecated, moved from free to paid-only). Query
+`https://openrouter.ai/api/v1/models` live and filter for
+`id.endswith(":free")` plus `"tools" in supported_parameters` (tool-use
+support is required; not all free models have it) before picking one.
+
+**Real bug found and fixed**: `healer/worker.py`'s `_process_next_job` had
+no exception handling around `run_heal_job` — an unhandled error thrown
+deep in a single job's processing (e.g. `GitHubClientError` from
+`open_low_confidence_issue` when the GitHub PAT lacked `Issues: write`)
+crashed the *entire* long-running worker process, not just that job. For a
+daemon meant to run continuously via LISTEN/NOTIFY, one bad job taking down
+the whole process is a real production bug. Fixed: `_process_next_job` now
+catches `Exception` around the `run_heal_job` call, logs
+`worker.job_failed_unexpectedly`, marks that job `HealJobStatus.FAILED`,
+and lets the worker loop continue to the next job. Verified by reproducing
+the original crash (missing GitHub issue-creation permission) and
+confirming the worker survived and the job was marked failed instead of the
+process dying — no test added since this needs real subprocess-level
+crash/survive verification, not a mock; recreate manually if regressing
+this. Also fixed while touching this code: `healer/anthropic_client.py`'s
+`build_anthropic_client()` used `**kwargs: dict[str, str]` to conditionally
+add `base_url`, which mypy strict couldn't verify against `AsyncAnthropic`'s
+real keyword signature — now passes `base_url=settings.anthropic_base_url`
+directly (`str | None`, which the SDK already accepts as "no override").
+
+**Still not completed**: a real PR was never opened end-to-end (every run
+either errored out before or during the LLM call, or exhausted attempts
+without a working fix and fell back to the low-confidence-issue path).
+Given a paid model or real Anthropic credits, the next attempt should
+reach a real PR — the code path through `github_ops.py`'s PR-opening branch
+is exercised by the mocked e2e tests
+(`test_run_heal_job_fixes_zero_division_error_end_to_end`) but still
+unverified against the real GitHub API. Do this once billing/API-key
+access allows a model with dedicated rate limits.
+
+### Phase 5 — CI healing: DONE
+Built (`healer/`, `sentinel/`, `core/`, `mcp_server/` — no new MCP tools
+needed, Phase 3 already built every CI/CD tool this phase uses):
+- `healer/ci_prompts.py` (a separate system prompt from Phase 4's
+  `prompts.py`: classify flaky-vs-real using `get_workflow_run`/
+  `get_job_logs`, then either `rerun_workflow` once or fix forward on the
+  PR's own branch — no new-branch/new-PR step, no fail-before-pass proof
+  requirement since a CI failure's own log is already the reproduction).
+- `healer/ci_agent.py` (`run_ci_heal_job()` — one attempt per call, not
+  Phase 4's up-to-3-internal-attempts loop; `_prepare_job()` validates +
+  advances the job's state in one `session_scope()` block and returns a
+  `_JobContext`/`_GiveUp`/`None` verdict, `_run_ci_attempt()` runs the
+  tool-call loop and always overrides the model's `run_id`/`failed_only`
+  arguments to `rerun_workflow` server-side, same principle as Phase 4's
+  `heal_job_id`/`worktree` override on `propose_patch`).
+- `healer/github_ops.py` gained `CIFixOutcome`/`post_ci_fix_comment` (the
+  per-attempt PR comment SPEC.md requires) and `open_ci_needs_human_issue`
+  (the circuit-breaker/exhausted-attempt fallback).
+- `healer/worktree.py` gained `create_worktree_for_branch()` (fetch + `git
+  worktree add` on an *existing* branch, for fixing forward on a PR branch
+  instead of Phase 4's always-new `autofix/*` branch) and hardened
+  `remove_worktree()` — see "real bug found" below.
+- `healer/circuit_breaker.py` gained `ci_fix_attempt_count_for_pr`/
+  `ci_fix_circuit_open` (SPEC.md's "max 2 CI-fix attempts per PR",
+  `settings.max_ci_fix_attempts_per_pr` — this setting already existed in
+  `core/config.py`, unused until now).
+- `core/queue.py`'s `enqueue_heal_job` gained a `pr_number` param (set at
+  insert time for `ci_failure` jobs) and a new public `notify_heal_job()`
+  (factored out of `enqueue_heal_job`, also used by the requeue path below).
+- `sentinel/storage.py`'s `record_pipeline_event` now requeues an existing
+  in-flight `ci_failure` heal_job (bumps `source_pipeline_run_id`, resets to
+  `queued`) instead of always inserting a new one — see "Ambiguities
+  resolved this phase".
+- `healer/worker.py`: dequeues all three `HealJobType`s now (was
+  runtime_error/contract_violation only) and dispatches by type to
+  `run_heal_job` or `run_ci_heal_job`.
+- 11 new tests: `tests/test_healer_ci_agent.py` (4 end-to-end scenarios —
+  fixes a real failure and pushes to the PR branch, classifies a failure as
+  flaky and reruns it, rejects a diff that deletes a test, the per-PR
+  circuit breaker refuses a new attempt with zero Anthropic calls),
+  `tests/test_healer_circuit_breaker.py` (+4, the new CI-fix breaker),
+  `tests/test_healer_worktree.py` (+1, `create_worktree_for_branch` against
+  a branch that exists only on the remote), `tests/test_sentinel_webhook.py`
+  (+2, the requeue-vs-enqueue-vs-circuit-broken paths). Same Phase 4 pattern
+  throughout: Anthropic is a hand-built fake scripting the exact tool-call
+  sequence; everything else is real (MCP client<->server round trip, git
+  worktrees/`git apply`/`git push` to `fake_git_remote`, real `pytest`
+  subprocess runs). GitHub mocked via `respx`.
+
+Verified (explicit Phase 5 checklist from SPEC.md): with mocked Anthropic +
+GitHub, a failing CI run gets a valid fix pushed to the PR branch
+(`test_run_ci_heal_job_pushes_a_fix_and_leaves_the_job_in_flight`), and a
+diff that deletes a test is rejected (`test_diff_deleting_a_test_is_rejected`
+— the same `mcp_server/patch_guard.py` check Phase 4 already built; Phase 5
+adds no new anti-cheat logic, just confirms it applies to `ci_failure` jobs
+too, which `propose_patch`'s job-type-scoped write rules already covered).
+
+`ruff check .`/`ruff format --check .` clean repo-wide. `mypy core sentinel
+mcp_server healer` (strict) clean. `pytest` 237/237 passing, 3 times in a
+row (after fixing the two hang-causing bugs and two pre-existing flaky
+tests documented below — see "real bugs found").
+
+**Ambiguities resolved this phase**:
+- **A CI-fix "attempt" spans multiple heal_jobs' worth of real time, so one
+  heal_job is reused across repeat failures on the same PR, not one row per
+  failure.** SPEC.md's runtime-fix loop can prove success itself (run
+  pytest locally, retry up to 3x, all within one call) — but a CI-fix
+  attempt's real verdict is GitHub Actions re-running the workflow on the
+  pushed commit, which can take minutes and arrives as a *separate* webhook
+  call, not something this process can await inline. Resolved by having
+  `sentinel.storage.record_pipeline_event` requeue the *same* in-flight
+  `ci_failure` heal_job (new `source_pipeline_run_id`, status back to
+  `queued`) when a new failure arrives for a fingerprint that already has
+  one in flight, instead of enqueueing a second one. `healer.ci_agent.
+  run_ci_heal_job` therefore only ever runs *one* attempt per call — no
+  internal retry loop like Phase 4's — and increments `HealJob.attempt_count`
+  once per real attempt. The per-PR circuit breaker
+  (`ci_fix_attempt_count_for_pr`) sums `attempt_count` across every
+  `ci_failure` row for a `pr_number` (normally just the one, reused, row)
+  rather than counting rows, since row-counting would undercount attempts
+  under this reuse scheme.
+- **A CI-fix attempt that produces no working patch ends the job
+  immediately, win or lose on `max_ci_fix_attempts_per_pr`.** If nothing was
+  pushed, no future CI run will ever arrive to requeue the job — so
+  "attempts remaining" is moot; leaving it non-terminal would just dangle
+  forever. `run_ci_heal_job` marks the job `failed` and opens a
+  needs-human-review issue on ANY unsuccessful attempt (not only once the
+  cap is reached), while a *pushed* fix or a triggered rerun both leave the
+  job `ci_fixing` (in-flight) since a real future CI event will legitimately
+  arrive to move it forward.
+- **`propose_patch`/`patch_guard.py` needed zero changes for CI jobs.**
+  Phase 3 already derived write-scope from `heal_job.type` (`ci_failure` →
+  no `apps/target_app/` restriction, still blocked from the universal
+  forbidden paths) and Phase 4's anti-cheat checks (`check_not_cheating`)
+  are diff-text-level and job-type-agnostic. Confirmed rather than assumed:
+  `test_diff_deleting_a_test_is_rejected` exercises this for a `ci_failure`
+  job specifically.
+- **`create_worktree_for_branch` vs. Phase 4's `create_worktree`**: a
+  runtime fix always starts a brand-new `autofix/*` branch off `main`
+  (`create_worktree`, `-b <branch>`); a CI fix has to check out the PR's
+  *existing* branch instead. `git worktree add <path> <branch>` (no `-b`)
+  after a `git fetch <remote> <branch>` relies on git's own DWIM behavior
+  (same as `git checkout <branch>` for an unambiguous remote branch) to
+  auto-create a local branch tracking it — verified this actually works
+  (not just documented) against a real local bare-repo remote before relying
+  on it in `create_worktree_for_branch`/its test.
+
+**Two real, related bugs found and fixed this session — both caused actual
+process hangs, not just wrong output, and both are worth understanding if
+anything in `healer/` starts hanging again:**
+
+1. **`healer/worktree.py`'s `remove_worktree` had no timeout**, unlike every
+   other git call in that module (`_run_git` wraps every call in
+   `asyncio.wait_for(..., GIT_TIMEOUT_SECONDS)`). On Windows, a just-exited
+   child process (the nested `pytest` subprocess `run_tests` spawns inside a
+   worktree) can leave a file handle inside that worktree directory open for
+   a moment after `communicate()` returns, and `git worktree remove --force`
+   run immediately after can then block on that file lock — with no
+   timeout at all, that stalled the *entire* worker/test process
+   indefinitely, not just that one cleanup call. Fixed with a
+   `_run_git_best_effort()` helper (timeout + `process.kill()`, but never
+   raises — a leftover worktree directory is still just a minor annoyance,
+   per that function's existing docstring).
+2. **A nested `session_scope()` deadlock in `healer/ci_agent.py`, found by
+   diagnosing a real hang via `pg_stat_activity`/`pg_locks` (not
+   guesswork)**: an earlier version's `_give_up()` helper did a GitHub call
+   *and* opened its own `session_scope()` to write the job's terminal
+   status, and was itself called from *inside* the caller's own already-open
+   `session_scope()` block (which had already flushed — but not yet
+   committed — its own update to the exact same `heal_jobs` row). That's a
+   genuine deadlock, not just slowness: the outer transaction was blocked in
+   Python waiting for `_give_up()`'s coroutine to return, while `_give_up()`'s
+   own inner transaction was blocked in Postgres (`pg_locks` showed a
+   `transactionid` wait) on the outer transaction's still-open row lock —
+   two connections, neither able to proceed, and no query-level timeout on
+   either side to break it. Diagnosed by connecting directly with `psql` and
+   reading `pg_stat_activity`/`pg_locks` while the hung process was still
+   alive (`state = 'idle in transaction'` on one backend, waiting to hear
+   back from application code stuck awaiting the other). Fixed by
+   restructuring: `_prepare_job()` now does **all** of a job's DB writes for
+   the "stop here" cases in one single `session_scope()` block and returns
+   a plain-data verdict (`_JobContext` to proceed, `_GiveUp(pr_number,
+   reason)` to open a fallback issue, or `None` to just stop) — never a
+   GitHub call. `run_ci_heal_job` only calls the (now DB-free)
+   `_open_needs_human_issue()` *after* that block has already committed and
+   closed. If you add another "stop and maybe open an issue" branch to this
+   function, keep that split — a DB write and an awaited external call must
+   never share one open transaction.
+   **Process hygiene note for future sessions**: an interrupted/backgrounded
+   test run on Windows can leave its process tree (and, more importantly,
+   its Postgres backend connections) alive well after the tool reports it
+   "interrupted" — `TaskStop` on the specific task id reliably kills the
+   tree (confirmed via `Get-CimInstance Win32_Process`), but a bare Ctrl-C
+   from a user's own terminal earlier in this session did not. A hang that
+   won't resolve is worth checking `pg_stat_activity`
+   (`state = 'idle in transaction'` + another session's `wait_event =
+   transactionid` waiting on it) before assuming it's just slow — `psql` is
+   at `C:\Program Files\PostgreSQL\17\bin\psql.exe`, not on PATH in this
+   environment's bash.
+
+**A third issue, test-only but from the same "shared DB, global counters"
+family**: `tests/test_healer_ci_agent.py` originally used hardcoded
+`pr_number`s (301-304). `ci_fix_circuit_open` sums `attempt_count` globally
+by `pr_number` across the whole shared `selfheal_test` DB (by design — see
+above), so re-running this file repeatedly (as happened a lot while
+diagnosing the two bugs above) left real committed attempts behind under
+those same numbers, and a later run's circuit-breaker check tripped
+immediately — not because of any code bug, but because the *test itself*
+had effectively already used up its own budget in earlier runs. Same root
+cause as the pre-existing "shared dev DB pollutes unscoped queries" note,
+now hit for a `pr_number`-keyed counter specifically. Fixed by giving this
+file its own `_random_pr_number()` (same pattern as `tests/
+test_healer_circuit_breaker.py`'s). **Any new test that exercises a
+globally-scoped counter (by fingerprint, pr_number, or job type) must
+randomize the key it counts by, every time** — a hardcoded key is a ticking
+time bomb the moment the test is run more than once against the same
+`selfheal_test` database, including by a human re-running it manually while
+debugging.
+
+**A fourth, pre-existing (not Phase 5, not this session's new code) flaky
+test found while re-running the suite for confirmation**:
+`tests/test_mcp_confirmation.py::test_tampered_token_is_rejected` tampered
+the token's *last* character specifically. Base64's final character in a
+run whose length isn't a multiple of 3 bytes can encode fewer than 6 real
+bits — the rest are padding bits `itsdangerous` ignores on decode — so some
+single-character substitutions there are silent no-ops: the tampered string
+differs, but decodes to the exact same bytes, and verification legitimately
+still passes. Whether `'a'`/`'b'` land in the same decode-equivalence class
+depends on that test run's random signature bytes, so this passed most runs
+and failed rarely. Fixed by tampering a character in the middle of the
+token's *payload* segment (before the first `.`) instead — no padding
+ambiguity there, and itsdangerous signs across payload+timestamp before
+attempting to decode either, so any single-byte change there deterministically
+trips `BadSignature`. (Separately, `tests/test_healer_budget.py::
+test_categories_are_independent` also failed once during this session's
+unusually high number of consecutive full-suite reruns while diagnosing the
+bugs above, then passed clean on every other run; `healer/budget.py`'s
+`_get_or_create_row` genuinely filters by both `day` *and* `category`
+— confirmed by reading it — so this was almost certainly `isolated_budget_
+date`'s random-date space (16,800 slots) coincidentally colliding across two
+of the many dozens of budget-touching tests run back-to-back today, not a
+real category-isolation bug. Not fixed — the randomization is already the
+correct mitigation for normal usage; today's collision odds were inflated by
+this session's rerun count specifically. Worth knowing about if it ever
+recurs, so it isn't mistaken for a regression.)
+
 ### Phase 6 — UI: NOT STARTED
 ### Phase 7 — Ship: NOT STARTED
 ### Phase 8 — Prove: NOT STARTED

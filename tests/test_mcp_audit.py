@@ -1,4 +1,13 @@
-"""mcp_server.audit: every tool call gets logged, scrubbed, and truncated."""
+"""mcp_server.audit: every tool call gets logged, scrubbed, and truncated.
+
+Every query here orders by `AuditLog.id.desc()` and takes the newest matching
+row: from Phase 4 on, `healer`'s end-to-end tests make real, committed
+`propose_patch`/`read_file`/etc. tool calls of their own (via the real
+MCP server), which leave earlier "tool_call" rows with the same tool name
+(and sometimes the same args) in the shared `selfheal_test` DB. The row this
+test just logged is always the newest one, so ordering avoids picking up one
+of those instead.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +26,7 @@ async def test_successful_call_is_logged_with_scrubbed_and_truncated_args(db_ses
         duration_ms=12.3,
     )
 
-    stmt = select(AuditLog).where(AuditLog.action == "tool_call")
+    stmt = select(AuditLog).where(AuditLog.action == "tool_call").order_by(AuditLog.id.desc())
     row = (await db_session.execute(stmt)).scalars().first()
     assert row is not None
     assert row.actor == "mcp"
@@ -40,7 +49,7 @@ async def test_failed_call_logs_the_error_message(db_session) -> None:
         error="No error with id 999999",
     )
 
-    stmt = select(AuditLog).where(AuditLog.action == "tool_call")
+    stmt = select(AuditLog).where(AuditLog.action == "tool_call").order_by(AuditLog.id.desc())
     rows = (await db_session.execute(stmt)).scalars().all()
     matching = [r for r in rows if r.details.get("tool") == "get_error"]
     assert matching
@@ -56,7 +65,7 @@ async def test_long_argument_values_are_truncated(db_session) -> None:
     long_diff = "x" * 5000
     await log_tool_call("propose_patch", {"unified_diff": long_diff}, success=True, duration_ms=1.0)
 
-    stmt = select(AuditLog).where(AuditLog.action == "tool_call")
+    stmt = select(AuditLog).where(AuditLog.action == "tool_call").order_by(AuditLog.id.desc())
     rows = (await db_session.execute(stmt)).scalars().all()
     matching = [r for r in rows if r.details.get("tool") == "propose_patch"]
     assert matching

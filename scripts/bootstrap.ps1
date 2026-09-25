@@ -99,6 +99,7 @@ if (-not $PgSuperPassword) {
     }
 
     $env:PGPASSWORD = $PgSuperPassword
+    $TestDbName = "${AppDbName}_test"
     try {
         $sql = @"
 DO `$`$
@@ -110,6 +111,10 @@ BEGIN
    END IF;
 END
 `$`$;
+-- Grants CREATEDB (not SUPERUSER) so the pytest suite can create and drop its
+-- own throwaway "$TestDbName" database on every run without ever touching
+-- Postgres superuser credentials again. See CLAUDE.md "Test database".
+ALTER ROLE $AppDbUser CREATEDB;
 "@
         $sql | & $psql -h $PgHost -p $PgPort -U $PgSuperuser -d postgres -v ON_ERROR_STOP=1 -q
 
@@ -119,20 +124,33 @@ END
             & $psql -h $PgHost -p $PgPort -U $PgSuperuser -d postgres -v ON_ERROR_STOP=1 -q -c `
                 "CREATE DATABASE $AppDbName OWNER $AppDbUser"
         }
-        Write-Host "Role '$AppDbUser' and database '$AppDbName' are ready."
+
+        $testDbExists = & $psql -h $PgHost -p $PgPort -U $PgSuperuser -d postgres -tAc `
+            "SELECT 1 FROM pg_database WHERE datname = '$TestDbName'"
+        if ($testDbExists.Trim() -ne "1") {
+            & $psql -h $PgHost -p $PgPort -U $PgSuperuser -d postgres -v ON_ERROR_STOP=1 -q -c `
+                "CREATE DATABASE $TestDbName OWNER $AppDbUser"
+        }
+        Write-Host "Role '$AppDbUser' and databases '$AppDbName' / '$TestDbName' are ready."
     } finally {
         Remove-Item Env:\PGPASSWORD
     }
 
     $databaseUrl = "postgresql+asyncpg://${AppDbUser}:${AppDbPassword}@${PgHost}:${PgPort}/${AppDbName}"
+    $testDatabaseUrl = "postgresql+asyncpg://${AppDbUser}:${AppDbPassword}@${PgHost}:${PgPort}/${TestDbName}"
     $envContent = Get-Content ".env"
     if ($envContent -match "^DATABASE_URL=") {
         $envContent = $envContent -replace "^DATABASE_URL=.*", "DATABASE_URL=$databaseUrl"
     } else {
         $envContent += "DATABASE_URL=$databaseUrl"
     }
+    if ($envContent -match "^TEST_DATABASE_URL=") {
+        $envContent = $envContent -replace "^TEST_DATABASE_URL=.*", "TEST_DATABASE_URL=$testDatabaseUrl"
+    } else {
+        $envContent += "TEST_DATABASE_URL=$testDatabaseUrl"
+    }
     Set-Content ".env" $envContent
-    Write-Host "Wrote DATABASE_URL into .env"
+    Write-Host "Wrote DATABASE_URL and TEST_DATABASE_URL into .env"
 }
 
 Write-Host "`n== Step 4/4: Alembic migrations ==" -ForegroundColor Cyan
