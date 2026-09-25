@@ -22,6 +22,7 @@ ORDER_STATUS_LABELS: dict[str, str] = {
     "pending": "Pending",
     "shipped": "Shipped",
     "delivered": "Delivered",
+    "archived": "Archived",
 }
 
 
