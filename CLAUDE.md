@@ -1394,3 +1394,96 @@ reminder: **before resetting an in-flight heal_job's status, correlate
 and check for live `claude.exe` processes** — a recent `started_at` from
 *before* your own restart is a strong sign the current process is still
 legitimately working it, not an orphan from a killed one.
+
+### Multi-app support (Step 1 of the multi-app/multi-language extension) — IN PROGRESS
+
+Extending beyond the single hardcoded `apps/target_app/` to support any
+number of registered apps. Not in SPEC.md's original scope (SPEC.md
+predates this extension) — driven by a follow-up request. Sub-steps done
+so far, each committed and pushed separately with full lint/mypy/pytest
+green:
+
+1. **`monitored_apps` table + YAML config** — `alembic/versions/
+   0003_monitored_apps.py` creates the table and a nullable `app_id` FK on
+   `errors`/`contract_violations`/`heal_jobs` (nullable because pre-existing
+   rows predate multi-app support; every new row going forward sets it in
+   application code). `config/monitored_apps.yaml` is the human-editable
+   source of truth, synced into the DB by `core/monitored_apps.py:
+   sync_monitored_apps()` (upsert by `name`, idempotent) — run automatically
+   by `pytest_sessionstart` and by `scripts/sync_monitored_apps.py` for a
+   real environment. `apps/target_app` is registered as the first row with
+   behavior unchanged.
+2. **Errors/violations/heal_jobs attributed to an app** — `core/queue.py:
+   enqueue_heal_job` and `sentinel/storage.py`'s `record_error`/
+   `record_contract_violation` take an `app_id`. `sentinel/app.py` resolves
+   the reporting app from an *optional* `Authorization: Bearer <token>`
+   header (`core/monitored_apps.py:get_app_by_ingest_token`) — deliberately
+   not enforced with a 401, so an app that hasn't set a token still gets
+   captured, just unattributed (`app_id=None`), identical to pre-multi-app
+   behavior. `SentinelClient`/`SyncSentinelClient` send this header from the
+   new `SENTINEL_INGEST_TOKEN` setting. The prober attributes contract
+   violations to `target_app`'s own row by a one-time name lookup (it only
+   ever probes target_app's contracts.py currently).
+3. **Flask and Django middleware** — `sentinel/sync_client.py` (blocking
+   httpx.Client counterpart to `SentinelClient`, since Flask/Django request
+   handling is itself synchronous), `sentinel/flask_middleware.py` (hooks
+   Flask's `got_request_exception` signal — **must pass `connect(...,
+   weak=False)`**, a real bug found while testing: the default weak
+   reference lets the local closure receiver get garbage-collected right
+   after `init_sentinel_flask()` returns, silently disconnecting it),
+   `sentinel/django_middleware.py` (implements `process_exception`, Django's
+   dedicated unhandled-view-exception hook). Both are optional deps
+   (`flask`, `django` — added to `[dev]` so their tests run; a monitored app
+   using one of these only needs that one framework installed, not both).
+   `sentinel/capture.py:build_captured_error` gained an optional
+   `in_app_markers` param so a non-target_app integration prefers its own
+   in-app frames.
+4. **`propose_patch`/`run_tests` scoped by the job's own app** —
+   `mcp_server/sandbox.py`'s `check_writable`/`check_diff_paths_writable`
+   take `allowed_prefixes` (a list, not a single string) now.
+   `propose_patch` derives it from the heal_job's `app_id` ->
+   `MonitoredApp.allowed_write_paths` for `runtime_error`/
+   `contract_violation` jobs (falling back to the legacy
+   `apps/target_app/` default when `app_id` is `None`, i.e. a job from
+   before multi-app support) — still resolved server-side from the DB only,
+   never from a caller parameter, same principle as the original
+   single-app restriction. `run_tests` gained an optional `heal_job_id`: a
+   non-Python app's own `test_command` is run verbatim via the new
+   `mcp_server/git_utils.run_test_command` (a generic shell-command runner,
+   for the upcoming Node/Go example apps) instead of `python -m pytest`;
+   omitting `heal_job_id`, or a Python app, keeps the exact pre-existing
+   pytest code path unchanged. `tests/test_mcp_tools_code.py::
+   test_propose_patch_scopes_a_multi_app_job_to_its_own_app` is the
+   isolation test proving app A's write scope never leaks to app B, even
+   when both live under `apps/`.
+
+**Ambiguity resolved**: healer worktree creation and PR target repo need
+**no change** for multi-app support as implemented so far. Every app
+registered via `config/monitored_apps.yaml` so far (`target_app`, and the
+planned `examples/node_app`/`examples/go_app`) lives in a subdirectory of
+this *same* repo (`MonitoredApp.local_repo_path` documents this
+convention directly on the model) — so there is exactly one
+`github_repo`/`GITHUB_TOKEN` in practice, and the existing single-repo
+`mcp_server/github_client.py` + `healer/worktree.py` already work
+unmodified once write-scope is correctly restricted to the app's own
+subdirectory (done in sub-step 4 above). `MonitoredApp.github_repo` exists
+per-row for forward compatibility/clarity, not because it's exercised
+differently today. If a genuinely separate repo is ever registered, that
+would need its own worktree-remote/PR-target wiring — not built, since
+nothing in the current scope needs it.
+
+**Not yet started** (next session should pick up here):
+- **Step 2: any language via OpenTelemetry** — sentinel OTLP/HTTP ingest
+  endpoint (JSON + protobuf), stack-trace parsing for Python/JS/Java/Go/
+  C#/PHP/Ruby, per-language patch-guard anti-cheat detection (pytest
+  skip/xfail, JS `it.skip`/`xit`/`test.only`, Java `@Disabled`/`@Ignore`,
+  Go `t.Skip`, C# `[Ignore]`/`Skip=`, PHP `markTestSkipped`, Ruby
+  `skip`/`pending`), and `examples/` Node.js (Express) + Go apps each with
+  one seeded bug, OpenTelemetry configured, tests, and registered in
+  `config/monitored_apps.yaml`. Node is already confirmed installed on
+  this dev machine (`node v24.13.1`); Go was not checked yet.
+- **Step 3: docs + verify** — `docs/onboarding.md`, README/SPEC.md/
+  VERIFICATION.md updates, and extending `scripts/verify_all.py` with
+  multi-app + OTLP checks.
+- The live CI self-healing proof (PR #14) predates this multi-app work and
+  was correctly *not* repeated.
