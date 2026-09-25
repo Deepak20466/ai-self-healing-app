@@ -26,6 +26,9 @@ MAX_READ_FILE_BYTES = 200_000
 MAX_WRITE_FILE_BYTES = 500_000
 
 _FORBIDDEN_WRITE_PREFIXES = (".git/", ".github/workflows/", "alembic/versions/")
+#: Legacy default write scope for a runtime_error/contract_violation job
+#: with no app_id (predates multi-app support). A job with an app_id uses
+#: that app's own `allowed_write_paths` instead (see tools/code.py).
 RUNTIME_FIX_ALLOWED_PREFIX = "apps/target_app/"
 
 _DIFF_PATH_PATTERN = re.compile(r"^(?:---|\+\+\+) (?:a/|b/)?(?P<path>\S+)", re.MULTILINE)
@@ -65,12 +68,13 @@ def check_readable(relative_path: str) -> Path:
     return resolved
 
 
-def check_writable(relative_path: str, *, allowed_prefix: str | None = None) -> Path:
+def check_writable(relative_path: str, *, allowed_prefixes: list[str] | None = None) -> Path:
     """Resolve and validate a path for writing. Raises SandboxViolation if forbidden.
 
-    `allowed_prefix`, when given, additionally restricts writes to paths
-    starting with it (used to enforce the `apps/target_app/`-only rule for
-    runtime auto-fixes).
+    `allowed_prefixes`, when given, additionally restricts writes to paths
+    starting with one of them (a monitored app's `allowed_write_paths`, or
+    the legacy single-app `apps/target_app/` default for jobs with no
+    app_id).
     """
     resolved = resolve_repo_path(relative_path)
     rel = to_repo_relative(resolved)
@@ -80,9 +84,9 @@ def check_writable(relative_path: str, *, allowed_prefix: str | None = None) -> 
     for forbidden in _FORBIDDEN_WRITE_PREFIXES:
         if rel == forbidden.rstrip("/") or rel.startswith(forbidden):
             raise SandboxViolation(f"Writing to {rel!r} is not allowed (forbidden path)")
-    if allowed_prefix is not None and not rel.startswith(allowed_prefix):
+    if allowed_prefixes is not None and not any(rel.startswith(p) for p in allowed_prefixes):
         raise SandboxViolation(
-            f"Writing to {rel!r} is outside the allowed scope {allowed_prefix!r}"
+            f"Writing to {rel!r} is outside the allowed scope {allowed_prefixes!r}"
         )
     return resolved
 
@@ -112,7 +116,9 @@ def extract_diff_paths(unified_diff: str) -> set[str]:
     return paths
 
 
-def check_diff_paths_writable(unified_diff: str, *, allowed_prefix: str | None = None) -> set[str]:
+def check_diff_paths_writable(
+    unified_diff: str, *, allowed_prefixes: list[str] | None = None
+) -> set[str]:
     """Validate every path touched by a diff against the write sandbox.
 
     Returns the set of touched (repo-relative) paths on success; raises
@@ -122,5 +128,5 @@ def check_diff_paths_writable(unified_diff: str, *, allowed_prefix: str | None =
     if not touched:
         raise SandboxViolation("Diff does not touch any files")
     for path in touched:
-        check_writable(path, allowed_prefix=allowed_prefix)
+        check_writable(path, allowed_prefixes=allowed_prefixes)
     return touched

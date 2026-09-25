@@ -145,3 +145,41 @@ async def run_pytest(
         "return_code": process.returncode,
         "output": output[-20_000:],
     }
+
+
+async def run_test_command(
+    command: str, *, cwd: Path, timeout: float = TEST_TIMEOUT_SECONDS
+) -> dict[str, Any]:
+    """Run a monitored app's own configured `test_command` as a shell command.
+
+    Multi-app/multi-language support: a non-Python app's test suite isn't
+    invoked with `python -m pytest` (there is no fixed argv shape across
+    npm/go/etc.), so its `MonitoredApp.test_command` (e.g. "npm test",
+    "go test ./...") is run verbatim via the shell instead. Same
+    timeout/output-capping contract as `run_pytest`, so callers (the healer
+    agent) treat both the same way.
+    """
+    process = await asyncio.create_subprocess_shell(
+        command,
+        cwd=str(cwd),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+        return {
+            "passed": False,
+            "timed_out": True,
+            "output": f"Tests timed out after {timeout}s",
+        }
+
+    output = stdout.decode(errors="replace")
+    return {
+        "passed": process.returncode == 0,
+        "timed_out": False,
+        "return_code": process.returncode,
+        "output": output[-20_000:],
+    }

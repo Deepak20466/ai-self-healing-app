@@ -94,12 +94,12 @@ def test_check_writable_allows_normal_source_outside_any_scope() -> None:
 
 
 def test_check_writable_with_runtime_scope_allows_target_app() -> None:
-    check_writable("apps/target_app/bugs.py", allowed_prefix=RUNTIME_FIX_ALLOWED_PREFIX)
+    check_writable("apps/target_app/bugs.py", allowed_prefixes=[RUNTIME_FIX_ALLOWED_PREFIX])
 
 
 def test_check_writable_with_runtime_scope_rejects_outside_target_app() -> None:
     with pytest.raises(SandboxViolation):
-        check_writable("sentinel/storage.py", allowed_prefix=RUNTIME_FIX_ALLOWED_PREFIX)
+        check_writable("sentinel/storage.py", allowed_prefixes=[RUNTIME_FIX_ALLOWED_PREFIX])
 
 
 def test_extract_diff_paths_reads_standard_unified_diff_headers() -> None:
@@ -129,12 +129,12 @@ def test_check_diff_paths_writable_rejects_forbidden_path_in_diff() -> None:
 def test_check_diff_paths_writable_rejects_out_of_scope_for_runtime_fix() -> None:
     diff = "--- a/sentinel/storage.py\n+++ b/sentinel/storage.py\n"
     with pytest.raises(SandboxViolation):
-        check_diff_paths_writable(diff, allowed_prefix=RUNTIME_FIX_ALLOWED_PREFIX)
+        check_diff_paths_writable(diff, allowed_prefixes=[RUNTIME_FIX_ALLOWED_PREFIX])
 
 
 def test_check_diff_paths_writable_accepts_in_scope_diff() -> None:
     diff = "--- a/apps/target_app/bugs.py\n+++ b/apps/target_app/bugs.py\n"
-    touched = check_diff_paths_writable(diff, allowed_prefix=RUNTIME_FIX_ALLOWED_PREFIX)
+    touched = check_diff_paths_writable(diff, allowed_prefixes=[RUNTIME_FIX_ALLOWED_PREFIX])
     assert touched == {"apps/target_app/bugs.py"}
 
 

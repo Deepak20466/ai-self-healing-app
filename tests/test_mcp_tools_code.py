@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from core.db import session_scope
-from core.models import HealJob, HealJobStatus, HealJobType
+from core.models import HealJob, HealJobStatus, HealJobType, MonitoredApp
 from mcp_server.tools._exceptions import ToolError
 from mcp_server.tools.code import (
     get_git_blame,
@@ -24,16 +24,37 @@ from mcp_server.tools.code import (
 )
 
 
-async def _make_heal_job(job_type: HealJobType) -> int:
+async def _make_heal_job(job_type: HealJobType, app_id: int | None = None) -> int:
     # Random suffix, not a fixed "fp-{job_type}" - a fixed fingerprint would
     # accumulate one real row per job_type per test run in the shared dev DB.
     fingerprint = f"fp-{job_type}-{uuid.uuid4().hex[:8]}"
     async with session_scope() as session:
-        job = HealJob(type=job_type, status=HealJobStatus.RUNNING, fingerprint=fingerprint)
+        job = HealJob(
+            type=job_type, status=HealJobStatus.RUNNING, fingerprint=fingerprint, app_id=app_id
+        )
         session.add(job)
         await session.flush()
         job_id = job.id
     return job_id
+
+
+async def _make_monitored_app(
+    *, allowed_write_paths: list[str], test_command: str, language: str = "node"
+) -> int:
+    async with session_scope() as session:
+        app = MonitoredApp(
+            name=f"scratch-app-{uuid.uuid4().hex[:8]}",
+            language=language,
+            local_repo_path="examples/scratch_app",
+            github_repo="example/scratch",
+            allowed_write_paths=allowed_write_paths,
+            test_command=test_command,
+            ingest_token=uuid.uuid4().hex,
+        )
+        session.add(app)
+        await session.flush()
+        app_id = app.id
+    return app_id
 
 
 def _diff_for(worktree_path: Path, relative_path: str, prepend: str) -> str:
@@ -235,3 +256,44 @@ async def test_propose_patch_rejects_a_diff_that_does_not_apply(
 
     with pytest.raises(ToolError):
         await propose_patch(heal_job_id=job_id, worktree=name, unified_diff=bogus_diff)
+
+
+async def test_propose_patch_scopes_a_multi_app_job_to_its_own_app(
+    git_worktree: tuple[str, Path],
+) -> None:
+    """A runtime_error job for app B can't be scoped to app A's paths just
+    because A is the default -- its own registered app determines scope."""
+    name, worktree_path = git_worktree
+    app_id = await _make_monitored_app(
+        allowed_write_paths=["apps/target_app/routes.py"], test_command="pytest"
+    )
+    job_id = await _make_heal_job(HealJobType.RUNTIME_ERROR, app_id=app_id)
+
+    # allowed for this app (its own scoped path)
+    ok_diff = _diff_for(worktree_path, "apps/target_app/routes.py", "# scoped ok\n")
+    result = await propose_patch(heal_job_id=job_id, worktree=name, unified_diff=ok_diff)
+    assert result["applied"] is True
+
+    # rejected: bugs.py is not in *this* app's allowed_write_paths, even
+    # though it's under apps/target_app/ (the legacy single-app default)
+    bad_diff = _diff_for(worktree_path, "apps/target_app/bugs.py", "# should never land\n")
+    with pytest.raises(ToolError):
+        await propose_patch(heal_job_id=job_id, worktree=name, unified_diff=bad_diff)
+
+
+async def test_run_tests_uses_the_apps_own_test_command_for_non_python_apps(
+    git_worktree: tuple[str, Path],
+) -> None:
+    name, worktree_path = git_worktree
+    app_dir = worktree_path / "examples" / "scratch_app"
+    app_dir.mkdir(parents=True)
+    app_id = await _make_monitored_app(
+        allowed_write_paths=["examples/scratch_app/"],
+        test_command="node -e \"console.log('ok'); process.exit(0)\"",
+    )
+    job_id = await _make_heal_job(HealJobType.RUNTIME_ERROR, app_id=app_id)
+
+    result = await run_tests(worktree=name, heal_job_id=job_id)
+
+    assert result["passed"] is True
+    assert "ok" in result["output"]

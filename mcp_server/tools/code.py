@@ -13,8 +13,10 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from core.db import session_scope
-from core.models import HealJob, HealJobType
+from core.models import HealJob, HealJobType, MonitoredApp
 from mcp_server import git_utils
 from mcp_server.audit import audited_tool
 from mcp_server.instance import mcp
@@ -170,13 +172,42 @@ async def get_recent_commits(n: int = 10) -> list[dict[str, str]]:
         raise ToolError(str(exc)) from exc
 
 
+async def _get_app_for_job(session: AsyncSession, job: HealJob) -> MonitoredApp | None:
+    if job.app_id is None:
+        return None
+    return await session.get(MonitoredApp, job.app_id)
+
+
 @audited_tool(mcp, "run_tests")
-async def run_tests(worktree: str | None = None, test_path: str | None = None) -> dict[str, Any]:
-    """Run pytest with a timeout, in `worktree` if given, else the main repo (read-only run)."""
+async def run_tests(
+    worktree: str | None = None,
+    test_path: str | None = None,
+    heal_job_id: int | None = None,
+) -> dict[str, Any]:
+    """Run tests with a timeout, in `worktree` if given, else the main repo (read-only run).
+
+    When `heal_job_id` is given and its app is registered with a non-Python
+    `test_command` (multi-app/multi-language support), that command is run
+    verbatim instead of `python -m pytest` — see
+    `mcp_server.git_utils.run_test_command`. Omitting `heal_job_id` (or a
+    Python app) keeps the exact pre-existing pytest behavior.
+    """
     try:
         cwd = resolve_worktree_dir(worktree) if worktree else REPO_ROOT
     except SandboxViolation as exc:
         raise ToolError(str(exc)) from exc
+
+    app: MonitoredApp | None = None
+    if heal_job_id is not None:
+        async with session_scope() as session:
+            job = await session.get(HealJob, heal_job_id)
+            if job is None:
+                raise ToolError(f"No heal_job with id {heal_job_id}")
+            app = await _get_app_for_job(session, job)
+
+    if app is not None and app.language != "python":
+        app_dir = cwd / app.local_repo_path
+        return await git_utils.run_test_command(app.test_command, cwd=app_dir)
 
     return await git_utils.run_pytest(test_path, cwd=cwd)
 
@@ -185,30 +216,34 @@ async def run_tests(worktree: str | None = None, test_path: str | None = None) -
 async def propose_patch(heal_job_id: int, worktree: str, unified_diff: str) -> dict[str, Any]:
     """Validate and apply a unified diff to `worktree` only.
 
-    The write scope is derived from `heal_job_id`'s `type` in the database —
-    never from a caller-supplied parameter — so a runtime_error/
-    contract_violation job can only ever touch `apps/target_app/`, while a
-    ci_failure job may touch anything outside the universal forbidden paths
-    (.env, .git/, .github/workflows/, alembic/versions/). Every diff is also
-    checked against the patch-size limit and the anti-cheating rules
-    (mcp_server/patch_guard.py) before anything is applied — enforced here in
-    code so a prompt-injection payload in an error message can never talk the
-    calling agent into shipping an oversized or test-deleting "fix".
+    The write scope is derived from `heal_job_id`'s `type` (and, for
+    multi-app jobs, its app's `allowed_write_paths`) in the database — never
+    from a caller-supplied parameter — so a runtime_error/contract_violation
+    job can only ever touch its own app's registered paths (defaulting to
+    `apps/target_app/` for jobs with no app_id, i.e. pre-multi-app jobs),
+    while a ci_failure job may touch anything outside the universal
+    forbidden paths (.env, .git/, .github/workflows/, alembic/versions/).
+    Every diff is also checked against the patch-size limit and the
+    anti-cheating rules (mcp_server/patch_guard.py) before anything is
+    applied — enforced here in code so a prompt-injection payload in an
+    error message can never talk the calling agent into shipping an
+    oversized or test-deleting "fix".
     """
     async with session_scope() as session:
         job = await session.get(HealJob, heal_job_id)
         if job is None:
             raise ToolError(f"No heal_job with id {heal_job_id}")
         job_type = job.type
+        app = await _get_app_for_job(session, job)
 
-    allowed_prefix = (
-        RUNTIME_FIX_ALLOWED_PREFIX
-        if job_type in (HealJobType.RUNTIME_ERROR, HealJobType.CONTRACT_VIOLATION)
-        else None
-    )
+    allowed_prefixes: list[str] | None = None
+    if job_type in (HealJobType.RUNTIME_ERROR, HealJobType.CONTRACT_VIOLATION):
+        allowed_prefixes = (
+            app.allowed_write_paths if app is not None else [RUNTIME_FIX_ALLOWED_PREFIX]
+        )
 
     try:
-        touched_paths = check_diff_paths_writable(unified_diff, allowed_prefix=allowed_prefix)
+        touched_paths = check_diff_paths_writable(unified_diff, allowed_prefixes=allowed_prefixes)
         check_patch_limits(unified_diff, touched_paths)
         check_not_cheating(unified_diff)
         worktree_dir = resolve_worktree_dir(worktree)
