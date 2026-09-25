@@ -43,10 +43,11 @@ async def test_trigger_off_by_one_returns_200_with_wrong_content(
     assert ids == [1, 5, 4]  # correct answer would be [3, 1, 5]
 
 
-async def test_trigger_timezone_returns_200_with_wrong_date(
+async def test_trigger_timezone_returns_200_with_the_now_fixed_date(
     target_app_client: httpx.AsyncClient,
 ) -> None:
-    """Silent bug: a normal 200 response, just the wrong date."""
+    """This branch (PR #10) is the healer's own auto-fix for this bug — see
+    test_target_app_bugs.py::test_bug5_timezone_delivery_estimate_is_now_fixed."""
     response = await target_app_client.get("/trigger/timezone")
     assert response.status_code == 200
-    assert response.json()["estimated_delivery_date"] == "2026-01-04"  # correct: 2026-01-05
+    assert response.json()["estimated_delivery_date"] == "2026-01-05"
