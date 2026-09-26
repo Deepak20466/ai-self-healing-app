@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta, timezone
 
 import httpx
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.target_app import repository
@@ -61,9 +62,11 @@ async def top_items_by_rating(session: AsyncSession, n: int) -> list[dict[str, o
 
 
 async def item_label(session: AsyncSession, item_id: int) -> str:
-    """BUG #4 (AttributeError): doesn't handle a missing item."""
+    """Raises a 404 for an item id that isn't seeded, instead of raising AttributeError."""
     item = await repository.get_item(session, item_id)
-    return item.name.upper()  # type: ignore[union-attr]
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"item {item_id} not found")
+    return item.name.upper()
 
 
 #: The storefront's business timezone: delivery-date cutoffs are decided by
