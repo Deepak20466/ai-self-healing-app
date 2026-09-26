@@ -2,8 +2,9 @@
 
 A self-healing application with an MCP server: it detects runtime errors,
 silent wrong-output bugs and CI/CD failures, root-causes them with Claude
-through an MCP server, generates a fix plus a regression test, ships it
-through CI/CD, and verifies it — with a real-time AI chat UI and a metrics
+through an MCP server, generates a fix plus a regression test, and opens a
+pull request for review (the deploy/rollback pipeline is built and was
+exercised locally; it has not been run on a real cloud VM) — with a real-time AI chat UI and a metrics
 dashboard proving MTTR, success rate and cost per fix.
 
 All 8 build phases in `SPEC.md`'s BUILD ORDER are complete. See `CLAUDE.md`
@@ -429,6 +430,10 @@ an unsigned or tampered one returns 401.
 
 ## Cloud deploy in ~10 minutes
 
+> **Status: not run on a real cloud VM.** `provision_vm.sh`, the systemd units,
+> Caddyfile and `deploy.yml` are written, but only the local equivalent
+> (`scripts/local_deploy.py`, including a forced-failure rollback) was ever run.
+
 1. Spin up any Ubuntu 22.04/24.04 VM with 1-2GB RAM (AWS EC2, GCP e2-small,
    DigitalOcean, Oracle Cloud Always Free — all work; no Docker needed).
 2. Copy this repo to it and run the provisioning script once, as root:
@@ -541,6 +546,23 @@ for the real, previously-run end-to-end fix scenarios that did reach a real
 job; Phase 7's log records the real `deployments` rows — one `deployed`, one
 `rolled_back` — written by testing `local_deploy.py`'s rollback path for
 real, which is where `rollback_count` above comes from).
+
+## Roadmap (planned, not built)
+
+- **Any language via OpenTelemetry** — an OTLP ingest endpoint, stack-trace parsing
+  for JS/Java/Go/C#/PHP/Ruby, per-language anti-cheat checks, and example
+  Node/Go apps. **None of this exists.** What *is* built: Python (FastAPI),
+  Flask and Django middleware, and connecting external Python/JS/Go repos for
+  scanning (scan + "Fix" runtime path).
+- **Real cloud VM deploy** — run `provision_vm.sh` + `deploy.yml` against an
+  actual Ubuntu VM and verify the rollback there.
+- **Linux RAM measurement** — the 300 MB target is only measured on Windows
+  (~480 MB, over budget); not yet re-measured on Linux.
+- **CI-fix for connected external repos** — only the runtime-fix path exists.
+- **Live verification of the Codex and Gemini backends** — both are
+  **untested live** (built from public docs; mocked tests only).
+- **API-mode end-to-end PR** — `AI_BACKEND=api` has only been tested with a
+  mocked Anthropic client.
 
 ## What this project demonstrates
 

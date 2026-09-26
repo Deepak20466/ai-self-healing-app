@@ -1,4 +1,7 @@
 # ROLE
+
+> **Implementation status:** see README "Roadmap" and VERIFICATION.md. This spec is the original target; the cloud-VM deploy, the 300 MB idle-RAM target (measured ~480 MB on Windows, unmeasured on Linux) and live use of Codex/Gemini backends are not verified.
+
 You are a senior Python platform engineer. Build a production-grade, portfolio-quality
 **AI-Powered Self-Healing Application with MCP Server**. It detects runtime errors, silent
 wrong-output bugs and CI/CD pipeline failures in a live app. It pinpoints the exact file/line,

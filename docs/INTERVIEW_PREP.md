@@ -8,7 +8,8 @@ Everything here is grounded in what's actually built and tested in this repo
 "I built an AI-powered self-healing application. It's a demo app with some
 intentionally seeded bugs, plus a whole system around it that watches for
 errors, diagnoses them, writes a fix and a regression test, opens a pull
-request, and deploys it — with almost no human in the loop.
+request for a human to review — with almost no human in the loop. (A deploy/
+rollback pipeline is built and was run locally, not on a real cloud VM.)
 
 It's four separate processes talking over plain HTTP and Postgres, no
 Docker, no Redis, no Kubernetes — deliberately, to keep it cheap and simple
