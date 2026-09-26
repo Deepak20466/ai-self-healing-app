@@ -658,6 +658,6 @@ See `SPEC.md`'s "PROJECT STRUCTURE" section — the repo matches it exactly,
 plus `.github/workflows/`, `deploy/` (systemd units + Caddyfile), and `web/`
 (the React 18 + htm, no-build-step UI), all built in Phases 6-7.
 
-## Benchmark (clean run, 2026-09-26)
+## Benchmark
 
-**0/2 bugs fixed so far, and incomplete on purpose.** `zero`: the AI's fix was correct but rejected by a pinned demo test (fixed since). `key`: the fix passed the full suite, then `git push` timed out (fixed since); the verification rerun is blocked by the 24h circuit breaker. The other bugs are pending. This is one deliberate run, shown on the Metrics page separately from the all-time and AI-attempted success rates. Details and root causes: [docs/benchmark.md](docs/benchmark.md).
+**Clean benchmark: in progress. See [docs/benchmark.md](docs/benchmark.md).** The full write-up of the first run (0/2, with root causes: pinned demo tests and a `git push` timeout, both fixed since) is there. The all-time and AI-attempted success rates on the Metrics page are unaffected.
