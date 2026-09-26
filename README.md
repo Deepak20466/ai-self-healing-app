@@ -251,6 +251,14 @@ deliberately not re-run live; each cites the existing mocked test that
 covers it instead). Never invokes the Claude Code CLI, so it's safe to
 re-run anytime without spending AI usage.
 
+[**docs/benchmark.md**](docs/benchmark.md) — `scripts/benchmark.py`, a
+companion script that *does* spend real Claude Code CLI usage: it triggers
+one seeded bug at a time against the live system and records how long the
+real free-mode healer takes to resolve it (attempts, CLI turns, wall-clock
+time, and whether a circuit breaker or budget cap honestly blocked it — see
+that file for why the recorded run hit two different real guardrails
+instead of a fresh CLI attempt).
+
 ## Demo walkthrough
 
 With all 4 pods running and the demo dataset seeded (`scripts/seed_demo.py`,

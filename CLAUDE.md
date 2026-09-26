@@ -1924,3 +1924,56 @@ same `RuntimeError: Event loop is closed` / asyncpg-teardown-on-a-closed-
 ProactorEventLoop signature as the already-documented Windows flake above —
 a different test hitting the same known, environment-only issue, not a new
 regression).
+
+### 2026-09-26 — scripts/benchmark.py: a real, live benchmark run
+
+Built `scripts/benchmark.py`: triggers one seeded bug at a time against the
+live running system (starts the 4 pods if not already up, same pattern as
+`scripts/verify_all.py`), finds the resulting `heal_job` by looking up the
+`Error` row's `function_name` then joining on `fingerprint` (same lookup
+pattern `verify_all.py` uses), polls until a terminal `HealJobStatus` or a
+20-minute timeout, and records attempt_count, CLI invocation count + total
+turns (from `audit_log` rows with `action="cli_invocation"`, per Phase 5+'s
+"budget tracking via audit_log" design), whether a circuit breaker fired,
+wall-clock time, and PR url. Caps itself at 2 bugs per invocation. Never
+resets or bypasses a circuit breaker/budget cap — a real block is recorded
+as the outcome, not routed around. Writes `docs/benchmark.md` +
+`benchmark_results.json`, and only stops the pods it itself started.
+
+**Real run**: `timezone` + `zero`, chosen per the task's guidance (one bug
+with prior real evidence of a working fix — PR #10 — plus one different,
+independently-tractable bug already exercised by Phase 4's own e2e tests).
+Neither reached a fresh Claude CLI attempt — both were blocked by genuine,
+pre-existing guardrail state, confirmed by querying the DB directly after
+the run (not assumed):
+
+- **`timezone`**: no new `heal_job` was enqueued. Root cause: this
+  fingerprint's `heal_job` #325 is already sitting at `pr_opened` — that job
+  *is* PR #10, still open/unmerged three sessions later.
+  `sentinel/storage.py`'s dedup rule treats `pr_opened` as "in flight" and
+  correctly refused to open a duplicate PR for a bug that already has one.
+  Working as designed, not a bug in the benchmark or the healer — but it
+  means this benchmark did not exercise a fresh CLI run for this bug.
+- **`zero`**: `heal_job` #334 was created, then immediately marked `failed`
+  by `healer/circuit_breaker.py`'s per-fingerprint 24h attempt cap — this
+  fingerprint already had 14 prior heal_job rows (ids 317-333) from this
+  project's own earlier heavy `verify_all.py`/manual testing sessions
+  earlier the same day. `attempt_count=0`, 0 CLI calls, 0s wall-clock: the
+  breaker fires before any Claude CLI invocation. Recorded as-is, per the
+  task's explicit "don't bypass real limits" instruction.
+
+**Takeaway, and why this is still useful signal despite neither bug getting
+a fresh attempt**: both outcomes are exactly the guardrails working as
+designed — a dedup rule preventing a duplicate PR, and a circuit breaker
+preventing runaway retries against the same fingerprint — caught in the act
+by a real live run rather than only unit-tested in isolation. See
+`docs/benchmark.md` for the full root-cause writeup and a note on which
+bugs (`key`, `none_lookup`, `off_by_one`, `validation` — little/no recent
+`heal_jobs` history at the time of this run) would be better candidates for
+a follow-up run that actually reaches a fresh CLI attempt.
+
+`ruff check .`/`ruff format --check .` clean repo-wide. `mypy core sentinel
+mcp_server healer` (strict) clean (`scripts/` stays outside strict scope,
+same as every other script). `pytest` green modulo the two already-
+documented pre-existing flakes (Windows ProactorEventLoop teardown,
+`isolated_budget_date` rare collision).

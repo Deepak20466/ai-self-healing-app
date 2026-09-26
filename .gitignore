@@ -17,6 +17,7 @@ coverage.xml
 metrics.json
 ram_measurement.json
 verification_report.json
+benchmark_results.json
 worktrees/
 releases/
 local_deploy_root/
