@@ -10,6 +10,31 @@ All 8 build phases in `SPEC.md`'s BUILD ORDER are complete. See `CLAUDE.md`
 for the full phase-by-phase build log, every ambiguity resolved along the
 way, and conventions for resuming work.
 
+## Screenshots
+
+<img src="docs/images/login.png" alt="Self-Healing Console login page" width="500">
+
+The healer-pod login page (`http://localhost:8000/`), captured headless via
+Playwright against a real locally-running pod. The dashboard, AI chat, and
+metrics pages are gated behind this login and aren't shown here — this
+repo's `ADMIN_PASSWORD_HASH` is a one-way argon2 hash with no recorded
+plaintext, and capturing those pages would have meant setting a new
+password or otherwise weakening auth just for a screenshot, which this
+project's own guardrails (see CLAUDE.md) explicitly refuse to do.
+
+Real proof this system works end to end, from the AI itself, not staged
+screenshots:
+
+- [**PR #10**](https://github.com/Deepak20466/ai-self-healing-app/pull/10) —
+  a real runtime bug (a silent timezone contract violation) diagnosed and
+  fixed by the healer running in free mode (local Claude Code CLI, no
+  Anthropic API key), with a regression test proving it failed before and
+  passed after.
+- [**PR #14**](https://github.com/Deepak20466/ai-self-healing-app/pull/14) —
+  a real broken CI run, classified as a genuine failure (not flaky) and
+  fixed forward on the PR's own branch by the healer's CI-fix agent, with
+  CI going green automatically on the fix commit.
+
 ## Architecture
 
 Four native processes ("pods" — no Docker, no Kubernetes, per SPEC.md's hard

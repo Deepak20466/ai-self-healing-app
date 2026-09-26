@@ -1886,3 +1886,41 @@ unmodified `test_healer_agent_free.py::
 test_run_heal_job_free_fixes_zero_division_error_end_to_end` (same
 `AttributeError`/`RuntimeError` signature, same "isolated run reproduces it
 every time, full-suite run mostly doesn't" pattern).
+
+### Post-Phase-8 — real README screenshots: DONE
+
+Started all 4 pods for real locally (`uvicorn apps.target_app.main:app
+--port 8001`, `uvicorn sentinel.app:app --port 8002`, `python -m
+mcp_server.http_main`, `uvicorn healer.app:asgi_app --port 8000`), confirmed
+each healthy (`/healthz` 200 for app/sentinel/healer, `/mcp` reachable-but-
+400 for mcp-pod per the Phase 7 "no `/healthz`" note above), then used
+headless Playwright (`playwright`, installed into `.venv` + `chromium`) to
+capture `docs/images/login.png` — the real healer-pod login page rendered
+by a real running process, not a mock.
+
+**Dashboard/chat/metrics/app-health screenshots were skipped, deliberately,
+not just left undone.** `ADMIN_PASSWORD_HASH` is a one-way argon2 hash (see
+`scripts/hash_password.py`) with no recorded plaintext anywhere in this
+repo or `.env`'s comments — there is no way to log in and capture the
+gated pages without either (a) guessing a password, which would just fail
+against argon2, or (b) writing a new hash into `.env` to set a known
+password for the screenshot, which changes the real admin credential this
+environment (including the earlier "public demo via Cloudflare Tunnel"
+session) may still rely on. Both are exactly the kind of auth-weakening
+CLAUDE.md's "Environment on this machine" section already refuses for the
+unrelated Postgres-auth case, so the same principle was applied here:
+skipped rather than routed around. README.md's new Screenshots section
+explains this in one sentence next to the image, and links PR #10 and
+PR #14 as the real proof of AI-driven fixes instead of staged UI captures
+of pages that need a password nobody currently has in plaintext.
+
+All 4 pods were stopped cleanly afterward (no `honcho`/uvicorn/`python -m`
+processes left running). No application code was touched — `ruff check`/
+`ruff format --check`/`mypy core sentinel mcp_server healer` (strict) all
+clean, `pytest` 357/358 (the one failure was
+`test_healer_agent_codex.py::
+test_run_heal_job_codex_fixes_zero_division_error_end_to_end`, with the
+same `RuntimeError: Event loop is closed` / asyncpg-teardown-on-a-closed-
+ProactorEventLoop signature as the already-documented Windows flake above —
+a different test hitting the same known, environment-only issue, not a new
+regression).
