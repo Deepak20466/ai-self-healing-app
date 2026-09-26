@@ -37,3 +37,24 @@ apps:
     lint_command: ruff check apps/target_app
     health_url: http://127.0.0.1:8001/healthz
     ingest_token: target-app-a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6
+
+  # --- Any-language examples: errors arrive over OpenTelemetry (OTLP/HTTP) ---
+  - name: node_app
+    language: javascript
+    local_repo_path: examples/node_app
+    github_repo: Deepak20466/ai-self-healing-app
+    allowed_write_paths:
+      - examples/node_app/
+    test_command: cd examples/node_app && npm test
+    health_url: http://127.0.0.1:8101/healthz
+    ingest_token: node-app-0a1b2c3d4e5f60718293a4b5c6d7e8f9
+
+  - name: go_app
+    language: go
+    local_repo_path: examples/go_app
+    github_repo: Deepak20466/ai-self-healing-app
+    allowed_write_paths:
+      - examples/go_app/
+    test_command: cd examples/go_app && go test ./...
+    health_url: http://127.0.0.1:8102/healthz
+    ingest_token: go-app-9f8e7d6c5b4a39281706f5e4d3c2b1a0

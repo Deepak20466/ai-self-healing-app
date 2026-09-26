@@ -1,0 +1,18 @@
+{
+  "name": "selfheal-example-node-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minimal Express app with one seeded bug, instrumented with OpenTelemetry.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node -r ./src/telemetry.js src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.57.0",
+    "@opentelemetry/sdk-node": "^0.57.0",
+    "@opentelemetry/sdk-trace-base": "^1.30.0",
+    "express": "^4.21.0"
+  }
+}
