@@ -5,7 +5,7 @@ in-page overlay), so ffmpeg only has to speed up the AI's waiting segment,
 encode small, and cut a short GIF highlight of the Go / OpenTelemetry scene.
 ffmpeg comes from `imageio-ffmpeg` when it isn't on PATH.
 
-Usage: python scripts/build_demo.py <main_dir> <gh_dir> <ui_dir>
+Usage: python scripts/build_demo.py <main_dir> <gh_dir> <ui_dir> [patch_dir]
 (each dir holds a take's .webm and markers.json; see record_demo.py)
 """
 
@@ -35,7 +35,7 @@ def run(*args: str) -> None:
     subprocess.run([ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error", *args], check=True)
 
 
-def main(main_dir: Path, gh_dir: Path, ui_dir: Path) -> None:
+def main(main_dir: Path, gh_dir: Path, ui_dir: Path, patch_dir: Path | None = None) -> None:
     """Join three takes: title..heal (waiting part sped up), GitHub pages, console scenes."""
     markers = json.loads((main_dir / "markers.json").read_text())
     ui_markers = json.loads((ui_dir / "markers.json").read_text())
@@ -51,8 +51,25 @@ def main(main_dir: Path, gh_dir: Path, ui_dir: Path) -> None:
         "[1:v]setpts=PTS-STARTPTS[c];[2:v]setpts=PTS-STARTPTS[d];"
         "[a][b][c][d]concat=n=4:v=1:a=0,fps=25,format=yuv420p[v]"
     )
+    inputs = ["-i", str(take_main), "-i", str(take_gh), "-i", str(take_ui)]
+    if patch_dir is not None:
+        # Replace the ui take's metrics scene (s7..end) with the re-recorded
+        # dashboard + metrics take; keep its end card.
+        take_patch = next(patch_dir.glob("*.webm"))
+        p_markers = json.loads((patch_dir / "markers.json").read_text())
+        s7, end = ui_markers["s7"], ui_markers["end"]
+        graph = (
+            f"[0:v]trim=0:{hs},setpts=PTS-STARTPTS[a];"
+            f"[0:v]trim={hs}:{he},setpts=(PTS-STARTPTS)/{factor:.3f}[b];"
+            "[1:v]setpts=PTS-STARTPTS[c];"
+            f"[2:v]trim=0:{s7},setpts=PTS-STARTPTS[d];"
+            f"[3:v]trim={p_markers['dash']},setpts=PTS-STARTPTS[e];"
+            f"[2:v]trim={end},setpts=PTS-STARTPTS[f];"
+            "[a][b][c][d][e][f]concat=n=6:v=1:a=0,fps=25,format=yuv420p[v]"
+        )
+        inputs += ["-i", str(take_patch)]
     run(
-        "-i", str(take_main), "-i", str(take_gh), "-i", str(take_ui),
+        *inputs,
         "-filter_complex", graph, "-map", "[v]",
         "-c:v", "libx264", "-crf", "30", "-preset", "slow", "-movflags", "+faststart", "-an",
         str(out),
@@ -77,4 +94,4 @@ def main(main_dir: Path, gh_dir: Path, ui_dir: Path) -> None:
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]))
+    main(*(Path(a) for a in sys.argv[1:5]))

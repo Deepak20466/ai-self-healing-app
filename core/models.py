@@ -344,6 +344,7 @@ class HealJob(TimestampMixin, Base):
         BigInteger, ForeignKey("pipeline_runs.id", ondelete="SET NULL"), nullable=True
     )
     branch_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    pr_opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     app_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("monitored_apps.id", ondelete="SET NULL"), nullable=True

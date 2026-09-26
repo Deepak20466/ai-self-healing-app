@@ -25,21 +25,19 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core import metrics
-from core.metrics import _TERMINAL_STATUSES
+from core.metrics import _OUTCOME_STATUSES, NO_PROD_DEPLOY_LABEL, SUCCESS_STATUSES
 from core.models import Deployment, FixAttempt, HealJob, HealJobStatus, HealJobType
 
 
 async def _terminal_and_verified_counts(db_session: AsyncSession) -> tuple[int, int]:
     total = (
         await db_session.execute(
-            select(func.count()).select_from(HealJob).where(HealJob.status.in_(_TERMINAL_STATUSES))
+            select(func.count()).select_from(HealJob).where(HealJob.status.in_(_OUTCOME_STATUSES))
         )
     ).scalar_one()
     verified = (
         await db_session.execute(
-            select(func.count())
-            .select_from(HealJob)
-            .where(HealJob.status.in_(_TERMINAL_STATUSES), HealJob.status == HealJobStatus.VERIFIED)
+            select(func.count()).select_from(HealJob).where(HealJob.status.in_(SUCCESS_STATUSES))
         )
     ).scalar_one()
     return total, verified
@@ -52,7 +50,7 @@ async def _terminal_and_verified_counts_for_type(
         await db_session.execute(
             select(func.count())
             .select_from(HealJob)
-            .where(HealJob.status.in_(_TERMINAL_STATUSES), HealJob.type == job_type)
+            .where(HealJob.status.in_(_OUTCOME_STATUSES), HealJob.type == job_type)
         )
     ).scalar_one()
     verified = (
@@ -60,9 +58,9 @@ async def _terminal_and_verified_counts_for_type(
             select(func.count())
             .select_from(HealJob)
             .where(
-                HealJob.status.in_(_TERMINAL_STATUSES),
+                HealJob.status.in_(_OUTCOME_STATUSES),
                 HealJob.type == job_type,
-                HealJob.status == HealJobStatus.VERIFIED,
+                HealJob.status.in_(SUCCESS_STATUSES),
             )
         )
     ).scalar_one()
@@ -82,6 +80,7 @@ async def _make_job(
     job_type: HealJobType = HealJobType.RUNTIME_ERROR,
     started_minutes_ago: int = 20,
     finished_minutes_ago: int = 5,
+    pr_opened_minutes_ago: int | None = None,
 ) -> HealJob:
     now = datetime.now(UTC)
     finished_at = (
@@ -98,38 +97,84 @@ async def _make_job(
         created_at=now - timedelta(minutes=started_minutes_ago),
         started_at=now - timedelta(minutes=started_minutes_ago),
         finished_at=finished_at,
+        pr_opened_at=(
+            None
+            if pr_opened_minutes_ago is None
+            else now - timedelta(minutes=pr_opened_minutes_ago)
+        ),
     )
     db_session.add(job)
     await db_session.flush()
     return job
 
 
-async def test_mttr_averages_only_verified_jobs(db_session: AsyncSession) -> None:
+async def _pr_durations_minutes(db_session: AsyncSession) -> list[float]:
+    since = datetime.now(UTC) - timedelta(days=30)
+    rows = (
+        await db_session.execute(
+            select(HealJob.created_at, HealJob.pr_opened_at).where(
+                HealJob.pr_opened_at.is_not(None), HealJob.created_at >= since
+            )
+        )
+    ).all()
+    return [(pr - created).total_seconds() / 60 for created, pr in rows]
+
+
+async def test_mttr_is_detection_to_pr_opened(db_session: AsyncSession) -> None:
+    before = await _pr_durations_minutes(db_session)
     await _make_job(
-        db_session,
-        status=HealJobStatus.VERIFIED,
-        started_minutes_ago=20,
-        finished_minutes_ago=10,
-    )  # 10 minutes
+        db_session, status=HealJobStatus.PR_OPENED, started_minutes_ago=20, pr_opened_minutes_ago=10
+    )  # 10 minutes to a PR
     await _make_job(
         db_session, status=HealJobStatus.FAILED, started_minutes_ago=20, finished_minutes_ago=0
-    )  # should be excluded
+    )  # no PR: excluded
+    after = [*before, 10.0]
 
     mttr = await metrics.compute_mttr_minutes(db_session)
-    assert mttr == 10.0
+    assert mttr == round(sum(after) / len(after), 2)
 
 
-async def test_mttr_is_none_with_no_verified_jobs(db_session: AsyncSession) -> None:
+async def test_mttr_ignores_jobs_without_a_pr(db_session: AsyncSession) -> None:
+    before = await metrics.compute_mttr_minutes(db_session)
     await _make_job(db_session, status=HealJobStatus.FAILED)
-    mttr = await metrics.compute_mttr_minutes(db_session)
-    assert mttr is None
+    assert await metrics.compute_mttr_minutes(db_session) == before
+
+
+async def test_pr_opened_counts_as_success_and_verified_is_separate(
+    db_session: AsyncSession,
+) -> None:
+    baseline_total, baseline_ok = await _terminal_and_verified_counts(db_session)
+    for status in (HealJobStatus.PR_OPENED, HealJobStatus.MERGED, HealJobStatus.DEPLOYED):
+        await _make_job(db_session, status=status)
+    await _make_job(db_session, status=HealJobStatus.FAILED)
+    rate = await metrics.compute_fix_success_rate(db_session)
+    assert rate == round((baseline_ok + 3) / (baseline_total + 4), 4)
+
+    summary = await metrics.get_metrics_summary(db_session, daily_budget_usd=2.0)
+    verified_exists = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(HealJob)
+            .where(HealJob.status == HealJobStatus.VERIFIED)
+        )
+    ).scalar_one()
+    if verified_exists == 0:
+        assert summary.verified_in_production_rate is None
+        assert summary.verified_in_production_label == NO_PROD_DEPLOY_LABEL
+
+
+async def test_verified_in_production_rate_needs_a_verified_job(db_session: AsyncSession) -> None:
+    await _make_job(db_session, status=HealJobStatus.VERIFIED)
+    await _make_job(db_session, status=HealJobStatus.PR_OPENED)
+    rate = await metrics.compute_verified_in_production_rate(db_session)
+    assert rate is not None and 0 < rate < 1
 
 
 async def test_fix_success_rate_counts_verified_over_terminal(db_session: AsyncSession) -> None:
     baseline_total, baseline_verified = await _terminal_and_verified_counts(db_session)
 
-    await _make_job(db_session, status=HealJobStatus.VERIFIED)
-    await _make_job(db_session, status=HealJobStatus.VERIFIED)
+    await _make_job(db_session, status=HealJobStatus.PR_OPENED)
+    await _make_job(db_session, status=HealJobStatus.MERGED)
     await _make_job(db_session, status=HealJobStatus.FAILED)
     await _make_job(db_session, status=HealJobStatus.QUEUED)  # not terminal, excluded
 
@@ -154,9 +199,9 @@ async def test_ci_auto_fix_rate_only_counts_ci_failure_jobs(db_session: AsyncSes
         db_session, HealJobType.CI_FAILURE
     )
 
-    await _make_job(db_session, status=HealJobStatus.VERIFIED, job_type=HealJobType.CI_FAILURE)
+    await _make_job(db_session, status=HealJobStatus.PR_OPENED, job_type=HealJobType.CI_FAILURE)
     await _make_job(db_session, status=HealJobStatus.FAILED, job_type=HealJobType.CI_FAILURE)
-    await _make_job(db_session, status=HealJobStatus.VERIFIED, job_type=HealJobType.RUNTIME_ERROR)
+    await _make_job(db_session, status=HealJobStatus.PR_OPENED, job_type=HealJobType.RUNTIME_ERROR)
 
     rate = await metrics.compute_ci_auto_fix_rate(db_session)
     assert rate == round((baseline_verified + 1) / (baseline_total + 2), 4)
@@ -171,39 +216,43 @@ async def test_rollback_count(db_session: AsyncSession) -> None:
     assert count == 1
 
 
+async def _successful_jobs_and_cost(db_session: AsyncSession) -> tuple[int, Decimal]:
+    n = (
+        await db_session.execute(
+            select(func.count()).select_from(HealJob).where(HealJob.status.in_(SUCCESS_STATUSES))
+        )
+    ).scalar_one()
+    cost = (
+        await db_session.execute(
+            select(func.coalesce(func.sum(FixAttempt.cost_usd), Decimal("0")))
+            .join(HealJob, FixAttempt.heal_job_id == HealJob.id)
+            .where(HealJob.status.in_(SUCCESS_STATUSES))
+        )
+    ).scalar_one()
+    return n, cost
+
+
 async def test_cost_per_fix_averages_only_successful_jobs(db_session: AsyncSession) -> None:
     baseline_total_cost = await _total_fix_attempt_cost(db_session)
+    n, cost = await _successful_jobs_and_cost(db_session)
 
-    verified_job = await _make_job(db_session, status=HealJobStatus.VERIFIED)
+    ok_job = await _make_job(db_session, status=HealJobStatus.PR_OPENED)
     failed_job = await _make_job(db_session, status=HealJobStatus.FAILED)
-
-    db_session.add(
-        FixAttempt(heal_job_id=verified_job.id, attempt_number=1, cost_usd=Decimal("0.50"))
-    )
+    db_session.add(FixAttempt(heal_job_id=ok_job.id, attempt_number=1, cost_usd=Decimal("0.50")))
     db_session.add(
         FixAttempt(heal_job_id=failed_job.id, attempt_number=1, cost_usd=Decimal("0.30"))
     )
     await db_session.flush()
 
-    # cost_per_fix is scoped to VERIFIED jobs, which nothing outside this test
-    # produces (see module docstring), so it needs no baseline.
     cost_per_fix, total_cost = await metrics.compute_cost_per_fix_usd(db_session)
-    assert cost_per_fix == 0.50
+    assert cost_per_fix == round(float(cost + Decimal("0.50")) / (n + 1), 4)
     assert total_cost == round(float(baseline_total_cost) + 0.80, 4)
-
-
-async def test_cost_per_fix_is_none_with_no_successful_jobs(db_session: AsyncSession) -> None:
-    baseline_total_cost = await _total_fix_attempt_cost(db_session)
-
-    cost_per_fix, total_cost = await metrics.compute_cost_per_fix_usd(db_session)
-    assert cost_per_fix is None
-    assert total_cost == round(float(baseline_total_cost), 4)
 
 
 async def test_get_metrics_summary_is_internally_consistent(db_session: AsyncSession) -> None:
     baseline_total, baseline_verified = await _terminal_and_verified_counts(db_session)
 
-    await _make_job(db_session, status=HealJobStatus.VERIFIED)
+    await _make_job(db_session, status=HealJobStatus.PR_OPENED)
     summary = await metrics.get_metrics_summary(db_session, daily_budget_usd=2.0)
 
     assert summary.daily_budget_usd == 2.0

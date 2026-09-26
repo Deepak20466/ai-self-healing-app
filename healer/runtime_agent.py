@@ -265,6 +265,7 @@ async def run_heal_job(
                     job = await session.get(HealJob, job_id)
                     assert job is not None
                     job.status = HealJobStatus.PR_OPENED
+                    job.pr_opened_at = datetime.now(UTC)
                     job.branch_name = branch
                     job.pr_number = pr["number"]
                     await _audit(

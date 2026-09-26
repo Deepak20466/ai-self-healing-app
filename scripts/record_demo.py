@@ -10,7 +10,7 @@ the captioned, sped-up docs/demo.mp4.
 The admin password is read from VERIFY_ADMIN_PASSWORD only and is never
 written to a file (the recording shows only the masked password field).
 
-Usage: python scripts/record_demo.py <out_dir> all|gh|ui [pr_number]
+Usage: python scripts/record_demo.py <out_dir> all|gh|ui|patch [pr_number]
 
 The GitHub scenes (gh) and the console scenes (ui) can be recorded as separate
 takes: a long headless Chromium session sometimes crashes its renderer on
@@ -121,7 +121,7 @@ async def heal_state(fn: str) -> tuple[int | None, str | None, int | None]:
 
 async def main(out_dir: Path, bug: str, part: str, pr: int = 0) -> int:
     password = os.environ.get("VERIFY_ADMIN_PASSWORD", "")
-    if part in ("all", "ui") and not password:
+    if part in ("all", "ui", "patch") and not password:
         raise SystemExit("VERIFY_ADMIN_PASSWORD is not set")
     fn, location = TRIGGERS[bug]
     status = None
@@ -240,6 +240,28 @@ async def main(out_dir: Path, bug: str, part: str, pr: int = 0) -> int:
                 await comments.nth(1).scroll_into_view_if_needed()
             await r.cap("The AI's comment: root cause, what it pushed, and the test evidence")
             await r.wait(6)
+
+        if part == "patch":
+            # re-take of the dashboard + metrics scenes after the metrics/timeline fix
+            await r.goto(UI, "Back in the console")
+            await page.fill("#password", password)
+            await page.click("button[type=submit]")
+            await page.get_by_role("link", name="Dashboard", exact=True).wait_for(timeout=20000)
+            await page.wait_for_timeout(2500)
+            r.mark("dash")
+            await r.cap(
+                "Each heal job now shows live progress: detected, analyzing, patch, tests, PR opened"
+            )
+            await r.wait(7)
+            r.mark("s7")
+            await r.open_tab(
+                "Metrics",
+                "Metrics: fix success rate (PR opened with passing tests), detection-to-PR time, cost per fix",
+            )
+            await r.wait(6)
+            await page.mouse.wheel(0, 500)
+            await r.wait(3)
+            r.mark("done")
 
         if part == "ui":
             # --- login only (ui part)

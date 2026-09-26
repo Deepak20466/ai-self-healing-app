@@ -44,6 +44,7 @@ from healer.auth import (
 )
 from healer.chat_agent import as_tool_list, handle_chat_message
 from healer.findings_actions import maybe_auto_fix_high_severity, request_fix_for_finding
+from healer.job_progress import recent_job_progress, run_progress_broadcaster
 from healer.mcp_client import MCPToolClient, ReconnectingMCPToolClient, connect_http
 from healer.onboarding import open_onboarding_pull_request
 from healer.worker import run_worker
@@ -86,10 +87,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.warning("healer_app.mcp_initial_connect_failed", mcp_url=mcp_url)
     _mcp_client = mcp
     worker_task = asyncio.create_task(run_worker())
+    progress_task = asyncio.create_task(run_progress_broadcaster(_socket_broadcast))
     logger.info("healer_pod_started", mcp_url=mcp_url)
     try:
         yield
     finally:
+        progress_task.cancel()
         if worker_task is not None:
             worker_task.cancel()
             try:
@@ -177,6 +180,11 @@ async def api_errors(
 ) -> list[dict[str, Any]]:
     result = await mcp.call_tool("list_open_errors", {"limit": 50})
     return as_tool_list(result)
+
+
+@app.get("/api/jobs")
+async def api_jobs(username: str = Depends(require_auth)) -> list[dict[str, Any]]:
+    return await recent_job_progress()
 
 
 @app.get("/api/metrics")

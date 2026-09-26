@@ -78,6 +78,10 @@ function Login({ onLoggedIn }) {
   `;
 }
 
+function pct(x) {
+  return x == null ? "—" : `${Math.round(x * 100)}%`;
+}
+
 function Stat({ label, value }) {
   return html`<div class="stat"><div class="value">${value}</div><div class="label">${label}</div></div>`;
 }
@@ -104,8 +108,9 @@ function Metrics() {
     <div class="card">
       <h2>Metrics</h2>
       <div class="grid">
-        <${Stat} label="MTTR (min)" value=${data.mttr_minutes ?? "—"} />
-        <${Stat} label="Fix success rate" value=${data.fix_success_rate ?? "—"} />
+        <${Stat} label="MTTR: detection → fix PR (min)" value=${data.mttr_minutes ?? "—"} />
+        <${Stat} label="Fix success rate (PR opened with passing tests)" value=${pct(data.fix_success_rate)} />
+        <${Stat} label="Verified in production" value=${data.verified_in_production_label ?? "n/a (no production deploy)"} />
         <${Stat} label="CI auto-fix rate" value=${data.ci_auto_fix_rate ?? "—"} />
         <${Stat} label="Contract catches" value=${data.contract_violation_catches ?? 0} />
         <${Stat} label="Rollbacks" value=${data.rollback_count ?? 0} />
@@ -224,9 +229,52 @@ function HealthPanel() {
   `;
 }
 
-function Dashboard() {
+function JobTimeline({ socket }) {
+  const [jobs, setJobs] = useState(null);
+
+  useEffect(() => {
+    api("/api/jobs").then(setJobs).catch(() => setJobs([]));
+  }, []);
+
+  useEffect(() => {
+    if (!socket) return;
+    const onProgress = (job) =>
+      setJobs((prev) => {
+        const rest = (prev || []).filter((j) => j.job_id !== job.job_id);
+        return [job, ...rest].sort((a, b) => b.job_id - a.job_id).slice(0, 8);
+      });
+    socket.on("job_progress", onProgress);
+    return () => socket.off("job_progress", onProgress);
+  }, [socket]);
+
+  if (!jobs) return html`<div class="loading-state">Loading jobs…</div>`;
+  if (jobs.length === 0) return html`<div class="empty-state">No heal jobs yet.</div>`;
+  return html`
+    <div class="job-list">
+      ${jobs.map((j) => html`
+        <div class="job-row" key=${j.job_id}>
+          <div class="job-title">
+            Job #${j.job_id} <span class="badge">${j.type}</span>
+            <span class="badge">${j.status}</span>
+            ${j.pr_number ? html`<span class="badge">PR #${j.pr_number}</span>` : null}
+          </div>
+          <ol class="timeline">
+            ${j.stages.map((label, i) => html`
+              <li key=${label} class=${i <= j.reached ? (j.failed && i === j.reached ? "stage failed" : "stage done") : "stage"}>
+                <span class="dot"></span>${label}
+              </li>
+            `)}
+          </ol>
+        </div>
+      `)}
+    </div>
+  `;
+}
+
+function Dashboard({ socket }) {
   return html`
     <div>
+      <div class="card"><h2>Heal jobs</h2><${JobTimeline} socket=${socket} /></div>
       <div class="card"><h2>Deployment health</h2><${HealthPanel} /></div>
       <div class="card"><h2>Open errors</h2><${ErrorsPanel} /></div>
       <div class="card"><h2>Pipeline runs</h2><${PipelinePanel} /></div>
@@ -638,7 +686,7 @@ function App() {
         onLogout=${logout}
       />
       <main>
-        ${page === "dashboard" && html`<${Dashboard} />`}
+        ${page === "dashboard" && html`<${Dashboard} socket=${socket} />`}
         ${page === "apps" && selectedAppId == null && html`
           <${AppsList} socket=${socket} onOpenApp=${(id) => setSelectedAppId(id)} />
         `}

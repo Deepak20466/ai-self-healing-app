@@ -81,6 +81,12 @@ async def test_unauthenticated_metrics_returns_401(app_client: httpx.AsyncClient
     assert resp.status_code == 401
 
 
+async def test_unauthenticated_jobs_returns_401(app_client: httpx.AsyncClient) -> None:
+    async with app_client as client:
+        resp = await client.get("/api/jobs")
+    assert resp.status_code == 401
+
+
 async def test_unauthenticated_errors_returns_401(app_client: httpx.AsyncClient) -> None:
     async with app_client as client:
         resp = await client.get("/api/errors")

@@ -25,11 +25,21 @@ from core.models import (
     HealJobType,
 )
 
-_TERMINAL_STATUSES = (
+# A job "succeeded" once its fix PR is open: the healer only opens a PR after
+# proving the regression test fails before the fix and passes after, so
+# `pr_opened` already implies passing tests. There is no production deploy
+# step in this setup, so requiring `verified` (the old definition) made every
+# metric read empty despite real fixes.
+SUCCESS_STATUSES = (
+    HealJobStatus.PR_OPENED,
+    HealJobStatus.MERGED,
+    HealJobStatus.DEPLOYED,
     HealJobStatus.VERIFIED,
-    HealJobStatus.FAILED,
-    HealJobStatus.ROLLED_BACK,
 )
+# Jobs with a final outcome. In-flight (queued/running/ci_fixing/paused) jobs
+# are excluded so they neither help nor hurt the rate.
+_OUTCOME_STATUSES = (*SUCCESS_STATUSES, HealJobStatus.FAILED, HealJobStatus.ROLLED_BACK)
+NO_PROD_DEPLOY_LABEL = "n/a (no production deploy)"
 
 
 class ErrorsByTypePoint(BaseModel):
@@ -41,6 +51,9 @@ class ErrorsByTypePoint(BaseModel):
 class MetricsSummary(BaseModel):
     mttr_minutes: float | None
     fix_success_rate: float | None
+    #: stricter metric: verified healthy in production (needs a real deploy)
+    verified_in_production_rate: float | None
+    verified_in_production_label: str
     ci_auto_fix_rate: float | None
     contract_violation_catches: int
     rollback_count: int
@@ -54,37 +67,62 @@ class MetricsSummary(BaseModel):
 
 
 async def compute_mttr_minutes(session: AsyncSession, *, window_days: int = 30) -> float | None:
-    """Mean minutes from detection (`created_at`) to verified-healthy (`finished_at`)."""
+    """Mean minutes from detection (`created_at`) to the fix PR being opened (`pr_opened_at`)."""
     since = datetime.now(UTC) - timedelta(days=window_days)
-    stmt = select(func.avg(func.extract("epoch", HealJob.finished_at - HealJob.created_at))).where(
-        HealJob.status == HealJobStatus.VERIFIED,
-        HealJob.finished_at.is_not(None),
+    stmt = select(func.avg(func.extract("epoch", HealJob.pr_opened_at - HealJob.created_at))).where(
+        HealJob.pr_opened_at.is_not(None),
         HealJob.created_at >= since,
     )
     seconds = (await session.execute(stmt)).scalar_one_or_none()
     return None if seconds is None else round(float(seconds) / 60, 2)
 
 
+async def _rate(
+    session: AsyncSession,
+    success: tuple[HealJobStatus, ...],
+    job_types: tuple[HealJobType, ...] | None,
+) -> float | None:
+    base_filter = [HealJob.status.in_(_OUTCOME_STATUSES)]
+    if job_types:
+        base_filter.append(HealJob.type.in_(job_types))
+    total = (
+        await session.execute(select(func.count()).select_from(HealJob).where(*base_filter))
+    ).scalar_one()
+    if total == 0:
+        return None
+    ok = (
+        await session.execute(
+            select(func.count())
+            .select_from(HealJob)
+            .where(*base_filter, HealJob.status.in_(success))
+        )
+    ).scalar_one()
+    return round(ok / total, 4)
+
+
 async def compute_fix_success_rate(
     session: AsyncSession, *, job_types: tuple[HealJobType, ...] | None = None
 ) -> float | None:
-    """`verified` jobs / all jobs that reached a terminal state, among `job_types`."""
-    base_filter = [HealJob.status.in_(_TERMINAL_STATUSES)]
-    if job_types:
-        base_filter.append(HealJob.type.in_(job_types))
+    """Jobs whose PR was opened with passing tests / jobs with a final outcome."""
+    return await _rate(session, SUCCESS_STATUSES, job_types)
 
-    total_stmt = select(func.count()).select_from(HealJob).where(*base_filter)
-    total = (await session.execute(total_stmt)).scalar_one()
-    if total == 0:
+
+async def compute_verified_in_production_rate(session: AsyncSession) -> float | None:
+    """The strict version: only `verified` (healthy after a real deploy) counts.
+
+    None unless at least one job was verified, since without a production
+    deploy step the honest answer is "not applicable", not 0%.
+    """
+    verified = (
+        await session.execute(
+            select(func.count())
+            .select_from(HealJob)
+            .where(HealJob.status == HealJobStatus.VERIFIED)
+        )
+    ).scalar_one()
+    if verified == 0:
         return None
-
-    verified_stmt = (
-        select(func.count())
-        .select_from(HealJob)
-        .where(*base_filter, HealJob.status == HealJobStatus.VERIFIED)
-    )
-    verified = (await session.execute(verified_stmt)).scalar_one()
-    return round(verified / total, 4)
+    return await _rate(session, (HealJobStatus.VERIFIED,), None)
 
 
 async def compute_ci_auto_fix_rate(session: AsyncSession) -> float | None:
@@ -107,7 +145,7 @@ async def compute_cost_per_fix_usd(session: AsyncSession) -> tuple[float | None,
     total_cost = (await session.execute(total_stmt)).scalar_one()
 
     successful_jobs_stmt = (
-        select(func.count()).select_from(HealJob).where(HealJob.status == HealJobStatus.VERIFIED)
+        select(func.count()).select_from(HealJob).where(HealJob.status.in_(SUCCESS_STATUSES))
     )
     successful_jobs = (await session.execute(successful_jobs_stmt)).scalar_one()
 
@@ -118,7 +156,7 @@ async def compute_cost_per_fix_usd(session: AsyncSession) -> tuple[float | None,
         select(func.coalesce(func.sum(FixAttempt.cost_usd), Decimal("0")))
         .select_from(FixAttempt)
         .join(HealJob, FixAttempt.heal_job_id == HealJob.id)
-        .where(HealJob.status == HealJobStatus.VERIFIED)
+        .where(HealJob.status.in_(SUCCESS_STATUSES))
     )
     cost_of_successful = (await session.execute(cost_of_successful_stmt)).scalar_one()
 
@@ -166,6 +204,7 @@ async def get_metrics_summary(session: AsyncSession, *, daily_budget_usd: float)
     mttr = await compute_mttr_minutes(session)
     success_rate = await compute_fix_success_rate(session)
     ci_rate = await compute_ci_auto_fix_rate(session)
+    verified_rate = await compute_verified_in_production_rate(session)
     violations = await compute_contract_violation_catches(session)
     rollbacks = await compute_rollback_count(session)
     cost_per_fix, total_cost = await compute_cost_per_fix_usd(session)
@@ -177,6 +216,10 @@ async def get_metrics_summary(session: AsyncSession, *, daily_budget_usd: float)
         mttr_minutes=mttr,
         fix_success_rate=success_rate,
         ci_auto_fix_rate=ci_rate,
+        verified_in_production_rate=verified_rate,
+        verified_in_production_label=(
+            NO_PROD_DEPLOY_LABEL if verified_rate is None else f"{verified_rate:.0%}"
+        ),
         contract_violation_catches=violations,
         rollback_count=rollbacks,
         cost_per_fix_usd=cost_per_fix,
