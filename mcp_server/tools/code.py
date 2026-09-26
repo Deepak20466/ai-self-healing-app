@@ -210,6 +210,14 @@ async def run_tests(
         return await git_utils.run_test_command(app.test_command, cwd=app_dir)
 
     if test_path is None:
+        if app is not None and app.test_command:
+            # The pre-PR gate: the app's own configured suite, not every test
+            # in the repo (which includes unrelated, environment-dependent ones).
+            return await git_utils.run_test_command(
+                git_utils.pytest_command(app.test_command),
+                cwd=cwd,
+                timeout=git_utils.FULL_SUITE_TIMEOUT_SECONDS,
+            )
         return await git_utils.run_pytest(
             None, cwd=cwd, timeout=git_utils.FULL_SUITE_TIMEOUT_SECONDS
         )

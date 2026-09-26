@@ -297,3 +297,31 @@ async def test_run_tests_uses_the_apps_own_test_command_for_non_python_apps(
 
     assert result["passed"] is True
     assert "ok" in result["output"]
+
+
+@pytest.mark.parametrize(("exit_code", "expected"), [(0, True), (3, False)])
+async def test_run_tests_full_suite_runs_a_python_apps_configured_command(
+    git_worktree: tuple[str, Path], exit_code: int, expected: bool
+) -> None:
+    """The pre-PR gate (no test_path) runs the app's test_command, not all of pytest."""
+    name, _ = git_worktree
+    app_id = await _make_monitored_app(
+        allowed_write_paths=["apps/x/"],
+        test_command=f"python -c \"print('configured suite'); raise SystemExit({exit_code})\"",
+        language="python",
+    )
+    job_id = await _make_heal_job(HealJobType.RUNTIME_ERROR, app_id=app_id)
+
+    result = await run_tests(worktree=name, heal_job_id=job_id)
+
+    assert result["passed"] is expected
+    assert "configured suite" in result["output"]
+
+
+def test_pytest_command_uses_the_current_interpreter() -> None:
+    import sys
+
+    from mcp_server.git_utils import pytest_command
+
+    assert pytest_command("pytest a b").startswith(f'"{sys.executable}" -m pytest a b')
+    assert pytest_command("go test ./...") == "go test ./..."

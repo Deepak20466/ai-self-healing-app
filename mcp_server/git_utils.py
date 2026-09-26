@@ -149,6 +149,13 @@ async def run_pytest(
     }
 
 
+def pytest_command(command: str) -> str:
+    """Make a bare `pytest ...` test_command use this interpreter (no PATH lookup)."""
+    if command.split(None, 1)[:1] == ["pytest"]:
+        return f'"{sys.executable}" -m {command}'
+    return command
+
+
 async def run_test_command(
     command: str, *, cwd: Path, timeout: float = TEST_TIMEOUT_SECONDS
 ) -> dict[str, Any]:
