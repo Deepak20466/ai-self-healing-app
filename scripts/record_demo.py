@@ -249,6 +249,8 @@ async def main(out_dir: Path, bug: str, part: str, pr: int = 0) -> int:
             await page.get_by_role("link", name="Dashboard", exact=True).wait_for(timeout=20000)
             await page.wait_for_timeout(2500)
             r.mark("dash")
+            await page.evaluate("document.getElementById('__cap')?.remove()")
+            await page.screenshot(path=str(ROOT / "docs/images/dashboard.png"))
             await r.cap(
                 "Each heal job now shows live progress: detected, analyzing, patch, tests, PR opened"
             )
@@ -258,7 +260,13 @@ async def main(out_dir: Path, bug: str, part: str, pr: int = 0) -> int:
                 "Metrics",
                 "Metrics: fix success rate (PR opened with passing tests), detection-to-PR time, cost per fix",
             )
-            await r.wait(6)
+            await r.wait(2)
+            await page.evaluate("document.getElementById('__cap')?.remove()")
+            await page.screenshot(path=str(ROOT / "docs/images/metrics.png"))
+            await r.cap(
+                "Metrics: fix success rate (PR opened with passing tests), detection-to-PR time, cost per fix"
+            )
+            await r.wait(4)
             await page.mouse.wheel(0, 500)
             await r.wait(3)
             r.mark("done")

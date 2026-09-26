@@ -561,13 +561,15 @@ against a live app-pod/sentinel-pod:
 
 (Full snapshot, including `errors_by_type`, in `metrics.json` after running
 the export script — gitignored since it's meant to be regenerated, not
-committed stale.) `mttr_minutes`/`fix_success_rate`/`ci_auto_fix_rate` read
-`null`/`0.0` here because this particular run triggered detection without
-letting a full autonomous fix-to-verified cycle complete (see Phase 4's log
-for the real, previously-run end-to-end fix scenarios that did reach a real
-job; Phase 7's log records the real `deployments` rows — one `deployed`, one
-`rolled_back` — written by testing `local_deploy.py`'s rollback path for
-real, which is where `rollback_count` above comes from).
+committed stale.) Metric definitions (there is no production deploy step here): **fix success
+rate** = jobs whose PR was opened with passing tests (`pr_opened`/`merged`/
+`deployed`/`verified`) over jobs with a final outcome; **MTTR** = detection to
+fix PR opened; the stricter "verified in production" rate is a separate field
+that reads `n/a (no production deploy)`. The numbers above predate this
+definition. A later snapshot on the live dev data: MTTR 9.06 min, success rate
+9% (5 PRs opened out of the many jobs, most of which are failed test/dev runs
+and refusals), cost per fix $1.60. `rollback_count` comes from the real
+`deployments` rows written by testing `local_deploy.py`'s rollback path.
 
 ## Any language (OpenTelemetry)
 

@@ -2051,3 +2051,25 @@ separate gh/ui takes). One real free-mode heal ran for `/trigger/none_lookup`
 occurrence_count % 5 == 0; start sentinel with CONTRACT_PROBE_INTERVAL_SECONDS
 huge and before the app so the prober can't enqueue extra (AI-spending) jobs.
 
+### 2026-09-26 — metrics fix + heal-job timeline
+- `core/metrics.py`: success = `SUCCESS_STATUSES` (pr_opened/merged/deployed/
+  verified) over `_OUTCOME_STATUSES` (those + failed/rolled_back); MTTR =
+  `created_at` -> new `heal_jobs.pr_opened_at` (migration 0005, set by all 4
+  backends where they set PR_OPENED; backfilled for jobs still in pr_opened);
+  new `verified_in_production_rate`/`_label` ("n/a (no production deploy)").
+  Cost per fix now averages over the same success set.
+- `healer/job_progress.py`: stages derived from DB (status + fix_attempts),
+  `GET /api/jobs`, and a 3s change-only broadcaster emitting Socket.io
+  `job_progress` events; hides failed jobs with no fix attempt. Dashboard
+  "Heal jobs" card in `web/app.js`.
+- Gotcha: a new alembic revision makes tests that run pytest inside a git
+  worktree of HEAD (test_mcp_git_utils, run_tests) fail until it is committed
+  (the nested conftest's `alembic upgrade head` can't find the newer revision).
+- Live values: MTTR 9.06 min, success 8.9%, verified "n/a", cost/fix $1.602.
+- PR #15 (the demo's real fix): diff minimal (2 files, +39/-2) but CI FAILS —
+  the fix is correct, yet two existing tests pin the seeded bug's 500
+  (`test_sentinel_capture_integration.py`, `test_target_app_routes.py`); the AI
+  only ran its own regression test. Left open, not merged.
+- Demo video re-spliced (`build_demo.py ... <patch_dir>`); screenshots
+  dashboard.png/metrics.png retaken by `record_demo.py ... patch`.
+

@@ -57,11 +57,14 @@ async def test_progress_follows_the_fix_attempt() -> None:
     patched = await _job(HealJobStatus.RUNNING, diff="--- a\n+++ b\n")
     tested = await _job(HealJobStatus.RUNNING, diff="--- a\n+++ b\n", passed=True)
     opened = await _job(HealJobStatus.PR_OPENED, diff="x", passed=True)
-    failed = await _job(HealJobStatus.FAILED)
+    failed = await _job(HealJobStatus.FAILED, diff="x")
+    refused = await _job(HealJobStatus.FAILED)
     assert (await _find(patched))["reached"] == 2
     assert (await _find(tested))["reached"] == 3
     assert (await _find(opened))["reached"] == 4
     assert (await _find(failed))["failed"] is True
+    ids = {j["job_id"] for j in await recent_job_progress(limit=200)}
+    assert refused not in ids  # failed with no attempt: hidden
 
 
 async def test_broadcaster_emits_only_changes() -> None:

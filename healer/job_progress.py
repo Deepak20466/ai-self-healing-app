@@ -73,6 +73,10 @@ async def recent_job_progress(*, hours: int = 24, limit: int = 8) -> list[dict[s
             has_patch = any(a.diff for a in attempts)
             tests_passed = any(a.passed for a in attempts)
             failed = job.status in (HealJobStatus.FAILED, HealJobStatus.ROLLED_BACK)
+            if failed and not attempts:
+                # Refused before any attempt (circuit breaker, budget, manual
+                # cleanup): nothing happened worth a timeline.
+                continue
             out.append(
                 {
                     "job_id": job.id,
