@@ -39,6 +39,7 @@ from healer.anthropic_client import AnthropicClientLike
 from healer.budget import is_budget_paused, record_spend
 from healer.circuit_breaker import fingerprint_circuit_open
 from healer.costs import TokenUsage, compute_cost_usd
+from healer.full_suite import combine_evidence, run_full_suite
 from healer.github_ops import FixEvidence, open_fix_pull_request, open_low_confidence_issue
 from healer.mcp_client import MCPToolClient, MCPToolError
 from healer.prompts import SYSTEM_PROMPT, build_initial_messages
@@ -428,6 +429,14 @@ async def _run_one_attempt(
         and any(not passed for passed in test_results[:-1])
         and test_results[-1]
     )
+    if success:
+        suite_passed, suite_output = await run_full_suite(
+            mcp, worktree_name=worktree_name, heal_job_id=job_id
+        )
+        last_test_output = combine_evidence(
+            last_test_output, suite_passed=suite_passed, suite_output=suite_output
+        )
+        success = suite_passed
 
     return AttemptResult(
         success=success,

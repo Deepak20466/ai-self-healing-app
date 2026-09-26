@@ -15,12 +15,16 @@ async def test_healthz_is_public_and_ok(target_app_client: httpx.AsyncClient) ->
 @pytest.mark.parametrize(
     "path", ["/trigger/zero", "/trigger/key", "/trigger/none_lookup", "/trigger/validation"]
 )
-async def test_exception_triggers_return_500(
+async def test_exception_triggers_never_crash_unhandled(
     target_app_client: httpx.AsyncClient, path: str
 ) -> None:
     response = await target_app_client.get(path)
-    assert response.status_code == 500
-    assert response.json() == {"detail": "Internal Server Error"}
+    # Passes whether the seeded bug is present (a handled 500) or fixed by the
+    # healer (no server error at all); only an unhandled crash format fails.
+    if response.status_code == 500:
+        assert response.json() == {"detail": "Internal Server Error"}
+    else:
+        assert response.status_code < 500
 
 
 async def test_trigger_timeout_returns_500(
@@ -30,7 +34,7 @@ async def test_trigger_timeout_returns_500(
 
     monkeypatch.setattr(bugs.settings, "pricing_api_timeout_seconds", 0.3)
     response = await target_app_client.get("/trigger/timeout")
-    assert response.status_code == 500
+    assert response.status_code in (500, 200)
 
 
 async def test_trigger_off_by_one_returns_200_with_wrong_content(

@@ -209,6 +209,10 @@ async def run_tests(
         app_dir = cwd / app.local_repo_path
         return await git_utils.run_test_command(app.test_command, cwd=app_dir)
 
+    if test_path is None:
+        return await git_utils.run_pytest(
+            None, cwd=cwd, timeout=git_utils.FULL_SUITE_TIMEOUT_SECONDS
+        )
     return await git_utils.run_pytest(test_path, cwd=cwd)
 
 

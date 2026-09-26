@@ -561,6 +561,7 @@ async def run_heal_job_codex(
 
             outcome = await _verify_and_summarize(
                 mcp=mcp,
+                heal_job_id=job_id,
                 worktree_path=worktree_path,
                 worktree_name=worktree_name,
                 cli_result=cli_result,
@@ -740,6 +741,7 @@ async def run_ci_heal_job_codex(
             elif not cli_result.is_error:
                 verified = await _verify_and_summarize(
                     mcp=mcp,
+                    heal_job_id=job_id,
                     worktree_path=worktree_path,
                     worktree_name=worktree_name,
                     cli_result=cli_result,

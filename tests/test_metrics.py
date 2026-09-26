@@ -258,3 +258,55 @@ async def test_get_metrics_summary_is_internally_consistent(db_session: AsyncSes
     assert summary.daily_budget_usd == 2.0
     assert summary.daily_budget_remaining_usd <= summary.daily_budget_usd
     assert summary.fix_success_rate == round((baseline_verified + 1) / (baseline_total + 1), 4)
+
+
+async def _attempted_counts(db_session: AsyncSession) -> tuple[int, int]:
+    """(attempted outcome jobs, attempted successful jobs) currently in the DB."""
+    has_attempt = select(FixAttempt.id).where(FixAttempt.heal_job_id == HealJob.id).exists()
+    total = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(HealJob)
+            .where(HealJob.status.in_(_OUTCOME_STATUSES), has_attempt)
+        )
+    ).scalar_one()
+    ok = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(HealJob)
+            .where(HealJob.status.in_(SUCCESS_STATUSES), has_attempt)
+        )
+    ).scalar_one()
+    return total, ok
+
+
+async def test_ai_fix_success_rate_excludes_jobs_blocked_before_an_attempt(
+    db_session: AsyncSession,
+) -> None:
+    total, ok = await _attempted_counts(db_session)
+    all_before = await metrics.compute_fix_success_rate(db_session)
+
+    won = await _make_job(db_session, status=HealJobStatus.PR_OPENED)
+    lost = await _make_job(db_session, status=HealJobStatus.FAILED)
+    for job in (won, lost):
+        db_session.add(FixAttempt(heal_job_id=job.id, attempt_number=1, cost_usd=Decimal("0")))
+    # Blocked before any AI attempt (e.g. circuit breaker): no fix_attempts row.
+    await _make_job(db_session, status=HealJobStatus.FAILED)
+    await _make_job(db_session, status=HealJobStatus.FAILED)
+    await db_session.flush()
+
+    ai_rate = await metrics.compute_ai_fix_success_rate(db_session)
+    assert ai_rate == round((ok + 1) / (total + 2), 4)
+    # The all-time rate still counts the blocked jobs, so it is the lower one here.
+    all_after = await metrics.compute_fix_success_rate(db_session)
+    assert all_after is not None and ai_rate is not None
+    assert all_after < ai_rate or all_before is None
+
+
+async def test_summary_exposes_both_success_rates(db_session: AsyncSession) -> None:
+    job = await _make_job(db_session, status=HealJobStatus.PR_OPENED)
+    db_session.add(FixAttempt(heal_job_id=job.id, attempt_number=1, cost_usd=Decimal("0")))
+    await db_session.flush()
+    summary = await metrics.get_metrics_summary(db_session, daily_budget_usd=2.0)
+    assert summary.ai_fix_success_rate is not None
+    assert summary.fix_success_rate is not None

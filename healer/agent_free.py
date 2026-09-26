@@ -78,6 +78,7 @@ from core.models import AuditLog, FixAttempt, HealJob, HealJobStatus, HealJobTyp
 from core.untrusted import UNTRUSTED_DATA_SYSTEM_PROMPT_NOTE, wrap_untrusted
 from healer import ci_agent
 from healer.circuit_breaker import fingerprint_circuit_open
+from healer.full_suite import combine_evidence, run_full_suite
 from healer.github_ops import (
     CIFixOutcome,
     FixEvidence,
@@ -629,7 +630,12 @@ async def _regression_test_path(cwd: Path) -> str | None:
 
 
 async def _verify_and_summarize(
-    *, mcp: MCPToolClient, worktree_path: Path, worktree_name: str, cli_result: CLIResult
+    *,
+    mcp: MCPToolClient,
+    worktree_path: Path,
+    worktree_name: str,
+    cli_result: CLIResult,
+    heal_job_id: int | None = None,
 ) -> _AttemptOutcome:
     """Independent, code-enforced verification of what the CLI attempt claims.
 
@@ -658,6 +664,13 @@ async def _verify_and_summarize(
     test_result = await mcp.call_tool("run_tests", args)
     passed = bool(test_result.get("passed")) if isinstance(test_result, dict) else False
     output = str(test_result.get("output", ""))[-4000:] if isinstance(test_result, dict) else ""
+    if passed:
+        # The regression test alone can't show the patch broke nothing else.
+        suite_passed, suite_output = await run_full_suite(
+            mcp, worktree_name=worktree_name, heal_job_id=heal_job_id
+        )
+        output = combine_evidence(output, suite_passed=suite_passed, suite_output=suite_output)
+        passed = suite_passed
     return _AttemptOutcome(
         success=passed,
         root_cause=cli_result.result_text or "(agent produced no final summary)",
@@ -858,6 +871,7 @@ async def run_heal_job_free(
 
             outcome = await _verify_and_summarize(
                 mcp=mcp,
+                heal_job_id=job_id,
                 worktree_path=worktree_path,
                 worktree_name=worktree_name,
                 cli_result=cli_result,
@@ -1039,6 +1053,7 @@ async def run_ci_heal_job_free(
             elif not cli_result.is_error:
                 verified = await _verify_and_summarize(
                     mcp=mcp,
+                    heal_job_id=job_id,
                     worktree_path=worktree_path,
                     worktree_name=worktree_name,
                     cli_result=cli_result,

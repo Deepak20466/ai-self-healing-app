@@ -10,7 +10,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.models import (
@@ -50,6 +50,9 @@ class ErrorsByTypePoint(BaseModel):
 
 class MetricsSummary(BaseModel):
     mttr_minutes: float | None
+    #: headline: success among jobs where the AI attempted a fix
+    ai_fix_success_rate: float | None
+    #: all-time: success among every job with a final outcome (incl. blocked)
     fix_success_rate: float | None
     #: stricter metric: verified healthy in production (needs a real deploy)
     verified_in_production_rate: float | None
@@ -81,8 +84,16 @@ async def _rate(
     session: AsyncSession,
     success: tuple[HealJobStatus, ...],
     job_types: tuple[HealJobType, ...] | None,
+    *,
+    attempted_only: bool = False,
 ) -> float | None:
-    base_filter = [HealJob.status.in_(_OUTCOME_STATUSES)]
+    base_filter: list[ColumnElement[bool]] = [HealJob.status.in_(_OUTCOME_STATUSES)]
+    if attempted_only:
+        # Jobs blocked before any AI attempt (circuit breaker, duplicate,
+        # budget, refusal) never wrote a fix_attempt row.
+        base_filter.append(
+            select(FixAttempt.id).where(FixAttempt.heal_job_id == HealJob.id).exists()
+        )
     if job_types:
         base_filter.append(HealJob.type.in_(job_types))
     total = (
@@ -105,6 +116,11 @@ async def compute_fix_success_rate(
 ) -> float | None:
     """Jobs whose PR was opened with passing tests / jobs with a final outcome."""
     return await _rate(session, SUCCESS_STATUSES, job_types)
+
+
+async def compute_ai_fix_success_rate(session: AsyncSession) -> float | None:
+    """Headline rate: PR opened / jobs where the AI actually attempted a fix."""
+    return await _rate(session, SUCCESS_STATUSES, None, attempted_only=True)
 
 
 async def compute_verified_in_production_rate(session: AsyncSession) -> float | None:
@@ -203,6 +219,7 @@ async def compute_errors_by_type_over_time(
 async def get_metrics_summary(session: AsyncSession, *, daily_budget_usd: float) -> MetricsSummary:
     mttr = await compute_mttr_minutes(session)
     success_rate = await compute_fix_success_rate(session)
+    ai_rate = await compute_ai_fix_success_rate(session)
     ci_rate = await compute_ci_auto_fix_rate(session)
     verified_rate = await compute_verified_in_production_rate(session)
     violations = await compute_contract_violation_catches(session)
@@ -214,6 +231,7 @@ async def get_metrics_summary(session: AsyncSession, *, daily_budget_usd: float)
 
     return MetricsSummary(
         mttr_minutes=mttr,
+        ai_fix_success_rate=ai_rate,
         fix_success_rate=success_rate,
         ci_auto_fix_rate=ci_rate,
         verified_in_production_rate=verified_rate,

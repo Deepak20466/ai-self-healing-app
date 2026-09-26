@@ -82,8 +82,8 @@ function pct(x) {
   return x == null ? "—" : `${Math.round(x * 100)}%`;
 }
 
-function Stat({ label, value }) {
-  return html`<div class="stat"><div class="value">${value}</div><div class="label">${label}</div></div>`;
+function Stat({ label, value, hint }) {
+  return html`<div class="stat" title=${hint || ""}><div class="value">${value}</div><div class="label">${label}</div></div>`;
 }
 
 function Metrics() {
@@ -109,7 +109,9 @@ function Metrics() {
       <h2>Metrics</h2>
       <div class="grid">
         <${Stat} label="MTTR: detection → fix PR (min)" value=${data.mttr_minutes ?? "—"} />
-        <${Stat} label="Fix success rate (PR opened with passing tests)" value=${pct(data.fix_success_rate)} />
+        <${Stat} label="AI fix success rate (jobs where the AI attempted a fix)" value=${pct(data.ai_fix_success_rate)} />
+        <${Stat} label="All-time success rate (incl. blocked jobs)" value=${pct(data.fix_success_rate)}
+          hint="Counts every job with a final outcome, including ones blocked before any AI attempt (circuit breaker, duplicate/in-flight, budget, refusal). The AI rate above excludes those, so it measures only how well the AI fixes what it actually tries." />
         <${Stat} label="Verified in production" value=${data.verified_in_production_label ?? "n/a (no production deploy)"} />
         <${Stat} label="CI auto-fix rate" value=${data.ci_auto_fix_rate ?? "—"} />
         <${Stat} label="Contract catches" value=${data.contract_violation_catches ?? 0} />

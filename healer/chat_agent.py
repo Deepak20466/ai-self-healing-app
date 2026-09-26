@@ -282,7 +282,8 @@ async def handle_chat_message(mcp: MCPToolClient, *, chat_session_id: int, text:
         return ChatReply(
             text=(
                 f"MTTR: {metrics.get('mttr_minutes')} min | "
-                f"Fix success rate: {metrics.get('fix_success_rate')} | "
+                f"AI fix success rate: {metrics.get('ai_fix_success_rate')} | "
+                f"All-time success rate: {metrics.get('fix_success_rate')} | "
                 f"CI auto-fix rate: {metrics.get('ci_auto_fix_rate')} | "
                 f"Cost/fix: ${metrics.get('cost_per_fix_usd')} | "
                 f"Daily spend: ${metrics.get('daily_spend_usd')} / "

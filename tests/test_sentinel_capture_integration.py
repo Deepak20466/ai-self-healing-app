@@ -16,6 +16,7 @@ from __future__ import annotations
 import inspect
 
 import httpx
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,11 +25,23 @@ from core.models import Error, ErrorOccurrence
 from sentinel.fingerprint import fingerprint_error
 
 
+def _skip_if_bug_fixed(response: httpx.Response) -> None:
+    """These are demo-only tests: they need a seeded bug to still be present.
+
+    Once the healer's fix for a bug is merged the trigger stops failing and
+    there is nothing to capture, which is success, not a regression (restore
+    the bugs with scripts/reset_demo_bugs.py to exercise them again).
+    """
+    if response.status_code != 500:
+        pytest.skip(f"seeded bug already fixed (status {response.status_code})")
+    assert response.status_code == 500
+
+
 async def test_trigger_zero_stores_error_with_correct_file_and_line(
     target_app_client: httpx.AsyncClient, db_session: AsyncSession
 ) -> None:
     response = await target_app_client.get("/trigger/zero")
-    assert response.status_code == 500
+    _skip_if_bug_fixed(response)
 
     fingerprint = fingerprint_error(
         "ZeroDivisionError", "apps/target_app/bugs.py", "average_rating"
@@ -52,7 +65,7 @@ async def test_trigger_zero_stores_error_with_correct_file_and_line(
 async def test_repeated_trigger_increments_occurrence_count(
     target_app_client: httpx.AsyncClient, db_session: AsyncSession
 ) -> None:
-    await target_app_client.get("/trigger/key")
+    _skip_if_bug_fixed(await target_app_client.get("/trigger/key"))
     await target_app_client.get("/trigger/key")
 
     fingerprint = fingerprint_error("KeyError", "apps/target_app/bugs.py", "order_status_label")
@@ -71,7 +84,7 @@ async def test_secret_looking_data_is_scrubbed_before_storage(
     response = await target_app_client.get(
         "/trigger/none_lookup", headers={"Authorization": "Bearer sk-ant-not-a-real-secret-value"}
     )
-    assert response.status_code == 500
+    _skip_if_bug_fixed(response)
 
     fingerprint = fingerprint_error("AttributeError", "apps/target_app/bugs.py", "item_label")
     stmt = select(Error).where(Error.fingerprint == fingerprint)

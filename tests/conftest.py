@@ -377,3 +377,19 @@ def fake_git_remote() -> Generator[str, None, None]:
                 capture_output=True,
                 check=False,
             )
+
+
+@pytest.fixture(autouse=True)
+def stub_full_suite(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep e2e healer tests from spawning a nested full-repo pytest.
+
+    Every backend now runs the app's full suite before a PR; in these tests
+    the "app" is this repo itself, so the real thing would recurse into the
+    whole suite. `tests/test_healer_full_suite.py` restores the real function.
+    """
+
+    async def _pass(*_a: object, **_k: object) -> tuple[bool, str]:
+        return True, "(full suite stubbed in tests)"
+
+    monkeypatch.setattr("healer.agent_free.run_full_suite", _pass)
+    monkeypatch.setattr("healer.runtime_agent.run_full_suite", _pass)

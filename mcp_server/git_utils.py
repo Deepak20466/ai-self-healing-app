@@ -14,6 +14,8 @@ from typing import Any
 
 GIT_TIMEOUT_SECONDS = 30.0
 TEST_TIMEOUT_SECONDS = 120.0
+# A whole suite (the pre-PR gate) legitimately takes far longer than one test file.
+FULL_SUITE_TIMEOUT_SECONDS = 900.0
 
 
 class GitCommandError(Exception):
