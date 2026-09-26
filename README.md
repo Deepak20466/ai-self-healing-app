@@ -561,7 +561,7 @@ against a live app-pod/sentinel-pod:
 
 (Full snapshot, including `errors_by_type`, in `metrics.json` after running
 the export script — gitignored since it's meant to be regenerated, not
-committed stale.) Metric definitions (there is no production deploy step here): **fix success
+committed stale.) Metric definitions (there is no production deploy step here): the headline **AI fix success rate** counts only jobs where the AI attempted a fix (blocked jobs excluded), the all-time rate keeps them; **fix success
 rate** = jobs whose PR was opened with passing tests (`pr_opened`/`merged`/
 `deployed`/`verified`) over jobs with a final outcome; **MTTR** = detection to
 fix PR opened; the stricter "verified in production" rate is a separate field
