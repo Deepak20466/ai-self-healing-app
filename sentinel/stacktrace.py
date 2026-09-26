@@ -82,6 +82,12 @@ def _parse_go(text: str) -> list[Frame]:
             fn_match = _GO_FN.match(lines[i - 1].strip())
             fn = fn_match["fn"] if fn_match else lines[i - 1].strip()
             frames.append(Frame(m["file"], int(m["line"]), fn))
+    # A trace captured inside a deferred recover() starts with the recovery
+    # machinery (debug.Stack, the recover middleware); everything up to and
+    # including the `panic(...)` frame is that, not the faulting code.
+    for i, frame in enumerate(frames):
+        if frame.function == "panic":
+            return frames[i + 1 :]
     return frames
 
 
@@ -141,7 +147,7 @@ _LIBRARY_MARKERS: dict[str, tuple[str, ...]] = {
     "python": ("site-packages", "/lib/python", "dist-packages", "<frozen"),
     "javascript": ("node_modules", "node:internal", "node:", "(internal"),
     "java": (),
-    "go": ("/usr/local/go/", "/pkg/mod/", "/vendor/", "runtime/", "/go/src/"),
+    "go": ("/usr/local/go/", "/pkg/mod/", "/vendor/", "runtime/", "/go/src/", "/Go/src/"),
     "csharp": (),
     "php": ("/vendor/",),
     "ruby": ("/gems/", "/lib/ruby/", "<internal:", "/rubygems/"),

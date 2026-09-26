@@ -31,6 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
+from core.language_tools import detect_profile
 from core.models import MonitoredApp
 from mcp_server.github_client import GitHubClient, GitHubClientError
 from mcp_server.sandbox import REPO_ROOT, to_repo_relative
@@ -181,13 +182,13 @@ def detect_stack(local_path: Path) -> DetectedStack:
             install_command="npm install",
         )
 
-    go_mod = local_path / "go.mod"
-    if go_mod.exists():
+    profile = detect_profile(local_path)
+    if profile is not None:
         return DetectedStack(
-            language="go",
-            test_command="go test ./...",
-            lint_command="go vet ./...",
-            install_command="go mod download",
+            language=profile.language,
+            test_command=profile.test.command,
+            lint_command=profile.lint.command if profile.lint else None,
+            install_command=profile.install.command if profile.install else None,
         )
 
     pyproject = local_path / "pyproject.toml"

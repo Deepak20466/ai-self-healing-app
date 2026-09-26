@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -40,6 +41,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.language_tools import Check, ToolProfile, detect_profile
 from core.models import Finding, FindingCategory, FindingSeverity, MonitoredApp
 from core.repo_connect import CONNECTED_APPS_ROOT, app_fingerprint
 from mcp_server.sandbox import REPO_ROOT
@@ -87,6 +89,8 @@ class ScanSummary:
     tests_passed: bool | None
     findings_count: int
     health_score: int
+    #: checks not run, e.g. "lint: skipped: tool not installed (mvn)"
+    skipped_checks: tuple[str, ...] = ()
 
 
 VENV_DIR_NAME = ".selfheal_venv"
@@ -280,6 +284,99 @@ def compute_health_score(drafts: list[FindingDraft], *, tests_passed: bool | Non
     return max(0, min(100, score))
 
 
+def _tool_available(check: Check, app_dir: Path) -> bool:
+    if "/" in check.requires:
+        return (app_dir / check.requires).exists()
+    return shutil.which(check.requires) is not None or (app_dir / check.requires).exists()
+
+
+def _skip_reason(name: str, check: Check) -> str:
+    return f"{name}: skipped: tool not installed ({check.requires})"
+
+
+async def _run_profile_checks(
+    profile: ToolProfile, app_dir: Path, test_command: str, notify: ProgressCallback
+) -> tuple[list[FindingDraft], bool | None, list[str]]:
+    """Run a non-Python/JS language's standard test/lint/audit commands.
+
+    A missing tool is recorded as skipped, never as a finding. For a
+    present tool, a non-zero exit becomes one finding carrying the output
+    tail (these tools' native output formats vary too much to parse
+    per-tool; the tail is what a human or the fix agent needs anyway).
+    """
+    drafts: list[FindingDraft] = []
+    skipped: list[str] = []
+    tests_passed: bool | None = None
+
+    await notify("installing dependencies", 10)
+    if profile.install and _tool_available(profile.install, app_dir):
+        await _run(profile.install.command, cwd=app_dir, timeout=INSTALL_TIMEOUT_SECONDS)
+    elif profile.install:
+        skipped.append(_skip_reason("install", profile.install))
+
+    await notify("running tests", 35)
+    if _tool_available(profile.test, app_dir):
+        outcome = await _run(test_command, cwd=app_dir)
+        tests_passed = outcome.ok and not outcome.timed_out
+        if not tests_passed:
+            drafts.append(
+                FindingDraft(
+                    category=FindingCategory.TEST,
+                    severity=FindingSeverity.HIGH,
+                    tool="test-runner",
+                    message=(
+                        f"Test suite failed (`{test_command}`). Tail of output:\n"
+                        f"{outcome.output[-2000:]}"
+                    ),
+                )
+            )
+    else:
+        skipped.append(_skip_reason("tests", profile.test))
+
+    await notify("running linter", 60)
+    if profile.lint is None:
+        pass
+    elif _tool_available(profile.lint, app_dir):
+        outcome = await _run(profile.lint.command, cwd=app_dir)
+        if not outcome.ok:
+            drafts.append(
+                FindingDraft(
+                    category=FindingCategory.LINT,
+                    severity=FindingSeverity.MEDIUM,
+                    tool=profile.lint.requires.rsplit("/", 1)[-1],
+                    message=(
+                        f"`{profile.lint.command}` reported problems:\n{outcome.output[-2000:]}"
+                    ),
+                )
+            )
+    else:
+        skipped.append(_skip_reason("lint", profile.lint))
+
+    await notify("checking dependencies for vulnerabilities", 85)
+    if profile.audit is None:
+        skipped.append(f"audit: skipped: no standard {profile.build_tool} audit command")
+    elif _tool_available(profile.audit, app_dir):
+        outcome = await _run(profile.audit.command, cwd=app_dir, timeout=INSTALL_TIMEOUT_SECONDS)
+        marker = profile.audit_vulnerable_marker
+        vulnerable = (marker in outcome.output) if marker else not outcome.ok
+        if vulnerable:
+            drafts.append(
+                FindingDraft(
+                    category=FindingCategory.DEPENDENCY,
+                    severity=FindingSeverity.MEDIUM,
+                    tool=profile.audit.requires.rsplit("/", 1)[-1],
+                    message=(
+                        f"`{profile.audit.command}` reported vulnerabilities:\n"
+                        f"{outcome.output[-2000:]}"
+                    ),
+                )
+            )
+    else:
+        skipped.append(_skip_reason("audit", profile.audit))
+
+    return drafts, tests_passed, skipped
+
+
 async def _noop_progress(_stage: str, _percent: int) -> None:
     return None
 
@@ -297,6 +394,14 @@ async def run_scan(
     app_dir = _app_dir(app)
     drafts: list[FindingDraft] = []
     tests_passed: bool | None = None
+
+    skipped: list[str] = []
+    profile = detect_profile(app_dir) if app.language not in ("python", "javascript") else None
+    if profile is not None:
+        drafts, tests_passed, skipped = await _run_profile_checks(
+            profile, app_dir, app.test_command, notify
+        )
+        return await _finish_scan(session, app, drafts, tests_passed, skipped, notify)
 
     has_pyproject = (app_dir / "pyproject.toml").exists()
     has_requirements = (app_dir / "requirements.txt").exists()
@@ -362,6 +467,17 @@ async def run_scan(
         audit_outcome = await _run("npm audit --json", cwd=app_dir, timeout=INSTALL_TIMEOUT_SECONDS)
         drafts.extend(parse_npm_audit_json(audit_outcome.output))
 
+    return await _finish_scan(session, app, drafts, tests_passed, skipped, notify)
+
+
+async def _finish_scan(
+    session: AsyncSession,
+    app: MonitoredApp,
+    drafts: list[FindingDraft],
+    tests_passed: bool | None,
+    skipped: list[str],
+    notify: ProgressCallback,
+) -> ScanSummary:
     await notify("saving results", 95)
     for draft in drafts:
         fingerprint = app_fingerprint(
@@ -406,10 +522,12 @@ async def run_scan(
         findings_count=len(drafts),
         health_score=health_score,
         tests_passed=tests_passed,
+        skipped_checks=skipped,
     )
     return ScanSummary(
         app_id=app.id,
         tests_passed=tests_passed,
         findings_count=findings_count,
         health_score=health_score,
+        skipped_checks=tuple(skipped),
     )

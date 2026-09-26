@@ -24,7 +24,36 @@ from dataclasses import dataclass
 from core.config import settings
 from mcp_server.sandbox import SandboxViolation
 
-_TEST_PATH_RE = re.compile(r"(^|/)tests?/.*\.py$|(^|/)test_[^/]*\.py$|_test\.py$")
+_TEST_PATH_RE = re.compile(
+    r"(^|/)tests?/.*\.py$|(^|/)test_[^/]*\.py$|_test\.py$"  # Python
+    r"|\.(test|spec)\.[cm]?[jt]sx?$|(^|/)__tests__/"  # JS/TS
+    r"|(^|/)src/test/|Tests?\.java$"  # Java
+    r"|_test\.go$"  # Go
+    r"|Tests?\.cs$"  # C#
+    r"|Test\.php$|(^|/)tests/.*\.php$"  # PHP
+    r"|_(spec|test)\.rb$|(^|/)spec/.*\.rb$"  # Ruby
+)
+_PYTHON_PATH_RE = re.compile(r"\.py$")
+
+# Lines a patch must not ADD to a test file, per language (skip/disable/focus).
+_SKIP_ADDED_RES = (
+    re.compile(r"\b(it|test|describe|context)\.(skip|only|todo)\b"),  # JS it.skip/test.only
+    re.compile(r"\bx(it|describe|test|context)\s*\("),  # JS xit / Ruby xit
+    re.compile(r"@(Disabled|Ignore)\b"),  # Java JUnit 5 / 4
+    re.compile(r"\bt\.Skip(Now|f)?\s*\("),  # Go
+    re.compile(r"\[\s*Ignore\b|\bSkip\s*=\s*\""),  # C# NUnit/MSTest [Ignore], xUnit Skip=
+    re.compile(r"\bmarkTest(Skipped|Incomplete)\s*\("),  # PHP PHPUnit
+    re.compile(r"^\s*(skip|pending)\b|,\s*skip:|\bpending\s*\("),  # Ruby minitest/rspec
+)
+# One match == one test declaration; used to detect a net removal in non-Python test files.
+_TEST_DECL_RES = (
+    re.compile(r"\b(it|test)\s*\(\s*[\"'`]"),  # JS
+    re.compile(r"@Test\b"),  # Java
+    re.compile(r"^\s*func Test\w+\("),  # Go
+    re.compile(r"\[\s*(Fact|Theory|Test|TestMethod)\b"),  # C#
+    re.compile(r"\bfunction test\w+\s*\(|@test\b"),  # PHP
+    re.compile(r"^\s*(it|specify)\s+[\"']|\bdef test_\w+"),  # Ruby
+)
 _DEF_TEST_RE = re.compile(r"^(?:async\s+)?def (test_\w+)\s*\(")
 _SKIP_MARK_RE = re.compile(r"@pytest\.mark\.(skip|xfail)\b")
 _PYTEST_SKIP_CALL_RE = re.compile(r"\bpytest\.(skip|xfail)\s*\(")
@@ -98,6 +127,33 @@ def check_patch_limits(unified_diff: str, touched_paths: set[str]) -> None:
         )
 
 
+def _is_decl(line: str) -> bool:
+    return any(rx.search(line) for rx in _TEST_DECL_RES)
+
+
+def _check_non_python_test_section(section: _FileSection) -> None:
+    """Per-language skip/disable markers and net test removal (non-Python test files)."""
+    if not _TEST_PATH_RE.search(section.new_path) or _PYTHON_PATH_RE.search(section.new_path):
+        return
+    removed = added = 0
+    for line in section.body:
+        if line.startswith(("+++", "---")):
+            continue
+        if line.startswith("+"):
+            if any(rx.search(line[1:]) for rx in _SKIP_ADDED_RES):
+                raise SandboxViolation(
+                    f"Patch adds a skip/disable/focus marker to a test in {section.new_path!r}"
+                )
+            added += _is_decl(line[1:])
+        elif line.startswith("-"):
+            removed += _is_decl(line[1:])
+    if removed > added:
+        raise SandboxViolation(
+            f"Patch removes {removed - added} test(s) from {section.new_path!r} without "
+            "replacing them"
+        )
+
+
 def check_not_cheating(unified_diff: str) -> None:
     """Reject a diff that tries to make tests/CI pass by cheating instead of fixing.
 
@@ -114,6 +170,7 @@ def check_not_cheating(unified_diff: str) -> None:
     added_tests: set[str] = set()
 
     for section in sections:
+        _check_non_python_test_section(section)
         is_test_file = bool(
             _TEST_PATH_RE.search(section.old_path) or _TEST_PATH_RE.search(section.new_path)
         )

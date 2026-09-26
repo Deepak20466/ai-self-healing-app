@@ -218,3 +218,18 @@ async def test_otlp_bad_body_is_400(sentinel_http_client, db_session) -> None:
         },
     )
     assert resp.status_code == 400
+
+
+def test_go_recovered_panic_skips_the_recovery_machinery() -> None:
+    trace = (
+        "goroutine 6 [running]:\nruntime/debug.Stack()\n"
+        "\t/usr/local/go/src/runtime/debug/stack.go:26 +0x5e\n"
+        "main.recoverMiddleware.func1.1()\n\t/app/main.go:35 +0x10\n"
+        "panic({0x1, 0x2})\n\t/usr/local/go/src/runtime/panic.go:783 +0x132\n"
+        "runtime.panicdivide(...)\n\t/usr/local/go/src/runtime/panic.go:100\n"
+        "main.average(...)\n\t/app/calc.go:11\n"
+    )
+    lang, frames = parse_stacktrace(trace, "go")
+    frame = select_in_app_frame(lang or "go", frames)
+    assert frame is not None
+    assert (frame.file, frame.line) == ("/app/calc.go", 11)
