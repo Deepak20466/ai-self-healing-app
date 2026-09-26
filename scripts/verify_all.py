@@ -746,8 +746,10 @@ async def check_github(report: Report) -> None:
     for var in ("HEALER_WEBHOOK_URL", "PUBLIC_URL"):
         report.add(
             f"GitHub: variable {var} set",
-            "PASS" if var in var_names else "FAIL",
-            "present" if var in var_names else "missing",
+            "PASS" if var in var_names else "SKIPPED",
+            "present"
+            if var in var_names
+            else "unset (no public tunnel running; jobs skip cleanly when unset)",
         )
     report.add(
         "GitHub: DEPLOY_HOST unset (deploy.yml skips cleanly)",
@@ -861,6 +863,97 @@ async def check_connect_a_repo(
             report.add("connect-a-repo: /api/apps returns apps", "FAIL", str(exc))
 
 
+async def check_connect_real_repo(report: Report, repo: str | None) -> None:
+    """Connect + scan a REAL small repo the operator owns, via the same
+    `core.repo_connect`/`core.scanner` functions the API calls, then clean up
+    the DB row and the `connected_apps/<name>/` clone. Never starts a heal."""
+    label = "connect-a-repo: real repo connect + scan"
+    if not repo:
+        report.add(label, "SKIPPED", "no --connect-repo given")
+        return
+    import shutil
+
+    from core.config import settings
+    from core.models import Finding, MonitoredApp
+    from core.repo_connect import RepoConnectError, connect_repo
+    from core.scanner import run_scan
+
+    if not settings.github_token:
+        report.add(label, "SKIPPED", "GITHUB_TOKEN not set")
+        return
+    app_id: int | None = None
+    local_path: str | None = None
+    try:
+        async with session_scope() as session:
+            app = await connect_repo(
+                session,
+                repo_url=f"https://github.com/{repo}",
+                name=f"verify-{repo.split('/')[-1].lower()}",
+                github_token=settings.github_token,
+            )
+            app_id, local_path = app.id, app.local_repo_path
+            summary = await run_scan(session, app)
+        report.add(
+            label,
+            "PASS",
+            f"{repo}: cloned, stack={app.language}, tests_passed={summary.tests_passed}, "
+            f"{summary.findings_count} finding(s), health {summary.health_score}",
+        )
+    except RepoConnectError as exc:
+        report.add(label, "FAIL", f"connect refused: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        report.add(label, "FAIL", f"{type(exc).__name__}: {exc}")
+    finally:
+        if app_id is not None:
+            async with session_scope() as session:
+                for f in (
+                    await session.execute(select(Finding).where(Finding.app_id == app_id))
+                ).scalars():
+                    await session.delete(f)
+                row = await session.get(MonitoredApp, app_id)
+                if row is not None:
+                    await session.delete(row)
+        if local_path:
+            shutil.rmtree(Path(local_path), ignore_errors=True)
+
+
+def check_ai_backend_switching(report: Report) -> None:
+    """Each AI_BACKEND value selects the right runner pair in a fresh process
+    (nothing is invoked -- no CLI or API call), and a bad value fails loudly."""
+    code = (
+        "from healer.worker import _select_backend as s;"
+        "r=s();print(r.runtime_or_contract.__name__ if hasattr(r.runtime_or_contract,'__name__')"
+        " else r.runtime_or_contract.func.__name__)"
+    )
+    expected = {
+        "claude_cli": "run_heal_job_free",
+        "codex_cli": "run_heal_job_codex",
+        "gemini_cli": "run_heal_job_gemini",
+        "api": "run_heal_job",
+    }
+    for value, want in expected.items():
+        env = {**os.environ, "AI_BACKEND": value, "ANTHROPIC_API_KEY": "fake-not-used"}
+        env.pop("USE_CLAUDE_CODE", None)
+        r = subprocess.run(  # noqa: S603
+            [sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60
+        )
+        got = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else r.stderr[-150:]
+        report.add(
+            f"AI_BACKEND={value} selects the right backend",
+            "PASS" if r.returncode == 0 and got == want else "FAIL",
+            got,
+        )
+    env = {**os.environ, "AI_BACKEND": "bogus"}
+    r = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60
+    )
+    report.add(
+        "AI_BACKEND=bogus fails loudly",
+        "PASS" if r.returncode != 0 and "ValueError" in r.stderr else "FAIL",
+        f"exit {r.returncode}",
+    )
+
+
 def check_no_docker(report: Report) -> None:
     hits = []
     for pattern in (
@@ -890,6 +983,9 @@ async def main() -> int:
     parser.add_argument(
         "--webhook-url", default=None, help="override; default: gh variable HEALER_WEBHOOK_URL"
     )
+    parser.add_argument(
+        "--connect-repo", default=None, help="owner/name of a small repo you own to connect+scan"
+    )
     args = parser.parse_args()
 
     public_url = args.public_url
@@ -915,6 +1011,8 @@ async def main() -> int:
     await check_github(report)
     await check_metrics(report, public_url, args.admin_password)
     await check_connect_a_repo(report, public_url, args.admin_password)
+    await check_connect_real_repo(report, args.connect_repo)
+    check_ai_backend_switching(report)
     check_no_docker(report)
 
     # Criteria satisfied by existing, already-real evidence rather than a
