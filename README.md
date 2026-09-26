@@ -511,6 +511,10 @@ real, which is where `rollback_count` above comes from).
 
 ## What this project demonstrates
 
+For interview prep (a spoken pitch, walkthroughs of the key flows, likely
+Q&A, and real bugs found while building this), see
+[`docs/INTERVIEW_PREP.md`](docs/INTERVIEW_PREP.md).
+
 - **Async Python at every layer**: FastAPI + SQLAlchemy 2.0 async + asyncpg
   end to end, `SELECT ... FOR UPDATE SKIP LOCKED` + `LISTEN/NOTIFY` for a
   dependency-free job queue (no Redis/Celery), `asyncio.gather` for
