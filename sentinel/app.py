@@ -6,11 +6,12 @@ Run with: `uvicorn sentinel.app:app --port $SENTINEL_PORT`.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import pydantic
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
@@ -19,7 +20,7 @@ from core.hmac_utils import InvalidSignatureError, verify_signature
 from core.logging import configure_logging, get_logger
 from core.models import MonitoredApp
 from core.monitored_apps import get_app_by_ingest_token
-from sentinel import storage
+from sentinel import otlp, storage
 from sentinel.anomaly import AnomalyDetector, run_anomaly_loop
 from sentinel.capture import CapturedError
 from sentinel.prober import run_prober_loop
@@ -92,6 +93,40 @@ async def ingest_error(
         session, captured, app_id=reporting_app.id if reporting_app else None
     )
     return {"error_id": error.id, "fingerprint": error.fingerprint}
+
+
+@app.post("/v1/{kind}")
+async def otlp_ingest(
+    kind: str, request: Request, session: AsyncSession = Depends(get_db)
+) -> Response:
+    """OTLP/HTTP receiver (`/v1/traces`, `/v1/logs`; JSON or protobuf, optional gzip).
+
+    Unlike `/ingest/error`, the bearer token is *required* here: an OTLP
+    exporter is configured once (`OTEL_EXPORTER_OTLP_HEADERS`) and the
+    token is the only thing tying its data to a registered app.
+    """
+    if kind not in ("traces", "logs"):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unsupported OTLP signal")
+    reporting_app = await _resolve_reporting_app(request, session)
+    if reporting_app is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing or invalid ingest token")
+    content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    is_protobuf = content_type == "application/x-protobuf"
+    try:
+        body = otlp.decompress(await request.body(), request.headers.get("content-encoding"))
+        if is_protobuf:
+            payload = otlp.protobuf_to_dict(kind, body)
+        else:
+            payload = json.loads(body or b"{}")
+            if not isinstance(payload, dict):
+                raise otlp.OTLPDecodeError("JSON body must be an object")
+    except (otlp.OTLPDecodeError, ValueError) as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    for captured in otlp.extract_errors(kind, payload, reporting_app.local_repo_path):
+        await storage.record_error(session, captured, app_id=reporting_app.id)
+    if is_protobuf:
+        return Response(otlp.empty_protobuf_response(kind), media_type="application/x-protobuf")
+    return Response("{}", media_type="application/json")
 
 
 @app.post("/ingest/metric", status_code=status.HTTP_202_ACCEPTED)

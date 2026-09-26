@@ -1,13 +1,13 @@
-"""One-click "auto-onboarding PR": adds a small, dependency-free error-
-reporting snippet to a connected app's own repo, wired to this system's
-`/ingest/error` endpoint with that app's `ingest_token`.
+"""One-click "auto-onboarding PR": adds error capture to a connected app's repo.
 
 Deliberately not an AI-agent task (no LLM call, no worktree fix-loop): the
-integration snippet is a fixed template picked by the app's detected
-language, so this is fast, free, and 100% deterministic -- reliably wiring
-a *specific* framework's exception hook for an unknown, arbitrary repo is
-not something a template can guarantee, so the PR body says exactly where
-to call `report_error()` instead of guessing at auto-wiring.
+integration is a fixed template picked by the app's detected language, so
+this is fast, free, and 100% deterministic. Python gets a small
+dependency-free helper wired to `/ingest/error`; every other language gets
+the *official OpenTelemetry SDK* config pointing OTLP/HTTP at sentinel-pod
+(`/v1/traces`) with the app's ingest token. Reliably wiring a *specific*
+framework's exception hook for an unknown repo is not something a template
+can guarantee, so the PR body says what to call instead of guessing.
 """
 
 from __future__ import annotations
@@ -21,9 +21,12 @@ from mcp_server.github_client import GitHubClient
 ONBOARDING_BRANCH_PREFIX = "selfheal-onboarding"
 
 
+def _base_url() -> str:
+    return (settings.public_url or "http://localhost:8002").rstrip("/")
+
+
 def _ingest_url(app: MonitoredApp) -> str:
-    base = settings.public_url or "http://localhost:8002"
-    return f"{base.rstrip('/')}/ingest/error"
+    return f"{_base_url()}/ingest/error"
 
 
 _PYTHON_SNIPPET = '''"""Error reporting for the AI self-healing system.
@@ -65,37 +68,148 @@ def report_error(exc: BaseException) -> None:
         pass
 '''
 
-_NODE_SNIPPET = """// Error reporting for the AI self-healing system.
-//
-// Call reportError(err) from a catch block (or a framework-level error
-// handler) to send an unhandled exception here for automatic detection and
-// AI-assisted fixing. Never throws itself -- a reporting failure must never
-// break the app it's monitoring.
+# Placeholders are __ENDPOINT__, __TOKEN__, __SERVICE__ (not str.format:
+# these files are full of braces).
+_OTEL_TEMPLATES: dict[str, tuple[str, str]] = {
+    "javascript": (
+        "selfheal_otel.js",
+        """// OpenTelemetry setup for the AI self-healing system.
+// Load first:  node -r ./selfheal_otel.js app.js
+// npm i @opentelemetry/sdk-node @opentelemetry/exporter-trace-otlp-http @opentelemetry/api
+const { NodeSDK } = require("@opentelemetry/sdk-node");
+const { OTLPTraceExporter } = require("@opentelemetry/exporter-trace-otlp-http");
+const { trace } = require("@opentelemetry/api");
 
-const INGEST_URL = "{ingest_url}";
-const INGEST_TOKEN = "{ingest_token}";
+const sdk = new NodeSDK({
+  serviceName: "__SERVICE__",
+  traceExporter: new OTLPTraceExporter({
+    url: "__ENDPOINT__/v1/traces",
+    headers: { Authorization: "Bearer __TOKEN__" },
+  }),
+});
+sdk.start();
 
-async function reportError(err) {{
-  try {{
-    await fetch(INGEST_URL, {{
-      method: "POST",
-      headers: {{
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${{INGEST_TOKEN}}`,
-      }},
-      body: JSON.stringify({{
-        exception_type: err && err.name ? err.name : "Error",
-        message: err && err.message ? err.message : String(err),
-        traceback: err && err.stack ? err.stack : "",
-      }}),
-    }});
-  }} catch (_) {{
-    // never let monitoring break the app it's monitoring
-  }}
-}}
+// Call from your error-handling middleware / catch blocks.
+function recordError(err) {
+  const span = trace.getTracer("selfheal").startSpan("unhandled-error");
+  span.recordException(err);
+  span.end();
+}
+module.exports = { recordError };
+""",
+    ),
+    "go": (
+        "selfheal_otel.go",
+        """package main
 
-module.exports = {{ reportError }};
-"""
+// OpenTelemetry setup for the AI self-healing system.
+// go get go.opentelemetry.io/otel go.opentelemetry.io/otel/sdk \\
+//   go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp
+
+import (
+	"context"
+	"runtime/debug"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
+)
+
+// InitTelemetry wires the exporter; defer the returned func in main().
+func InitTelemetry(ctx context.Context) (func(context.Context) error, error) {
+	exp, err := otlptracehttp.New(ctx,
+		otlptracehttp.WithEndpointURL("__ENDPOINT__/v1/traces"),
+		otlptracehttp.WithHeaders(map[string]string{"Authorization": "Bearer __TOKEN__"}))
+	if err != nil {
+		return nil, err
+	}
+	res := resource.NewSchemaless(attribute.String("service.name", "__SERVICE__"))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exp), sdktrace.WithResource(res))
+	otel.SetTracerProvider(tp)
+	return tp.Shutdown, nil
+}
+
+// RecordError reports err with its stack (Go errors carry none by default).
+func RecordError(ctx context.Context, err error) {
+	_, span := otel.Tracer("selfheal").Start(ctx, "unhandled-error")
+	span.RecordError(err, trace.WithAttributes(
+		attribute.String("exception.stacktrace", string(debug.Stack()))))
+	span.End()
+}
+""",
+    ),
+    "java": (
+        "selfheal-otel.properties",
+        """# OpenTelemetry Java agent config for the AI self-healing system.
+# Run:  java -javaagent:opentelemetry-javaagent.jar \\
+#            -Dotel.javaagent.configuration-file=selfheal-otel.properties -jar app.jar
+otel.service.name=__SERVICE__
+otel.exporter.otlp.protocol=http/protobuf
+otel.exporter.otlp.endpoint=__ENDPOINT__
+otel.exporter.otlp.headers=Authorization=Bearer __TOKEN__
+otel.metrics.exporter=none
+""",
+    ),
+    "csharp": (
+        "SelfHealOtel.cs",
+        """// OpenTelemetry setup for the AI self-healing system.
+// dotnet add package OpenTelemetry.Extensions.Hosting
+// dotnet add package OpenTelemetry.Exporter.OpenTelemetryProtocol
+// dotnet add package OpenTelemetry.Instrumentation.AspNetCore
+using OpenTelemetry.Exporter;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
+
+public static class SelfHealOtel
+{
+    // builder.Services.AddOpenTelemetry().WithTracing(SelfHealOtel.Configure);
+    public static void Configure(TracerProviderBuilder b) => b
+        .ConfigureResource(r => r.AddService("__SERVICE__"))
+        .AddAspNetCoreInstrumentation(o => o.RecordException = true)
+        .AddOtlpExporter(o =>
+        {
+            o.Endpoint = new System.Uri("__ENDPOINT__/v1/traces");
+            o.Protocol = OtlpExportProtocol.HttpProtobuf;
+            o.Headers = "Authorization=Bearer __TOKEN__";
+        });
+}
+""",
+    ),
+    "php": (
+        "selfheal_otel.php",
+        """<?php
+// OpenTelemetry setup for the AI self-healing system.
+// composer require open-telemetry/sdk open-telemetry/exporter-otlp
+// Require this file first, or export the same values as env vars.
+putenv('OTEL_SERVICE_NAME=__SERVICE__');
+putenv('OTEL_TRACES_EXPORTER=otlp');
+putenv('OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf');
+putenv('OTEL_EXPORTER_OTLP_ENDPOINT=__ENDPOINT__');
+putenv('OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer __TOKEN__');
+putenv('OTEL_PHP_AUTOLOAD_ENABLED=true');
+""",
+    ),
+    "ruby": (
+        "selfheal_otel.rb",
+        """# OpenTelemetry setup for the AI self-healing system.
+# bundle add opentelemetry-sdk opentelemetry-exporter-otlp opentelemetry-instrumentation-all
+# require_relative "selfheal_otel" before your app boots.
+require "opentelemetry/sdk"
+require "opentelemetry/exporter/otlp"
+require "opentelemetry/instrumentation/all"
+
+ENV["OTEL_EXPORTER_OTLP_ENDPOINT"] = "__ENDPOINT__"
+ENV["OTEL_EXPORTER_OTLP_HEADERS"] = "Authorization=Bearer __TOKEN__"
+OpenTelemetry::SDK.configure do |c|
+  c.service_name = "__SERVICE__"
+  c.use_all
+end
+""",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -105,27 +219,40 @@ class OnboardingFile:
 
 
 def build_onboarding_file(app: MonitoredApp) -> OnboardingFile:
-    ingest_url = _ingest_url(app)
-    if app.language == "javascript":
-        content = _NODE_SNIPPET.format(ingest_url=ingest_url, ingest_token=app.ingest_token)
-        return OnboardingFile(path="selfheal_error_reporter.js", content=content)
-    # Default to the Python template for "python" and "unknown" -- a
-    # dependency-free urllib snippet works wherever Python runs.
-    content = _PYTHON_SNIPPET.format(ingest_url=ingest_url, ingest_token=app.ingest_token)
+    if app.language in _OTEL_TEMPLATES:
+        path, template = _OTEL_TEMPLATES[app.language]
+        content = (
+            template.replace("__ENDPOINT__", _base_url())
+            .replace("__TOKEN__", app.ingest_token)
+            .replace("__SERVICE__", app.name)
+        )
+        return OnboardingFile(path=path, content=content)
+    # Python (and "unknown") keeps the dependency-free urllib middleware snippet.
+    content = _PYTHON_SNIPPET.format(ingest_url=_ingest_url(app), ingest_token=app.ingest_token)
     return OnboardingFile(path="selfheal_error_reporter.py", content=content)
 
 
 def build_onboarding_pr_body(app: MonitoredApp, onboarding_file: OnboardingFile) -> str:
-    call_example = "report_error(exc)" if app.language != "javascript" else "reportError(err)"
+    footer = '_Opened automatically by the AI self-healing system\'s "connect a repo" flow._'
+    if app.language in _OTEL_TEMPLATES:
+        return (
+            f"Adds `{onboarding_file.path}`, the official OpenTelemetry SDK setup for "
+            f"{app.language}, exporting traces over OTLP/HTTP to the AI self-healing "
+            "system with this app's ingest token.\n\n"
+            "## Next step (not done automatically)\n"
+            "Load/initialise it at app start (see the comments in the file) and make sure "
+            "unhandled exceptions are recorded on a span (`recordException` / "
+            "`RecordError`; the Java agent and ASP.NET Core instrumentation do this "
+            f"automatically) so they reach the system.\n\n{footer}"
+        )
     return (
         f"Adds `{onboarding_file.path}`, a small dependency-free helper that reports an "
         "unhandled exception to the AI self-healing system for automatic detection and "
         "AI-assisted fixing.\n\n"
         "## Next step (not done automatically)\n"
-        f"Call `{call_example}` from this app's top-level exception handler / error "
+        "Call `report_error(exc)` from this app's top-level exception handler / error "
         "middleware (e.g. a `try`/`except` around the request handler, or your "
-        "framework's error hook) so runtime errors reach it.\n\n"
-        '_Opened automatically by the AI self-healing system\'s "connect a repo" flow._'
+        f"framework's error hook) so runtime errors reach it.\n\n{footer}"
     )
 
 

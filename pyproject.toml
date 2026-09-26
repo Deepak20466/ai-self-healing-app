@@ -16,6 +16,7 @@ dependencies = [
   "alembic>=1.13,<2.0",
   "mcp>=2.0,<3.0",
   "httpx>=0.27,<1.0",
+  "opentelemetry-proto>=1.25",
   "argon2-cffi>=23.1,<24.0",
   "itsdangerous>=2.2,<3.0",
   "structlog>=24.4",
@@ -123,6 +124,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "argon2.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "google.protobuf.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

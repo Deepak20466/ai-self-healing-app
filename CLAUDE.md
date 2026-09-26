@@ -1980,3 +1980,24 @@ documented pre-existing flakes (Windows ProactorEventLoop teardown,
 
 ### 2026-09-26 — real-Chrome UI test pass + screenshots
 Drove the UI with Playwright (channel="chrome", headed) on localhost and a Cloudflare tunnel; all login/dashboard/chat/rollback-confirmation/metrics/apps/sign-out checks passed. Fixed: `start_public_demo.ps1`'s argon2 check failed on the quoted hash in `.env` (double-quoted PS regex swallowed `$argon2id`); index.html had no favicon (console 404). Screenshots in `docs/images/`. Open items: healer-pod never reconnects to mcp-pod after an mcp-pod restart (500s until healer restart); on quick tunnels use `cloudflared --protocol http2` if QUIC fails; headed Chrome may crash renderer tabs on Windows (use a fresh browser per section). verify_all: 69 PASS / 1 FAIL (RAM) / 9 SKIPPED.
+
+### Any-language support (OpenTelemetry roadmap) — IN PROGRESS
+
+**Step 1 — live error capture for any language: DONE.**
+- `sentinel/otlp.py` + `POST /v1/traces` / `/v1/logs` in `sentinel/app.py`:
+  OTLP/HTTP, JSON or protobuf (`opentelemetry-proto`; protobuf is converted
+  with `MessageToDict` so parsing exists once), optional gzip. Unlike
+  `/ingest/error`, the app's bearer ingest token is **required** (401),
+  since it's the only link from an exporter to a registered app. Reads
+  span events named `exception` and log records with `exception.*` attrs;
+  `code.filepath/lineno` are only a fallback when there's no parseable trace.
+- `sentinel/stacktrace.py`: parsers for Python/JS/Java/Go/C#/PHP/Ruby
+  (frames innermost-first), library/vendor frame filtering, language from
+  `telemetry.sdk.language` or auto-detected from trace shape. Same
+  `fingerprint_error` as before.
+- `healer/onboarding.py`: Python keeps the urllib helper; every other
+  language gets the official OTel SDK config (`selfheal_otel.{js,go,rb,php}`,
+  `SelfHealOtel.cs`, `selfheal-otel.properties`) pointing at `/v1/traces`.
+- Tests: `tests/test_sentinel_otlp.py`, `tests/test_healer_onboarding.py`.
+- Heredocs containing quotes/backticks break this environment's Bash tool —
+  write files with the Write tool instead.
