@@ -2037,3 +2037,17 @@ example apps; JS/Go anti-cheat outside unit tests. When running verify_all
 locally, start the healer with `AI_BACKEND=api ANTHROPIC_API_KEY=invalid
 ANTHROPIC_BASE_URL=http://127.0.0.1:9` so any claimed job fails without
 spending AI budget.
+
+### 2026-09-26 — demo video (docs/demo.mp4, docs/demo.gif)
+`scripts/record_demo.py <out> all|gh|ui [pr]` records headless Playwright takes
+(1440x900, dark, in-page caption overlay, password only from
+VERIFY_ADMIN_PASSWORD); `scripts/build_demo.py <main> <gh> <ui>` joins them
+with ffmpeg (from `imageio-ffmpeg`; winget's ffmpeg install failed) and speeds
+up the AI wait. **GitHub pages crash headless Chromium on this machine unless
+launched with `--js-flags=--jitless`** (that killed the first take, hence the
+separate gh/ui takes). One real free-mode heal ran for `/trigger/none_lookup`
+-> PR #15 (job 355). Prep notes: closed PRs leave their heal_jobs `pr_opened`
+(marked job 330 failed so the bug could re-enqueue), and a re-enqueue needs
+occurrence_count % 5 == 0; start sentinel with CONTRACT_PROBE_INTERVAL_SECONDS
+huge and before the app so the prober can't enqueue extra (AI-spending) jobs.
+

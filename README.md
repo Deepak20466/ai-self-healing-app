@@ -1,5 +1,13 @@
 # AI-Powered Self-Healing Application
 
+[![Demo: an AI-fixed bug, an OpenTelemetry Go error, chat and metrics](docs/demo.gif)](docs/demo.mp4)
+
+*A ~2 minute silent walkthrough ([docs/demo.mp4](docs/demo.mp4)), recorded headless
+against the live system: a seeded Python bug detected and fixed by the AI into a
+real PR (waiting part sped up), the AI's CI-fix on PR #14, a Go error captured
+over OpenTelemetry with its health report, chat, and metrics. Regenerate with
+`scripts/record_demo.py` + `scripts/build_demo.py`.*
+
 A self-healing application with an MCP server: it detects runtime errors,
 silent wrong-output bugs and CI/CD failures, root-causes them with Claude
 through an MCP server, generates a fix plus a regression test, and opens a
