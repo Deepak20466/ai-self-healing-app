@@ -45,7 +45,8 @@ driving Chrome, after logging in as the admin.
 *Login page.*
 
 Real proof this system works end to end, from the AI itself, not staged
-screenshots:
+screenshots (three real AI fixes: PR #10 and PR #15 merged; PR #14 was a
+deliberately broken demo PR, closed after the AI's fix turned its CI green):
 
 - [**PR #10**](https://github.com/Deepak20466/ai-self-healing-app/pull/10) —
   a real runtime bug (a silent timezone contract violation) diagnosed and
@@ -56,6 +57,14 @@ screenshots:
   a real broken CI run, classified as a genuine failure (not flaky) and
   fixed forward on the PR's own branch by the healer's CI-fix agent, with
   CI going green automatically on the fix commit.
+- [**PR #15**](https://github.com/Deepak20466/ai-self-healing-app/pull/15) —
+  a third real AI fix, merged: a runtime `AttributeError` (a missing item looked up
+  without a guard, the demo's `/trigger/none_lookup` bug) diagnosed and fixed
+  by the healer in free mode, with a regression test and a handled 404 instead
+  of a 500. CI on the PR and on `main` after the merge is green (see
+  [docs/benchmark.md](docs/benchmark.md) for how the healer's pre-PR checks
+  were tightened after this PR first failed CI on demo tests that pinned the
+  bug).
 
 ## Architecture
 
