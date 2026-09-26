@@ -6,6 +6,7 @@ scan confined to its own `connected_apps/<name>/` directory.
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -229,7 +230,11 @@ async def test_run_scan_isolates_a_real_python_app_in_its_own_venv(tmp_path, mon
 
     try:
         assert summary.tests_passed is True
-        venv_python = app_dir / ".selfheal_venv" / "Scripts" / "python.exe"
+        venv_python = (
+            app_dir / ".selfheal_venv" / "Scripts" / "python.exe"
+            if sys.platform == "win32"
+            else app_dir / ".selfheal_venv" / "bin" / "python"
+        )
         assert venv_python.exists()
     finally:
         async with session_scope() as session:

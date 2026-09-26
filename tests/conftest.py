@@ -176,16 +176,20 @@ def pytest_sessionstart(session: object) -> None:
 
     from scripts.seed_demo import seed
 
-    asyncio.run(seed())
-
-    async def _sync_apps() -> None:
-        from core.db import session_scope
+    async def _seed_all() -> None:
+        from core.db import dispose_engine, session_scope
         from core.monitored_apps import sync_monitored_apps
 
-        async with session_scope() as db_session:
-            await sync_monitored_apps(db_session)
+        try:
+            await seed()
+            async with session_scope() as db_session:
+                await sync_monitored_apps(db_session)
+        finally:
+            # Pooled asyncpg connections are bound to this throwaway loop;
+            # drop them so the session-scoped test loop never inherits one.
+            await dispose_engine()
 
-    asyncio.run(_sync_apps())
+    asyncio.run(_seed_all())
 
 
 @pytest_asyncio.fixture
