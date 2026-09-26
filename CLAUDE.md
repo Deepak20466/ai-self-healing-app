@@ -2073,3 +2073,22 @@ huge and before the app so the prober can't enqueue extra (AI-spending) jobs.
 - Demo video re-spliced (`build_demo.py ... <patch_dir>`); screenshots
   dashboard.png/metrics.png retaken by `record_demo.py ... patch`.
 
+
+### 2026-09-26 — full-suite gate, fix-tolerant demo tests, AI success rate
+- `healer/full_suite.py`: after the targeted regression test passes, every
+  backend (free/codex/gemini via `agent_free._verify_and_summarize`, API via
+  `runtime_agent._run_one_attempt`) runs the app's FULL suite (`run_tests`
+  with no `test_path`, 900s timeout; non-Python apps run their `test_command`).
+  Failing suite = failed attempt (normal retry); the output ("Full test suite:
+  PASSED/FAILED" + tail) goes into `test_output`, hence the PR body. CI-fix
+  jobs are unchanged (CI itself is the full suite). `tests/conftest.py` has an
+  autouse `stub_full_suite` so e2e tests don't spawn a nested full-repo pytest;
+  `tests/test_healer_full_suite.py` restores the real function.
+- Demo bug tests (`test_sentinel_capture_integration.py`,
+  `test_target_app_routes.py`, `test_target_app_bugs.py` bug #4) pass whether
+  the seeded bug is present or fixed (capture tests skip once fixed). Real
+  correctness tests untouched. PR #15 rebased on this; its own diff is the fix
+  + regression test only.
+- Metrics: `ai_fix_success_rate` (headline: success among jobs with >=1
+  `fix_attempts` row, so breaker/duplicate/budget/refusal jobs are excluded)
+  and `fix_success_rate` (all-time, secondary, tooltip in the UI). Live: 44% vs 9%.

@@ -258,13 +258,13 @@ async def main(out_dir: Path, bug: str, part: str, pr: int = 0) -> int:
             r.mark("s7")
             await r.open_tab(
                 "Metrics",
-                "Metrics: fix success rate (PR opened with passing tests), detection-to-PR time, cost per fix",
+                "Metrics: AI fix success rate (jobs where the AI attempted a fix), all-time rate, detection-to-PR time",
             )
             await r.wait(2)
             await page.evaluate("document.getElementById('__cap')?.remove()")
             await page.screenshot(path=str(ROOT / "docs/images/metrics.png"))
             await r.cap(
-                "Metrics: fix success rate (PR opened with passing tests), detection-to-PR time, cost per fix"
+                "Metrics: AI fix success rate (jobs where the AI attempted a fix), all-time rate, detection-to-PR time"
             )
             await r.wait(4)
             await page.mouse.wheel(0, 500)
