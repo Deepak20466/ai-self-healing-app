@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from pathlib import Path
+
+import pytest
 
 from healer.worktree import (
     branch_name_for,
@@ -200,3 +203,37 @@ async def test_create_worktree_for_connected_app_clones_from_a_local_source_dir(
         # Windows a just-exited git process can briefly hold a file handle
         # open, so this doesn't assert the directory is gone immediately.
         await remove_plain_clone(name)
+
+
+async def test_commit_and_push_retries_a_timed_out_push_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from healer import worktree
+
+    calls: list[tuple[str, float | None]] = []
+
+    async def fake_run_git(args: list[str], *, cwd: Path, timeout_s: float | None = None) -> None:
+        calls.append((args[0], timeout_s))
+        if args[0] == "push" and sum(1 for c, _ in calls if c == "push") == 1:
+            raise worktree.WorktreeError("git push timed out")
+
+    monkeypatch.setattr(worktree, "_run_git", fake_run_git)
+    await worktree.commit_and_push(tmp_path, "autofix/x", message="m")
+
+    pushes = [t for c, t in calls if c == "push"]
+    assert pushes == [worktree.PUSH_TIMEOUT_SECONDS, worktree.PUSH_TIMEOUT_SECONDS]
+    assert worktree.PUSH_TIMEOUT_SECONDS == 120.0
+
+
+async def test_commit_and_push_gives_up_after_one_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from healer import worktree
+
+    async def always_fail(args: list[str], *, cwd: Path, timeout_s: float | None = None) -> None:
+        if args[0] == "push":
+            raise worktree.WorktreeError("git push timed out")
+
+    monkeypatch.setattr(worktree, "_run_git", always_fail)
+    with pytest.raises(worktree.WorktreeError):
+        await worktree.commit_and_push(tmp_path, "autofix/x", message="m")

@@ -112,6 +112,10 @@ function Metrics() {
         <${Stat} label="AI fix success rate (jobs where the AI attempted a fix)" value=${pct(data.ai_fix_success_rate)} />
         <${Stat} label="All-time success rate (incl. blocked jobs)" value=${pct(data.fix_success_rate)}
           hint="Counts every job with a final outcome, including ones blocked before any AI attempt (circuit breaker, duplicate/in-flight, budget, refusal). The AI rate above excludes those, so it measures only how well the AI fixes what it actually tries." />
+        <${Stat}
+          label=${data.benchmark_clean_run ? `Benchmark (clean run, ${data.benchmark_clean_run.date})` : "Benchmark (clean run)"}
+          value=${data.benchmark_clean_run ? `${data.benchmark_clean_run.fixed}/${data.benchmark_clean_run.total} bugs fixed` : "—"}
+          hint="One deliberate run against freshly reset seeded bugs (scripts/benchmark.py). Separate from the rolling all-time and attempted rates." />
         <${Stat} label="Verified in production" value=${data.verified_in_production_label ?? "n/a (no production deploy)"} />
         <${Stat} label="CI auto-fix rate" value=${data.ci_auto_fix_rate ?? "—"} />
         <${Stat} label="Contract catches" value=${data.contract_violation_catches ?? 0} />

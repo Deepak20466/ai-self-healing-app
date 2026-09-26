@@ -16,6 +16,7 @@ from pathlib import Path
 
 from mcp_server.sandbox import REPO_ROOT, WORKTREES_ROOT
 
+PUSH_TIMEOUT_SECONDS = 120.0
 GIT_TIMEOUT_SECONDS = 30.0
 
 
@@ -23,7 +24,7 @@ class WorktreeError(Exception):
     """Raised when creating, resetting, or removing a git worktree fails."""
 
 
-async def _run_git(args: list[str], *, cwd: Path) -> None:
+async def _run_git(args: list[str], *, cwd: Path, timeout_s: float | None = None) -> None:
     process = await asyncio.create_subprocess_exec(
         "git",
         *args,
@@ -32,7 +33,9 @@ async def _run_git(args: list[str], *, cwd: Path) -> None:
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        _, stderr = await asyncio.wait_for(process.communicate(), timeout=GIT_TIMEOUT_SECONDS)
+        _, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=timeout_s or GIT_TIMEOUT_SECONDS
+        )
     except TimeoutError as exc:
         process.kill()
         await process.wait()
@@ -116,7 +119,13 @@ async def commit_and_push(path: Path, branch: str, *, message: str, remote: str 
     """
     await _run_git(["add", "-A"], cwd=path)
     await _run_git(["commit", "-m", message], cwd=path)
-    await _run_git(["push", "-u", remote, branch], cwd=path)
+    # A push crosses the network: a 30s cap killed a fully verified fix in the
+    # first clean benchmark, so allow 120s and retry once (a re-push of the
+    # same commit is idempotent).
+    try:
+        await _run_git(["push", "-u", remote, branch], cwd=path, timeout_s=PUSH_TIMEOUT_SECONDS)
+    except WorktreeError:
+        await _run_git(["push", "-u", remote, branch], cwd=path, timeout_s=PUSH_TIMEOUT_SECONDS)
 
 
 async def _run_git_best_effort(args: list[str], *, cwd: Path) -> None:

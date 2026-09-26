@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -310,3 +311,12 @@ async def test_summary_exposes_both_success_rates(db_session: AsyncSession) -> N
     summary = await metrics.get_metrics_summary(db_session, daily_budget_usd=2.0)
     assert summary.ai_fix_success_rate is not None
     assert summary.fix_success_rate is not None
+
+
+def test_load_latest_benchmark_reads_the_clean_run_file(tmp_path: Path) -> None:
+    f = tmp_path / "b.json"
+    f.write_text('{"date": "2026-09-26", "fixed": 2, "total": 3}')
+    assert metrics.load_latest_benchmark(f) == {"date": "2026-09-26", "fixed": 2, "total": 3}
+    assert metrics.load_latest_benchmark(tmp_path / "missing.json") is None
+    f.write_text("not json")
+    assert metrics.load_latest_benchmark(f) is None

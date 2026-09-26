@@ -26,6 +26,7 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -87,6 +88,9 @@ class BenchmarkResult:
     wall_clock_seconds: float | None
     pr_url: str | None
     notes: str
+    time_to_pr_seconds: float | None = None
+    full_suite: str = 'n/a'
+    cost_usd: float = 0.0
 
 
 async def _healthz(client: httpx.AsyncClient, url: str) -> bool:
@@ -193,7 +197,11 @@ async def trigger_bug(bug: str) -> tuple[str, float]:
     return datetime.now(UTC).isoformat(), time.monotonic()
 
 
-async def find_heal_job(function_name: str, after_monotonic: float) -> HealJob | None:
+def bug_name_for(function_name: str) -> str:
+    return next(b for b, f in BUG_FUNCTION_NAMES.items() if f == function_name)
+
+
+async def find_heal_job(function_name: str, after: datetime) -> HealJob | None:
     """Finds the heal_job for this bug's error, created after the trigger.
 
     Looks up by the Error row's function_name (same pattern verify_all.py
@@ -202,8 +210,14 @@ async def find_heal_job(function_name: str, after_monotonic: float) -> HealJob |
     """
     from core.models import Error
 
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 90
+    last_trigger = time.monotonic()
     while time.monotonic() < deadline:
+        # Enqueue happens on the 1st occurrence then every Nth (CLAUDE.md), so a
+        # bug seen many times before needs a few more triggers to enqueue anew.
+        if time.monotonic() - last_trigger > 3:
+            await trigger_bug(bug_name_for(function_name))
+            last_trigger = time.monotonic()
         async with session_scope() as session:
             err_stmt = (
                 select(Error)
@@ -215,7 +229,7 @@ async def find_heal_job(function_name: str, after_monotonic: float) -> HealJob |
             if err is not None:
                 job_stmt = (
                     select(HealJob)
-                    .where(HealJob.fingerprint == err.fingerprint)
+                    .where(HealJob.fingerprint == err.fingerprint, HealJob.created_at >= after)
                     .order_by(HealJob.created_at.desc())
                     .limit(1)
                 )
@@ -266,6 +280,48 @@ async def cli_stats_for_job(heal_job_id: int) -> tuple[int, int]:
         return len(rows), turns
 
 
+async def suite_and_cost(heal_job_id: int) -> tuple[str, float]:
+    """Full-suite verdict of the last attempt (from its stored evidence) and total cost."""
+    from core.models import FixAttempt
+
+    async with session_scope() as session:
+        attempts = (
+            (
+                await session.execute(
+                    select(FixAttempt)
+                    .where(FixAttempt.heal_job_id == heal_job_id)
+                    .order_by(FixAttempt.attempt_number)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        cli_rows = (
+            (
+                await session.execute(
+                    select(AuditLog).where(
+                        AuditLog.action == "cli_invocation", AuditLog.heal_job_id == heal_job_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    cost = sum(float(a.cost_usd or 0) for a in attempts)
+    for r in cli_rows:
+        c = (r.details or {}).get("total_cost_usd")
+        if c:
+            cost += float(c)
+    verdict = "n/a (never reached)"
+    for a in attempts:
+        out = a.test_output or ""
+        if "Full test suite: PASSED" in out:
+            verdict = "PASSED"
+        elif "Full test suite: FAILED" in out:
+            verdict = "FAILED"
+    return verdict, round(cost, 4)
+
+
 async def circuit_breaker_blocked(heal_job_id: int) -> bool:
     async with session_scope() as session:
         stmt = select(AuditLog).where(
@@ -293,7 +349,7 @@ async def run_one_bug(bug: str) -> BenchmarkResult:
     print(f"\n[benchmark] === triggering bug '{bug}' ===")
     triggered_at, start_monotonic = await trigger_bug(bug)
 
-    job = await find_heal_job(function_name, start_monotonic)
+    job = await find_heal_job(function_name, datetime.fromisoformat(triggered_at))
     if job is None:
         return BenchmarkResult(
             bug=bug,
@@ -321,6 +377,7 @@ async def run_one_bug(bug: str) -> BenchmarkResult:
     elapsed = time.monotonic() - start_monotonic
 
     cli_invocations, cli_turns = await cli_stats_for_job(heal_job_id)
+    full_suite, cost_usd = await suite_and_cost(heal_job_id)
     blocked = await circuit_breaker_blocked(heal_job_id)
     pr_url = await pr_url_for_job(heal_job_id)
 
@@ -345,52 +402,61 @@ async def run_one_bug(bug: str) -> BenchmarkResult:
         wall_clock_seconds=round(elapsed, 1),
         pr_url=pr_url,
         notes=notes,
+        time_to_pr_seconds=(
+            round((final_job.pr_opened_at - final_job.created_at).total_seconds(), 1)
+            if final_job.pr_opened_at
+            else None
+        ),
+        full_suite=full_suite,
+        cost_usd=cost_usd,
     )
 
 
 def write_markdown(results: list[BenchmarkResult]) -> None:
     from datetime import UTC, datetime
 
+    today = datetime.now(UTC).date().isoformat()
+    fixed = sum(1 for r in results if r.final_status == "pr_opened")
     lines = [
-        "# Benchmark: real live self-healing runs",
+        f"# Benchmark (clean run, {today})",
         "",
-        f"Generated {datetime.now(UTC).isoformat()} by `scripts/benchmark.py` against the "
-        "live running system (all 4 pods, real free-mode Claude Code CLI, real MCP tool "
-        "calls, real git worktrees). No mocking, no bypassed circuit breakers or budget "
-        "caps -- see CLAUDE.md's dated benchmark entry for the run this file records.",
+        f"**{fixed}/{len(results)} bugs fixed** (PR opened after the fix passed its regression "
+        "test AND the app's full configured test suite). Generated by `scripts/benchmark.py` "
+        "against the live system: real free-mode AI CLI, real MCP tools, real git worktrees, "
+        "no mocking, no bypassed circuit breakers or budget caps. All 7 seeded bugs were "
+        "reset first, and stale leftover jobs were marked failed (history kept). This is a "
+        "single clean run, deliberately separate from the all-time and attempted rates.",
         "",
-        "| Bug | Result | Attempts | CLI calls | CLI turns | Time to terminal | PR |",
-        "|---|---|---|---|---|---|---|",
+        "| Bug | Result | Attempts | CLI turns | Time to PR | Full suite | Cost | PR |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
-        result_word = "success (PR opened)" if r.final_status == "pr_opened" else r.final_status
+        result_word = "fixed (PR opened)" if r.final_status == "pr_opened" else r.final_status
         pr = f"[link]({r.pr_url})" if r.pr_url else "-"
-        time_str = f"{r.wall_clock_seconds:.0f}s" if r.wall_clock_seconds is not None else "-"
+        ttp = f"{r.time_to_pr_seconds / 60:.1f} min" if r.time_to_pr_seconds else "-"
         lines.append(
-            f"| `{r.bug}` | {result_word} | {r.attempt_count} | {r.cli_invocations} | "
-            f"{r.cli_turns_total} | {time_str} | {pr} |"
+            f"| `{r.bug}` | {result_word} | {r.attempt_count} | {r.cli_turns_total} | {ttp} | "
+            f"{r.full_suite} | ${r.cost_usd:.2f} | {pr} |"
+        )
+    lines += ["", "## Notes", ""]
+    for r in results:
+        lines.append(
+            f"- `{r.bug}`: heal_job {r.heal_job_id}, status `{r.final_status}`"
+            + (f" -- {r.notes}" if r.notes else "")
         )
     lines.append("")
-    lines.append("## Narrative")
-    lines.append("")
-    for r in results:
-        lines.append(f"### `{r.bug}`")
-        lines.append("")
-        lines.append(f"- heal_job id: {r.heal_job_id}")
-        lines.append(f"- fingerprint: `{r.fingerprint}`")
-        lines.append(f"- final status: `{r.final_status}`")
-        lines.append(f"- circuit breaker blocked: {r.circuit_breaker_blocked}")
-        if r.notes:
-            lines.append(f"- notes: {r.notes}")
-        lines.append("")
 
     out = REPO_ROOT / "docs" / "benchmark.md"
     out.parent.mkdir(exist_ok=True)
-    out.write_text("\n".join(lines), encoding="utf-8")
+    out.write_text(chr(10).join(lines), encoding="utf-8")
     print(f"[benchmark] wrote {out}")
 
     (REPO_ROOT / "benchmark_results.json").write_text(
         json.dumps([asdict(r) for r in results], indent=2), encoding="utf-8"
+    )
+    # Read by core/metrics.py for the Metrics page (committed, tiny).
+    (REPO_ROOT / "docs" / "benchmark_latest.json").write_text(
+        json.dumps({"date": today, "fixed": fixed, "total": len(results)}), encoding="utf-8"
     )
 
 
@@ -414,8 +480,8 @@ async def main() -> int:
         if b not in BUG_FUNCTION_NAMES:
             print(f"unknown bug '{b}'; choices: {list(BUG_FUNCTION_NAMES)}", file=sys.stderr)
             return 2
-    if len(bugs) > 2:
-        print("benchmark.py runs at most 2 bugs per invocation by design", file=sys.stderr)
+    if len(bugs) > 3:
+        print("benchmark.py runs at most 3 bugs per invocation by design", file=sys.stderr)
         return 2
 
     started: list[subprocess.Popen[bytes]] = []

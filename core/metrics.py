@@ -6,8 +6,10 @@ shown.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 from pydantic import BaseModel
 from sqlalchemy import ColumnElement, func, select
@@ -48,6 +50,22 @@ class ErrorsByTypePoint(BaseModel):
     count: int
 
 
+BENCHMARK_FILE = Path(__file__).resolve().parent.parent / "docs" / "benchmark_latest.json"
+
+
+def load_latest_benchmark(path: Path | None = None) -> dict[str, object] | None:
+    """The last clean benchmark run (`scripts/benchmark.py` writes this file).
+
+    Kept apart from the all-time/attempted rates on purpose: it is one
+    deliberate run against freshly reset bugs, not a rolling statistic.
+    """
+    try:
+        data = json.loads((path or BENCHMARK_FILE).read_text(encoding="utf-8"))
+        return {"date": str(data["date"]), "fixed": int(data["fixed"]), "total": int(data["total"])}
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 class MetricsSummary(BaseModel):
     mttr_minutes: float | None
     #: headline: success among jobs where the AI attempted a fix
@@ -57,6 +75,8 @@ class MetricsSummary(BaseModel):
     #: stricter metric: verified healthy in production (needs a real deploy)
     verified_in_production_rate: float | None
     verified_in_production_label: str
+    #: last clean benchmark run: {date, fixed, total} or None (separate metric)
+    benchmark_clean_run: dict[str, object] | None = None
     ci_auto_fix_rate: float | None
     contract_violation_catches: int
     rollback_count: int
@@ -235,6 +255,7 @@ async def get_metrics_summary(session: AsyncSession, *, daily_budget_usd: float)
         fix_success_rate=success_rate,
         ci_auto_fix_rate=ci_rate,
         verified_in_production_rate=verified_rate,
+        benchmark_clean_run=load_latest_benchmark(),
         verified_in_production_label=(
             NO_PROD_DEPLOY_LABEL if verified_rate is None else f"{verified_rate:.0%}"
         ),
