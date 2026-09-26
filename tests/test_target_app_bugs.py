@@ -6,6 +6,7 @@ from datetime import date
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,7 +42,9 @@ async def test_bug3_off_by_one_top_items_returns_wrong_slice(db_session: AsyncSe
 
 
 async def test_bug4_attribute_error_on_missing_item(db_session: AsyncSession) -> None:
-    with pytest.raises(AttributeError):
+    """Demo bug #4: passes while the bug is present (AttributeError) and once a
+    fix turns it into a handled 404; only "returns a label" would be wrong."""
+    with pytest.raises((AttributeError, HTTPException)):
         await bugs.item_label(db_session, seed_data.MISSING_ITEM_ID)
 
 
