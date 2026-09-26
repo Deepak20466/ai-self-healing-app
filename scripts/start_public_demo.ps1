@@ -26,7 +26,7 @@ if (-not (Test-Path ".demo_logs")) { New-Item -ItemType Directory -Path ".demo_l
 
 function Test-EnvLooksReal {
     $envFile = Get-Content ".env" -Raw
-    if ($envFile -notmatch "ADMIN_PASSWORD_HASH=\$argon2id\$") {
+    if ($envFile -notmatch 'ADMIN_PASSWORD_HASH=[''"]?\$argon2id\$') {
         throw "ADMIN_PASSWORD_HASH is missing or not a real argon2 hash. Run scripts/hash_password.py first."
     }
     if ($envFile -match "SESSION_SECRET=\s*$" -or $envFile -notmatch "SESSION_SECRET=.+") {

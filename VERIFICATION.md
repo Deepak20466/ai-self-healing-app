@@ -1,11 +1,11 @@
 # Verification
 
 Run by `scripts/verify_all.py` against the live local system (4 pods running,
-real Postgres, real GitHub) plus the pytest suite (358 tests) and CI on `main` (green).
+real Postgres, real GitHub) plus the pytest suite (359 tests) and CI on `main` (green).
 No real AI heal runs were made: the healer was started with its CLI disabled so
 the seeded-bug jobs could not invoke Claude.
 
-Last run: 2026-09-26 — 52 PASS, 0 real FAIL (RAM budget is the one known miss, listed below), the rest skipped for the reasons below.
+Last run: 2026-09-26 (with a real Chrome UI pass on localhost and a Cloudflare tunnel) — 69 PASS, 1 FAIL (RAM budget, known, listed below), 9 skipped for the reasons below. Live UI checks: login/wrong password, dashboard, chat (incl. rollback needs "yes"), metrics, apps, sign-out — all passed on both URLs.
 
 ## ✅ Works (verified live)
 
@@ -47,5 +47,11 @@ Last run: 2026-09-26 — 52 PASS, 0 real FAIL (RAM budget is the one known miss,
 |---|---|
 | OpenTelemetry / any-language support (OTLP ingest, JS/Java/Go/C#/PHP/Ruby trace parsing, per-language anti-cheat, Node and Go example apps) | Roadmap. Only Python, Flask, Django middleware exist |
 | CI-fix for connected external repos | Runtime-fix only |
-| Idle RAM under 300 MB | Not met: ~474 MB measured on Windows; not measured on Linux |
+| Idle RAM under 300 MB | Not met: ~360 MB measured on Windows this run (up to ~480 MB earlier); not measured on Linux |
 | Dashboard/chat/metrics screenshots | Only the login page is captured (see README) |
+
+## Notes from the 2026-09-26 UI pass
+
+- Headed Chrome via Playwright on this Windows box sometimes crashes the renderer tab (seen on the Dashboard after ~10s idle). Not reproducible with mocked data, not in headless mode, and not app-specific; tests were run with a fresh browser per section.
+- Known gap (not fixed): healer-pod opens its MCP connection once at startup and never reconnects, so restarting mcp-pod makes chat and the dashboard return 500 until healer-pod is restarted.
+- This machine has a broken 32-bit Git (`C:\Program Files (x86)\Git`, "BUG (fork bomb)") first on PowerShell's PATH; pods started from PowerShell inherit it and the git-based MCP tools fail until a working Git is first on PATH.

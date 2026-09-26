@@ -135,3 +135,12 @@ async def test_new_chat_session_and_history(app_client: httpx.AsyncClient) -> No
         history_resp = await client.get("/api/chat/history", params={"session_id": session_id})
         assert history_resp.status_code == 200
         assert history_resp.json() == []
+
+
+async def test_index_declares_a_favicon_so_browsers_dont_request_a_404(
+    app_client: httpx.AsyncClient,
+) -> None:
+    async with app_client as client:
+        resp = await client.get("/")
+    assert resp.status_code == 200
+    assert 'rel="icon"' in resp.text

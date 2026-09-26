@@ -13,15 +13,28 @@ way, and conventions for resuming work.
 
 ## Screenshots
 
-<img src="docs/images/login.png" alt="Self-Healing Console login page" width="500">
+Captured from a real running system (dark mode, desktop width) with Playwright
+driving Chrome, after logging in as the admin.
 
-The healer-pod login page (`http://localhost:8000/`), captured headless via
-Playwright against a real locally-running pod. The dashboard, AI chat, and
-metrics pages are gated behind this login and aren't shown here — this
-repo's `ADMIN_PASSWORD_HASH` is a one-way argon2 hash with no recorded
-plaintext, and capturing those pages would have meant setting a new
-password or otherwise weakening auth just for a screenshot, which this
-project's own guardrails (see CLAUDE.md) explicitly refuse to do.
+<img src="docs/images/dashboard.png" alt="Dashboard: pod health and open errors" width="720">
+
+*Dashboard: live pod health, open errors and pipeline runs.*
+
+<img src="docs/images/chat.png" alt="AI chat asking for confirmation before a rollback" width="720">
+
+*AI chat: answers from live tool data; a rollback asks for "yes" and is cancelled when declined.*
+
+<img src="docs/images/metrics.png" alt="Metrics page" width="720">
+
+*Metrics: MTTR, fix success rate, CI auto-fix rate, contract catches, spend vs. budget.*
+
+<img src="docs/images/apps.png" alt="Apps page listing connected apps" width="720">
+
+*Apps: connected apps with health score and open findings.*
+
+<img src="docs/images/login.png" alt="Login page" width="360">
+
+*Login page.*
 
 Real proof this system works end to end, from the AI itself, not staged
 screenshots:
