@@ -72,20 +72,20 @@ STOREFRONT_TZ = timezone(timedelta(hours=5, minutes=30))
 
 
 async def estimate_delivery_date(session: AsyncSession, order_id: int) -> date:
-    """BUG #5 (silent timezone bug): uses the UTC calendar date instead of
-    the storefront's local calendar date.
+    """Estimated delivery date: 3 days after the order's storefront-local
+    calendar day.
 
     Postgres always returns `created_at` normalized to UTC regardless of
-    what offset it was inserted with, so `.date()` silently reads the *UTC*
-    calendar day. For an order placed late at night in the storefront's
-    positive-UTC-offset timezone, the UTC day is still the *previous* day —
-    the code needs `.astimezone(STOREFRONT_TZ)` first to get the day the
+    what offset it was inserted with, so a naive `.date()` on it silently
+    reads the *UTC* calendar day. For an order placed late at night in the
+    storefront's positive-UTC-offset timezone, the UTC day is still the
+    *previous* day — `.astimezone(STOREFRONT_TZ)` first gets the day the
     customer actually experienced.
     """
     order = await repository.get_order(session, order_id)
     assert order is not None, f"order {order_id} not seeded"
-    utc_date = order.created_at.date()
-    return utc_date + timedelta(days=3)
+    local_date = order.created_at.astimezone(STOREFRONT_TZ).date()
+    return local_date + timedelta(days=3)
 
 
 async def check_item_price(item_id: int) -> dict[str, int]:

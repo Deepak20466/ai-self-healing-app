@@ -50,11 +50,16 @@ async def test_item_label_is_correct_for_an_existing_item(db_session: AsyncSessi
     assert label == "WIRELESS MOUSE"
 
 
-async def test_bug5_timezone_delivery_estimate_is_off_by_one_day(db_session: AsyncSession) -> None:
+async def test_bug5_timezone_delivery_estimate_is_now_fixed(db_session: AsyncSession) -> None:
+    """This branch (`autofix/0a9375e7f2e4-325`, PR #10) is the healer's own
+    auto-fix for bug #5: `estimate_delivery_date` now converts to the
+    storefront timezone before taking `.date()`, so it returns the correct
+    day instead of the pre-fix `date(2026, 1, 4)`. `main` still has the
+    original seeded bug and its own copy of this test still asserts the
+    broken date — this file only diverges on this branch because the fix
+    itself only exists here."""
     estimated = await bugs.estimate_delivery_date(db_session, seed_data.TIMEZONE_ORDER_ID)
-    correct = date(2026, 1, 5)
-    assert estimated != correct
-    assert estimated == date(2026, 1, 4)
+    assert estimated == date(2026, 1, 5)
 
 
 async def test_bug6_unhandled_timeout_on_external_pricing_call(
