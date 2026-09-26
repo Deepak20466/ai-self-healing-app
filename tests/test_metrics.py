@@ -315,8 +315,13 @@ async def test_summary_exposes_both_success_rates(db_session: AsyncSession) -> N
 
 def test_load_latest_benchmark_reads_the_clean_run_file(tmp_path: Path) -> None:
     f = tmp_path / "b.json"
-    f.write_text('{"date": "2026-09-26", "fixed": 2, "total": 3}')
-    assert metrics.load_latest_benchmark(f) == {"date": "2026-09-26", "fixed": 2, "total": 3}
+    f.write_text('{"date": "2026-09-26", "fixed": 2, "total": 3, "note": "n"}')
+    assert metrics.load_latest_benchmark(f) == {
+        "date": "2026-09-26",
+        "fixed": 2,
+        "total": 3,
+        "note": "n",
+    }
     assert metrics.load_latest_benchmark(tmp_path / "missing.json") is None
     f.write_text("not json")
     assert metrics.load_latest_benchmark(f) is None

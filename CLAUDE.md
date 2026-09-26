@@ -2092,3 +2092,10 @@ huge and before the app so the prober can't enqueue extra (AI-spending) jobs.
 - Metrics: `ai_fix_success_rate` (headline: success among jobs with >=1
   `fix_attempts` row, so breaker/duplicate/budget/refusal jobs are excluded)
   and `fix_success_rate` (all-time, secondary, tooltip in the UI). Live: 44% vs 9%.
+
+### 2026-09-26 - clean benchmark (0/2, incomplete) + root-cause fixes
+- `scripts/benchmark.py` now: max 3 bugs, only counts jobs created after the trigger, re-triggers until the every-5th-occurrence enqueue rule fires, reports time-to-PR, full-suite verdict and cost, and writes `docs/benchmark_latest.json` (shown on the Metrics page as a separate stat).
+- `zero` failed: a correct fix was rejected by pinned test `test_bug1_*` (the AI cannot edit tests). `key` failed: fix passed the full suite, then `git push` timed out at 30s. Fixed: all seeded-bug and prober tests are fix-tolerant; push = 120s + one retry (`healer/worktree.py`); the full-suite gate runs the app's `test_command` (`mcp_server/git_utils.pytest_command`), not all of pytest.
+- The `key` verification rerun was refused by the per-fingerprint 24h breaker (it sums `attempt_count`; marking jobs failed does NOT reduce it). Rerun after the window. `zero`/`validation` not run today.
+- `reset_demo_bugs.py --local` rewrites bugs.py and the pinned tests in the working tree: restore with `git checkout HEAD -- <files>` and never commit it.
+- Benchmark prep: mark stale non-terminal jobs failed (keep history).

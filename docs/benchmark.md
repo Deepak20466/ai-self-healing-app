@@ -1,79 +1,50 @@
-# Benchmark: real live self-healing runs
+# Benchmark (clean run, 2026-09-26)
 
-Generated 2026-09-26T00:18:45.383358+00:00 by `scripts/benchmark.py` against
-the live running system (all 4 pods, real free-mode Claude Code CLI would
-have been invoked had either job actually run, real MCP tool calls, real git
-worktrees). No mocking, and — per the task's explicit constraint — no
-bypassed circuit breakers or budget caps. Both real outcomes below turned
-out to be "blocked by a genuine existing guardrail," not "the healer tried
-and failed" — see the root-cause section, added after querying the database
-directly post-run. See CLAUDE.md's dated benchmark entry for the same
-numbers.
+**0/2 bugs fixed so far. This is an honest, incomplete result:** two bugs ran,
+both failed for real healer/repo weaknesses that are fixed now, and the
+verification rerun is blocked by a circuit breaker until the 24h window passes.
+The other bugs are still pending. It is a single deliberate run, kept separate
+from the all-time and AI-attempted success rates on the Metrics page.
 
-| Bug | Result | Attempts | CLI calls | CLI turns | Time to terminal | PR |
-|---|---|---|---|---|---|---|
-| `timezone` | no new heal_job (existing one already in flight — see below) | 0 | 0 | 0 | - | - |
-| `zero` | failed (circuit breaker blocked, 0 attempts) | 0 | 0 | 0 | 0s | - |
+Setup: all seeded bugs reset (`scripts/reset_demo_bugs.py --local`), stale
+leftover jobs marked failed (history kept), real free-mode AI CLI, real MCP
+tools, real git worktrees, no mocking, no bypassed circuit breakers.
 
-## Narrative
+| Bug | Result | Attempts | CLI turns | Time to PR | Full suite | Cost | PR |
+|---|---|---|---|---|---|---|---|
+| `zero` | failed | 3 | 22 / 31 / 21 | - | FAILED (attempts 1 and 3) | about $4.7 | - |
+| `key` | failed | 2 | 19 / 30 | - | PASSED (attempt 2) | about $3.1 | - |
+| `key` rerun | blocked by the circuit breaker, 0 AI calls | 0 | 0 | - | not reached | $0 | - |
+| `validation` | aborted before any attempt | 0 | 0 | - | not reached | $0 | - |
+| others | pending / skipped (see below) | | | | | | |
 
-### `timezone`
+## Root causes (from the logs)
 
-- heal_job id: none created by this run
-- final status: `no_heal_job_enqueued`
-- circuit breaker blocked: false (a different guardrail was actually the cause — see root cause below)
-- **Root cause (confirmed by querying the DB directly after the run)**:
-  this fingerprint (`0a9375e7f2e405b175c23c4c736806a1`) already has
-  `heal_job` #325 sitting at `pr_opened` — that job **is PR #10**
-  (`https://github.com/Deepak20466/ai-self-healing-app/pull/10`), the real
-  free-mode fix from the Post-Phase-8 session, still open/unmerged.
-  `sentinel/storage.py`'s dedup rule (documented in CLAUDE.md's "Ambiguities
-  resolved") only enqueues a new heal_job for a fingerprint when no job for
-  it is currently `queued/running/pr_opened/ci_fixing` — `pr_opened` counts
-  as in-flight on purpose, to avoid opening a second PR for a bug that
-  already has one open. Triggering `/trigger/timezone` again correctly did
-  *not* spawn a duplicate job. This is the dedup guardrail working exactly
-  as designed, not a benchmark failure — but it does mean the `timezone` bug
-  wasn't a fresh, clean re-run of the healer for this benchmark, since its
-  "fix" already exists as an untouched real PR from three sessions ago.
+- **`zero`: the AI's fix was correct but rejected by a pinned demo test.**
+  The fix (guard the zero-rating division) passed its own regression test, but
+  the full-suite gate ran `test_bug1_zero_division_on_unrated_item`, which
+  asserted the *broken* behavior (`pytest.raises(ZeroDivisionError)`). The AI
+  cannot edit tests outside `apps/target_app/`, so it could not fix that, and
+  attempt 2 ran out of turns. Only bug #4's test had been made fix-tolerant.
+  Fixed since: every seeded-bug test (bugs 1, 2, 3, 6, 7 and the prober tests)
+  now passes whether the bug is present or fixed.
+- **`key`: the fix was verified, then `git push` timed out.** Attempt 2 passed
+  the regression test and the full suite, but the push hit the 30s git timeout
+  and the whole job failed with no PR. Fixed since: push has a 120s timeout
+  and one retry (unit-tested).
+- **A weakness in my own gate, found before the run:** the first version of the
+  full-suite gate ran all of pytest, not the app's configured suite, which
+  would have tripped on unrelated environment-dependent tests. It now runs the
+  app's `test_command`.
 
-### `zero`
+## What is not proven yet
 
-- heal_job id: 334
-- fingerprint: `a2ecdbb48d22a335be69fcd55eb6e7e1`
-- final status: `failed`
-- attempt_count: 0 (blocked before a single Claude CLI call)
-- circuit breaker blocked: **true**
-- **Root cause (confirmed by querying the DB directly after the run)**: this
-  fingerprint has 14 prior `heal_job` rows within the lookback window,
-  accumulated from this project's own earlier heavy `verify_all.py`/manual
-  testing sessions (job ids 317-333, mostly `failed`, one with
-  `attempt_count=3`). `healer/circuit_breaker.py`'s per-fingerprint 24h
-  attempt cap (`max_heal_attempts_per_fingerprint_24h`) correctly refused a
-  15th attempt and the job was marked `failed` immediately
-  (`circuit_breaker_tripped` audit row at essentially the same timestamp as
-  `detection`) — zero wall-clock time, zero CLI calls, because the breaker
-  fires before any Claude CLI invocation. Per the task's explicit
-  instruction, this was recorded as-is and the breaker was **not** reset or
-  bypassed to force a "clean" run.
-
-## What this benchmark actually demonstrates
-
-Neither bug reached a fresh healer attempt, but for two different, entirely
-legitimate reasons — both real production guardrails firing correctly, not
-bugs in the healer or in this benchmark script:
-
-1. `timezone`'s bug is *already fixed* by a real, previously-produced PR
-   (#10) that's just never been merged — the in-flight dedup rule is
-   working as intended.
-2. `zero`'s fingerprint had already exhausted its 24h attempt budget from
-   this project's own repeated testing earlier in the day — the
-   per-fingerprint circuit breaker is working as intended.
-
-Both are exactly the kind of "honestly report the real guardrail state,
-don't force a green result" outcome the task asked for. A follow-up
-benchmark run picking bugs with no recent heal_job history (e.g. `key`,
-`none_lookup`, `off_by_one`, or `validation`, which have little/no history
-in the current `heal_jobs` table) or run after the 24h window/PR #10 clears
-would be needed to see a fresh end-to-end CLI attempt play out to
-`pr_opened`/`failed`-for-real.
+- The `key` rerun that would show the push fix works end to end was refused by
+  the per-fingerprint circuit breaker (3 real attempts already used in 24h).
+  It was not bypassed. Rerun `python scripts/benchmark.py key` after the window
+  resets to complete the verification.
+- `validation` was aborted before any attempt (it would have hit the same
+  pinned-test problem); `off_by_one` is a contract violation the script cannot
+  trigger by name; `none_lookup` already has an open PR (#15); `timezone` is
+  already fixed on main; `timeout` depends on network behaviour. None of these
+  ran, so no claim is made about them.

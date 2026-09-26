@@ -89,7 +89,7 @@ class BenchmarkResult:
     pr_url: str | None
     notes: str
     time_to_pr_seconds: float | None = None
-    full_suite: str = 'n/a'
+    full_suite: str = "n/a"
     cost_usd: float = 0.0
 
 

@@ -61,7 +61,12 @@ def load_latest_benchmark(path: Path | None = None) -> dict[str, object] | None:
     """
     try:
         data = json.loads((path or BENCHMARK_FILE).read_text(encoding="utf-8"))
-        return {"date": str(data["date"]), "fixed": int(data["fixed"]), "total": int(data["total"])}
+        return {
+            "date": str(data["date"]),
+            "fixed": int(data["fixed"]),
+            "total": int(data["total"]),
+            "note": str(data.get("note", "")),
+        }
     except (OSError, ValueError, KeyError):
         return None
 

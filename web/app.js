@@ -82,8 +82,8 @@ function pct(x) {
   return x == null ? "—" : `${Math.round(x * 100)}%`;
 }
 
-function Stat({ label, value, hint }) {
-  return html`<div class="stat" title=${hint || ""}><div class="value">${value}</div><div class="label">${label}</div></div>`;
+function Stat({ label, value, hint, sub }) {
+  return html`<div class="stat" title=${hint || ""}><div class="value">${value}</div><div class="label">${label}</div>${sub ? html`<div class="label" style="margin-top:6px">${sub}</div>` : null}</div>`;
 }
 
 function Metrics() {
@@ -115,6 +115,7 @@ function Metrics() {
         <${Stat}
           label=${data.benchmark_clean_run ? `Benchmark (clean run, ${data.benchmark_clean_run.date})` : "Benchmark (clean run)"}
           value=${data.benchmark_clean_run ? `${data.benchmark_clean_run.fixed}/${data.benchmark_clean_run.total} bugs fixed` : "—"}
+          sub=${data.benchmark_clean_run ? data.benchmark_clean_run.note : ""}
           hint="One deliberate run against freshly reset seeded bugs (scripts/benchmark.py). Separate from the rolling all-time and attempted rates." />
         <${Stat} label="Verified in production" value=${data.verified_in_production_label ?? "n/a (no production deploy)"} />
         <${Stat} label="CI auto-fix rate" value=${data.ci_auto_fix_rate ?? "—"} />

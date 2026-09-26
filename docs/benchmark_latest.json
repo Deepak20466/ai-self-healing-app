@@ -1,0 +1,1 @@
+{"date": "2026-09-26", "fixed": 0, "total": 2, "note": "zero: AI fix was correct but rejected by a pinned demo test (fixed since); key: fix passed the full suite but git push timed out (fixed since), rerun blocked by the 24h circuit breaker; others pending."}
