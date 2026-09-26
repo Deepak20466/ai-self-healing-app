@@ -70,9 +70,9 @@ try {
 Write-Host "  mcp: reachable (no /healthz by design, see CLAUDE.md Phase 7)" -ForegroundColor Green
 
 Write-Host "Starting Cloudflare quick tunnels (UI:8000, webhook:8002 only)..." -ForegroundColor Cyan
-Start-Process -FilePath "cloudflared" -ArgumentList "tunnel","--url","http://localhost:8000" `
+Start-Process -FilePath "cloudflared" -ArgumentList "tunnel","--protocol","http2","--url","http://localhost:8000" `
     -RedirectStandardOutput ".demo_logs\tunnel_ui.log" -RedirectStandardError ".demo_logs\tunnel_ui.log" -WindowStyle Hidden
-Start-Process -FilePath "cloudflared" -ArgumentList "tunnel","--url","http://localhost:8002" `
+Start-Process -FilePath "cloudflared" -ArgumentList "tunnel","--protocol","http2","--url","http://localhost:8002" `
     -RedirectStandardOutput ".demo_logs\tunnel_webhook.log" -RedirectStandardError ".demo_logs\tunnel_webhook.log" -WindowStyle Hidden
 
 Write-Host "Waiting for tunnel URLs..." -ForegroundColor Cyan

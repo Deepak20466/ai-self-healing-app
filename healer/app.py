@@ -44,7 +44,7 @@ from healer.auth import (
 )
 from healer.chat_agent import as_tool_list, handle_chat_message
 from healer.findings_actions import maybe_auto_fix_high_severity, request_fix_for_finding
-from healer.mcp_client import MCPToolClient, connect_http
+from healer.mcp_client import MCPToolClient, ReconnectingMCPToolClient, connect_http
 from healer.onboarding import open_onboarding_pull_request
 from healer.worker import run_worker
 from mcp_server.github_client import GitHubClientError
@@ -79,24 +79,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     notifier.set_socket_broadcaster(_socket_broadcast)
     mcp_url = f"http://127.0.0.1:{settings.mcp_port}/mcp"
     worker_task: asyncio.Task[None] | None = None
-    async with connect_http(mcp_url) as mcp:
-        _mcp_client = mcp
-        worker_task = asyncio.create_task(run_worker())
-        logger.info("healer_pod_started", mcp_url=mcp_url)
-        try:
-            yield
-        finally:
-            if worker_task is not None:
-                worker_task.cancel()
-                try:
-                    await worker_task
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    logger.exception("healer_app.worker_task_crashed")
-            notifier.set_socket_broadcaster(None)
-            _mcp_client = None
-            await dispose_engine()
+    mcp = ReconnectingMCPToolClient(lambda: connect_http(mcp_url))
+    try:
+        await mcp.start()
+    except Exception:
+        logger.warning("healer_app.mcp_initial_connect_failed", mcp_url=mcp_url)
+    _mcp_client = mcp
+    worker_task = asyncio.create_task(run_worker())
+    logger.info("healer_pod_started", mcp_url=mcp_url)
+    try:
+        yield
+    finally:
+        if worker_task is not None:
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("healer_app.worker_task_crashed")
+        notifier.set_socket_broadcaster(None)
+        _mcp_client = None
+        await mcp.aclose()
+        await dispose_engine()
 
 
 app = FastAPI(title="healer-pod", lifespan=lifespan)

@@ -23,4 +23,7 @@ foreach ($c in $mcpConns) {
 }
 
 Write-Host "Public demo stopped." -ForegroundColor Green
-Write-Host "Note: GitHub variables HEALER_WEBHOOK_URL/PUBLIC_URL still point at the now-dead tunnel URLs until the next start_public_demo.ps1 run." -ForegroundColor Yellow
+# Dead tunnel URLs would make health-check.yml fail; with the variables unset it skips.
+Write-Host "Removing GitHub variables HEALER_WEBHOOK_URL/PUBLIC_URL..." -ForegroundColor Cyan
+gh variable delete HEALER_WEBHOOK_URL 2>$null
+gh variable delete PUBLIC_URL 2>$null

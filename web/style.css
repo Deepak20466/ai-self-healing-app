@@ -137,7 +137,7 @@ th { color: var(--text-dim); font-weight: 600; }
 .badge.warn { background: rgba(183,121,31,0.15); color: var(--warn); }
 
 .chat-log { display: flex; flex-direction: column; gap: 8px; max-height: 60vh; overflow-y: auto; }
-.chat-msg { padding: 8px 12px; border-radius: var(--radius); max-width: 80%; white-space: pre-wrap; }
+.chat-msg { padding: 8px 12px; border-radius: var(--radius); max-width: 80%; overflow-wrap: anywhere; }
 .chat-msg.user { align-self: flex-end; background: var(--accent); color: var(--accent-contrast); }
 .chat-msg.assistant { align-self: flex-start; background: var(--surface-2); }
 .chat-input-row { display: flex; gap: 8px; margin-top: 10px; }
@@ -209,3 +209,6 @@ th { color: var(--text-dim); font-weight: 600; }
   main { padding: 10px; }
   .chat-msg { max-width: 92%; }
 }
+.chat-msg pre { margin: 6px 0; padding: 8px; overflow-x: auto; background: var(--surface); border-radius: 6px; }
+.chat-msg code { font-family: ui-monospace, Consolas, monospace; font-size: 0.9em; }
+.chat-msg ul, .chat-msg ol { margin: 4px 0; padding-left: 20px; }

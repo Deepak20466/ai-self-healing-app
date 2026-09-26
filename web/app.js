@@ -469,6 +469,49 @@ function AppDetail({ appId, socket, onBack, pushToast }) {
   `;
 }
 
+// Tiny safe markdown renderer: escapes ALL html first, then applies a few
+// patterns (code blocks, inline code, bold, italic, lists), so model/user
+// text can never inject markup.
+function escapeHtml(t) {
+  return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function renderMarkdown(src) {
+  const blocks = [];
+  const text = escapeHtml(src).replace(/```[a-z]*\n?([\s\S]*?)```/g, (_, code) => {
+    blocks.push(`<pre><code>${code.replace(/\n$/, "")}</code></pre>`);
+    return `\u0000${blocks.length - 1}\u0000`;
+  });
+  const inline = (t) =>
+    t
+      .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  const out = [];
+  let list = null;
+  const flush = () => {
+    if (list) {
+      out.push(`<${list.tag}>${list.items.join("")}</${list.tag}>`);
+      list = null;
+    }
+  };
+  for (const line of text.split("\n")) {
+    const m = line.match(/^\s*(?:([-*])|(\d+)\.)\s+(.*)$/);
+    if (m) {
+      const tag = m[1] ? "ul" : "ol";
+      if (!list || list.tag !== tag) {
+        flush();
+        list = { tag, items: [] };
+      }
+      list.items.push(`<li>${inline(m[3])}</li>`);
+    } else {
+      flush();
+      out.push(line.trim() === "" ? "<br/>" : `<div>${inline(line)}</div>`);
+    }
+  }
+  flush();
+  return out.join("").replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[Number(i)]);
+}
+
 function Chat({ socket, pushToast }) {
   const [sessionId, setSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -510,7 +553,7 @@ function Chat({ socket, pushToast }) {
       ${error && html`<div class="error-state">${error}</div>`}
       <div class="chat-log" ref=${logRef} aria-live="polite">
         ${messages.length === 0 && html`<div class="empty-state">Ask about errors, the pipeline, deployments, or say "show stats".</div>`}
-        ${messages.map((m, i) => html`<div class=${`chat-msg ${m.role}`} key=${i}>${m.content}</div>`)}
+        ${messages.map((m, i) => html`<div class=${`chat-msg ${m.role}`} key=${i} dangerouslySetInnerHTML=${{ __html: renderMarkdown(m.content) }} />`)}
       </div>
       <form class="chat-input-row" onSubmit=${send}>
         <textarea
