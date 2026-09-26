@@ -233,3 +233,16 @@ def test_go_recovered_panic_skips_the_recovery_machinery() -> None:
     frame = select_in_app_frame(lang or "go", frames)
     assert frame is not None
     assert (frame.file, frame.line) == ("/app/calc.go", 11)
+
+
+def test_windows_paths_with_spaces_and_drive_letters() -> None:
+    win = r"C:\Users\K Deepak\app\src\users.js"
+    js = f"TypeError: x\n    at f ({win}:15:20)\n"
+    lang, frames = parse_stacktrace(js, "javascript")
+    assert (frames[0].file, frames[0].line) == (win, 15)
+    go = "goroutine 1 [running]:\nmain.average(...)\n\tC:/Users/K Deepak/app/calc.go:12 +0x1d\n"
+    _, frames = parse_stacktrace(go, "go")
+    assert (frames[0].file, frames[0].line) == ("C:/Users/K Deepak/app/calc.go", 12)
+    rb = "C:/Users/K D/app/cart.rb:7:in 'total': boom (RuntimeError)\n"
+    _, frames = parse_stacktrace(rb, "ruby")
+    assert (frames[0].file, frames[0].line) == ("C:/Users/K D/app/cart.rb", 7)

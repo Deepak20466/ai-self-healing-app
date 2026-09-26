@@ -30,14 +30,16 @@ class Frame:
 
 _PY = re.compile(r'^\s*File "(?P<file>[^"]+)", line (?P<line>\d+), in (?P<fn>.+?)\s*$')
 _JS = re.compile(
-    r"^\s*at (?:async )?(?:(?P<fn>[^\s(][^(]*?) \()?(?P<file>[^()\s]+?):(?P<line>\d+):\d+\)?\s*$"
+    r"^\s*at (?:async )?(?:(?P<fn>[^\s(][^(]*?) \()?(?P<file>[^()]+?):(?P<line>\d+):\d+\)?\s*$"
 )
 _JAVA = re.compile(r"^\s*at (?P<fq>[\w$.<>]+)\((?P<file>[\w$]+\.\w+):(?P<line>\d+)\)\s*$")
-_GO_FILE = re.compile(r"^\s+(?P<file>\S+\.go):(?P<line>\d+)(?: \+0x[0-9a-f]+)?\s*$")
+_GO_FILE = re.compile(r"^\s+(?P<file>.+?\.go):(?P<line>\d+)(?: \+0x[0-9a-f]+)?\s*$")
 _GO_FN = re.compile(r"^(?P<fn>[\w./*()\-\[\]]+)\((?:.*)\)\s*$")
 _CS = re.compile(r"^\s*at (?P<fn>.+?)\(.*?\) in (?P<file>.+?):line (?P<line>\d+)\s*$")
 _PHP = re.compile(r"^#\d+ (?P<file>.+?)\((?P<line>\d+)\): (?P<fn>.+?)\s*$")
-_RUBY = re.compile(r"^\s*(?:from )?(?P<file>[^\s:][^:]*?):(?P<line>\d+):in [`'](?P<fn>[^'`]+)'")
+_RUBY = re.compile(
+    r"^\s*(?:from )?(?P<file>(?:[A-Za-z]:)?[^\s:][^:]*?):(?P<line>\d+):in [`'](?P<fn>[^'`]+)'"
+)
 
 
 def _parse_python(text: str) -> list[Frame]:

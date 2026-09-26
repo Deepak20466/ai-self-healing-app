@@ -303,3 +303,28 @@ After each phase, run ruff, mypy and the full pytest suite, fix every failure, t
 - There is no Docker file or reference anywhere in the repo.
 
 Continue from the next unfinished phase recorded in CLAUDE.md.
+
+---
+
+## EXTENSION: ANY LANGUAGE VIA OPENTELEMETRY (added after the original build order)
+
+- sentinel-pod exposes an OTLP/HTTP receiver: `POST /v1/traces` and `/v1/logs`
+  (JSON or protobuf, optional gzip). `Authorization: Bearer <ingest token>` is
+  required and resolves the app server-side. Exception span events and log
+  records with `exception.*` attributes become errors: `exception.type`,
+  `exception.message`, `exception.stacktrace`, `service.name`, and
+  `code.filepath`/`code.lineno` (fallback only).
+- Stack-trace parsers for Python, JS/TS, Java, Go, C#, PHP and Ruby pick the
+  innermost in-app frame (skipping library/vendor frames). Fingerprinting is
+  unchanged.
+- "Add error capture" PR: Python keeps the middleware helper; other languages
+  get the official OpenTelemetry SDK config pointing at the OTLP endpoint.
+- Scanner detects Java (Maven/Gradle), Go, C#, PHP (Composer), Ruby (Bundler)
+  with standard test/lint/audit commands; a missing tool is reported as
+  "skipped: tool not installed".
+- Patch guard rejects added test-skip/disable/focus markers and net test
+  removal per language (pytest, JS, JUnit, Go, C#, PHPUnit, Ruby).
+- `examples/node_app` and `examples/go_app`: one seeded bug each, OpenTelemetry
+  configured, tests, registered in `config/monitored_apps.yaml`.
+- Acceptance: each example's bug is captured with the correct file and line;
+  scan runs on each; per-language parsing/detection/anti-cheat tests pass.

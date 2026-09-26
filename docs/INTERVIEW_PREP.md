@@ -669,3 +669,32 @@ behind real UTC, which made every otherwise-correctly-signed webhook
 request fail the HMAC scheme's 5-minute replay window — a good reminder
 that a webhook mysteriously 401ing despite a correct secret is worth
 checking for clock drift before assuming the secret itself is wrong.)
+
+## e) Any-language support via OpenTelemetry
+
+**How it works.** Sentinel exposes standard OTLP/HTTP (`/v1/traces`, `/v1/logs`).
+Any official OpenTelemetry SDK can point at it; the app's ingest token in the
+`Authorization` header identifies the app. Protobuf bodies are converted to the
+JSON shape with `MessageToDict`, so parsing exists once. An exception is a span
+event named `exception` with `exception.type/message/stacktrace`. A small
+per-language parser turns that text into frames; the first non-library frame
+is the error's file and line, and the existing fingerprint/dedup/heal path takes
+over unchanged.
+
+**Why regex parsers, not a library.** Every SDK stringifies its runtime's native
+trace, so a per-language regex over that text is the only common denominator.
+
+**Honest limits.** Only Python, Node and Go were run against real apps. Java, C#,
+PHP and Ruby are unit-tested against sample traces. The AI fix on the examples
+was not run (no AI usage in this pass).
+
+**Bugs the live run found that unit tests missed** (good anecdotes):
+- The first JS/Go parsers used `\S+` for file paths; this repo lives under
+  `C:\Users\K Deepak\...`, so the space broke parsing and every live error came
+  out as `<unknown>:0`. The sample traces in the tests had no spaces.
+- Go: a stack captured inside a deferred `recover()` starts with the recovery
+  middleware itself, which is "in-app" code, so the first in-app frame was the
+  wrong one. Fix: drop everything up to and including the `panic(...)` frame.
+- A regex written through a non-raw string turned `\b` into a literal backspace
+  character; the per-language skip tests all stopped raising, which is how it
+  was caught.

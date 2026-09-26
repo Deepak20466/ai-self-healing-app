@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -917,6 +917,208 @@ async def check_connect_real_repo(report: Report, repo: str | None) -> None:
             shutil.rmtree(Path(local_path), ignore_errors=True)
 
 
+async def check_any_language(report: Report) -> None:
+    """OpenTelemetry "any language" extension: OTLP ingest (auth, JSON, protobuf),
+    per-language parsers/scanner detection/anti-cheat/onboarding, and -- when
+    node + go are installed -- the two live example apps end to end
+    (`scripts/demo_examples.py`). Never invokes an AI backend."""
+    import gzip
+    import shutil
+    import tempfile
+    import uuid
+
+    from google.protobuf import json_format
+    from opentelemetry.proto.collector.trace.v1 import trace_service_pb2
+
+    from core.language_tools import detect_profile
+    from core.models import MonitoredApp
+    from healer.onboarding import build_onboarding_file
+    from mcp_server.patch_guard import check_not_cheating
+    from mcp_server.sandbox import SandboxViolation
+    from sentinel.stacktrace import PARSERS
+
+    report.add(
+        "any-language: stack-trace parsers",
+        "PASS" if len(PARSERS) == 7 else "FAIL",
+        f"{sorted(PARSERS)}",
+    )
+
+    manifests = {
+        "go.mod": "go",
+        "pom.xml": "java",
+        "build.gradle": "java",
+        "App.csproj": "csharp",
+        "composer.json": "php",
+        "Gemfile": "ruby",
+    }
+    detected = {}
+    for manifest in manifests:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / manifest).write_text("")
+            profile = detect_profile(Path(tmp))
+            detected[manifest] = profile.language if profile else None
+    report.add(
+        "any-language: scanner detects Java/Go/C#/PHP/Ruby",
+        "PASS" if detected == manifests else "FAIL",
+        str(detected),
+    )
+
+    skips = {
+        "a.test.js": "+it.skip('x', f)",
+        "CartTest.java": "+@Disabled",
+        "a_test.go": "+\tt.Skip()",
+        "CartTests.cs": "+[Ignore]",
+        "CartTest.php": "+$this->markTestSkipped();",
+        "a_spec.rb": "+skip 'x'",
+    }
+    caught = 0
+    for path, line in skips.items():
+        diff = f"--- a/{path}\n+++ b/{path}\n@@ -1 +1,2 @@\n ctx\n{line}\n"
+        try:
+            check_not_cheating(diff)
+        except SandboxViolation:
+            caught += 1
+    report.add(
+        "any-language: patch guard rejects test-skips per language",
+        "PASS" if caught == len(skips) else "FAIL",
+        f"{caught}/{len(skips)} rejected",
+    )
+
+    fake = MonitoredApp(name="x", ingest_token="t", github_repo="o/r", local_repo_path="x")
+    paths = {}
+    for lang in ("python", "javascript", "go", "java", "csharp", "php", "ruby"):
+        fake.language = lang
+        paths[lang] = build_onboarding_file(fake).path
+    report.add(
+        "any-language: onboarding PR picks setup per language",
+        "PASS" if len(set(paths.values())) == 7 else "FAIL",
+        str(paths),
+    )
+
+    # --- OTLP endpoint against the live sentinel-pod ---
+    async with httpx.AsyncClient(base_url=SENTINEL_URL, timeout=10.0) as client:
+        try:
+            unauth = await client.post("/v1/traces", json={})
+        except httpx.HTTPError as exc:
+            report.add(
+                "any-language: OTLP endpoint", "SKIPPED", f"sentinel-pod not reachable: {exc}"
+            )
+            return
+        report.add(
+            "any-language: OTLP requires ingest token",
+            "PASS" if unauth.status_code == 401 else "FAIL",
+            f"-> {unauth.status_code}",
+        )
+
+        async with session_scope() as session:
+            app = (
+                await session.execute(select(MonitoredApp).where(MonitoredApp.name == "node_app"))
+            ).scalar_one_or_none()
+        if app is None:
+            report.add(
+                "any-language: OTLP ingest",
+                "SKIPPED",
+                "node_app not synced (run sync_monitored_apps)",
+            )
+            return
+
+        fn = f"verifyFn{uuid.uuid4().hex[:8]}"
+        trace = f"Error: boom\n    at {fn} (/w/examples/node_app/src/users.js:15:20)\n"
+        payload = {
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": [
+                            {"key": "telemetry.sdk.language", "value": {"stringValue": "nodejs"}}
+                        ]
+                    },
+                    "scopeSpans": [
+                        {
+                            "spans": [
+                                {
+                                    "name": "s",
+                                    "events": [
+                                        {
+                                            "name": "exception",
+                                            "attributes": [
+                                                {
+                                                    "key": "exception.type",
+                                                    "value": {"stringValue": "TypeError"},
+                                                },
+                                                {
+                                                    "key": "exception.stacktrace",
+                                                    "value": {"stringValue": trace},
+                                                },
+                                            ],
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
+        auth = {"Authorization": f"Bearer {app.ingest_token}"}
+        json_resp = await client.post("/v1/traces", json=payload, headers=auth)
+        proto = json_format.ParseDict(payload, trace_service_pb2.ExportTraceServiceRequest())
+        proto_resp = await client.post(
+            "/v1/traces",
+            content=gzip.compress(proto.SerializeToString()),
+            headers={
+                **auth,
+                "Content-Type": "application/x-protobuf",
+                "Content-Encoding": "gzip",
+            },
+        )
+        async with session_scope() as session:
+            err = (
+                await session.execute(select(Error).where(Error.function_name == fn))
+            ).scalar_one_or_none()
+            stored = (err.file_path, err.line_number, err.app_id) if err else None
+            if err:  # the demo error is not real data: remove it and any job it enqueued
+                await session.execute(delete(HealJob).where(HealJob.fingerprint == err.fingerprint))
+                await session.delete(err)
+        report.add(
+            "any-language: OTLP JSON + gzip protobuf ingest stores an error",
+            "PASS"
+            if json_resp.status_code == 200
+            and proto_resp.status_code == 200
+            and stored == ("examples/node_app/src/users.js", 15, app.id)
+            else "FAIL",
+            f"json={json_resp.status_code} protobuf={proto_resp.status_code} stored={stored}",
+        )
+
+    # --- live example apps (need node + go + npm deps installed) ---
+    if not (
+        shutil.which("node")
+        and shutil.which("go")
+        and (REPO_ROOT / "examples/node_app/node_modules").exists()
+    ):
+        report.add(
+            "any-language: live Node + Go examples", "SKIPPED", "node/go/npm install missing"
+        )
+        return
+    proc = await asyncio.to_thread(
+        subprocess.run,
+        [sys.executable, str(REPO_ROOT / "scripts" / "demo_examples.py")],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        timeout=300,
+        check=False,
+    )
+    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith(("PASS", "FAIL"))]
+    for ln in lines:
+        status, _, rest = ln.partition("  ")
+        label, _, detail = (part.strip() for part in rest.partition("  "))
+        report.add(f"any-language (live): {label}", status, detail)
+    if not lines:
+        report.add(
+            "any-language: live Node + Go examples", "FAIL", (proc.stdout + proc.stderr)[-200:]
+        )
+
+
 def check_ai_backend_switching(report: Report) -> None:
     """Each AI_BACKEND value selects the right runner pair in a fresh process
     (nothing is invoked -- no CLI or API call), and a bad value fails loudly."""
@@ -1012,6 +1214,7 @@ async def main() -> int:
     await check_metrics(report, public_url, args.admin_password)
     await check_connect_a_repo(report, public_url, args.admin_password)
     await check_connect_real_repo(report, args.connect_repo)
+    await check_any_language(report)
     check_ai_backend_switching(report)
     check_no_docker(report)
 

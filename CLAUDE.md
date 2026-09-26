@@ -1981,7 +1981,7 @@ documented pre-existing flakes (Windows ProactorEventLoop teardown,
 ### 2026-09-26 — real-Chrome UI test pass + screenshots
 Drove the UI with Playwright (channel="chrome", headed) on localhost and a Cloudflare tunnel; all login/dashboard/chat/rollback-confirmation/metrics/apps/sign-out checks passed. Fixed: `start_public_demo.ps1`'s argon2 check failed on the quoted hash in `.env` (double-quoted PS regex swallowed `$argon2id`); index.html had no favicon (console 404). Screenshots in `docs/images/`. Open items: healer-pod never reconnects to mcp-pod after an mcp-pod restart (500s until healer restart); on quick tunnels use `cloudflared --protocol http2` if QUIC fails; headed Chrome may crash renderer tabs on Windows (use a fresh browser per section). verify_all: 69 PASS / 1 FAIL (RAM) / 9 SKIPPED.
 
-### Any-language support (OpenTelemetry roadmap) — IN PROGRESS
+### Any-language support (OpenTelemetry roadmap) — DONE
 
 **Step 1 — live error capture for any language: DONE.**
 - `sentinel/otlp.py` + `POST /v1/traces` / `/v1/logs` in `sentinel/app.py`:
@@ -2001,3 +2001,39 @@ Drove the UI with Playwright (channel="chrome", headed) on localhost and a Cloud
 - Tests: `tests/test_sentinel_otlp.py`, `tests/test_healer_onboarding.py`.
 - Heredocs containing quotes/backticks break this environment's Bash tool —
   write files with the Write tool instead.
+
+**Step 2 — scan + fix for more languages: DONE.**
+- `core/language_tools.py`: table of per-language `ToolProfile`s (Maven/Gradle,
+  Go, .NET, Composer, Bundler) used by both `core/repo_connect.py:detect_stack`
+  and `core/scanner.py:_run_profile_checks`. Python/JS keep their bespoke
+  scanner paths. A check whose binary isn't found is recorded in
+  `ScanSummary.skipped_checks` as `<check>: skipped: tool not installed (<bin>)`
+  (not persisted; no migration). A present tool's non-zero exit becomes one
+  finding with the output tail.
+- `mcp_server/patch_guard.py`: per-language skip/disable/focus regexes on
+  added lines of test files, plus net-test-removal counting for non-Python
+  test files. Regexes must be raw strings (a `` in a normal string is a
+  backspace char — this bit once).
+- Tests: `tests/test_multilang.py`.
+
+**Step 3 — examples + live proof: DONE.** `examples/node_app` (Express, port
+8101) and `examples/go_app` (port 8102), each with a seeded bug and one
+intentionally failing test, registered in `config/monitored_apps.yaml`.
+`scripts/demo_examples.py` runs both for real: OTLP capture with correct
+file/line, then a scan of a copy under `connected_apps/` (scanner refuses
+other dirs); it marks the demo heal_jobs `failed` so no healer spends AI on
+them. Live run found two real parser bugs (paths with spaces; Go recovered
+panic trace starting with the recover middleware) — both fixed + tested.
+
+**Step 4 — tests/docs/verify: DONE.** `docs/onboarding.md`, README support
+table (honest verified-live vs tested-only per language), SPEC.md extension
+section, INTERVIEW_PREP section e, `scripts/verify_all.py:check_any_language`,
+VERIFICATION.md updated (73 PASS / 1 FAIL RAM / 14 SKIPPED with pods on
+localhost and no tunnel).
+
+**Not verified live (unchanged limitations)**: Java, C#, PHP, Ruby capture and
+scan (parser/detection/anti-cheat unit-tested only); the AI fix on the
+example apps; JS/Go anti-cheat outside unit tests. When running verify_all
+locally, start the healer with `AI_BACKEND=api ANTHROPIC_API_KEY=invalid
+ANTHROPIC_BASE_URL=http://127.0.0.1:9` so any claimed job fails without
+spending AI budget.

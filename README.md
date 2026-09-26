@@ -336,7 +336,8 @@ it — no code changes, no separate deployment, still 100% free:
    `connected_apps/<name>/` (git-ignored — a real, separate checkout, never
    mixed with this repo's own history), and auto-detects its language,
    test command, and lint command from its manifest (`pyproject.toml`/
-   `requirements.txt`, `package.json`, `go.mod`).
+   `requirements.txt`, `package.json`, `go.mod`, `pom.xml`/`build.gradle*`,
+   `*.csproj`, `composer.json`, `Gemfile`).
 2. **Instant scan** runs immediately (and again anytime via "Rescan now"):
    installs the app's own dependencies into a dedicated per-app virtualenv
    (`.selfheal_venv/`, or its own `node_modules/` for a Node app — so one
@@ -560,13 +561,37 @@ job; Phase 7's log records the real `deployments` rows — one `deployed`, one
 `rolled_back` — written by testing `local_deploy.py`'s rollback path for
 real, which is where `rollback_count` above comes from).
 
+## Any language (OpenTelemetry)
+
+Live error capture works for any language with an official OpenTelemetry
+SDK: sentinel-pod is an OTLP/HTTP receiver (`/v1/traces`, `/v1/logs`, JSON or
+protobuf, optional gzip; the app's ingest token is required). The stack
+trace's top *in-app* frame (library/vendor frames skipped) becomes the
+error's file and line, then it is deduplicated and healed like any other
+error. "Connect a repo" scans each language with its standard tools (a tool
+that isn't installed is reported as `skipped: tool not installed`), and the
+patch guard rejects fixes that skip, disable or delete tests. Setup guide:
+[docs/onboarding.md](docs/onboarding.md).
+
+| Language | Live capture | Scan | Anti-cheat (test skip/delete) |
+|---|---|---|---|
+| Python | verified live (Flask/Django/FastAPI middleware) | verified live | verified live (in the real fix loop) |
+| JavaScript / Node | verified live (`examples/node_app`, OTLP) | verified live (npm) | tested only |
+| Go | verified live (`examples/go_app`, OTLP) | verified live (`go test`/`go vet`; `govulncheck` skipped, not installed) | tested only |
+| Java | tested only (parser, onboarding file) | tested only (Maven/Gradle detection and commands) | tested only |
+| C# / .NET | tested only | tested only | tested only |
+| PHP | tested only | tested only | tested only |
+| Ruby | tested only | tested only | tested only |
+
+"Verified live" means run against the real running system, not mocks.
+"Tested only" means unit/integration tests with sample traces and diffs; no
+real app or toolchain for that language was run. The AI fix step itself has
+only been exercised live on Python (PR #10, #14), never on these examples.
+
 ## Roadmap (planned, not built)
 
-- **Any language via OpenTelemetry** — an OTLP ingest endpoint, stack-trace parsing
-  for JS/Java/Go/C#/PHP/Ruby, per-language anti-cheat checks, and example
-  Node/Go apps. **None of this exists.** What *is* built: Python (FastAPI),
-  Flask and Django middleware, and connecting external Python/JS/Go repos for
-  scanning (scan + "Fix" runtime path).
+- **Live verification for Java, C#, PHP, Ruby** — built and unit-tested, but
+  no example apps or toolchains were run (see the table above).
 - **Real cloud VM deploy** — run `provision_vm.sh` + `deploy.yml` against an
   actual Ubuntu VM and verify the rollback there.
 - **Linux RAM measurement** — the 300 MB target is only measured on Windows

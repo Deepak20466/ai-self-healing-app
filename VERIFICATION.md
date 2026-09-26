@@ -1,11 +1,11 @@
 # Verification
 
 Run by `scripts/verify_all.py` against the live local system (4 pods running,
-real Postgres, real GitHub) plus the pytest suite (359 tests) and CI on `main` (green).
+real Postgres, real GitHub) plus the pytest suite (426 tests) and CI on `main` (green).
 No real AI heal runs were made: the healer was started with its CLI disabled so
 the seeded-bug jobs could not invoke Claude.
 
-Last run: 2026-09-26 (with a real Chrome UI pass on localhost and a Cloudflare tunnel) — 69 PASS, 1 FAIL (RAM budget, known, listed below), 9 skipped for the reasons below. Live UI checks: login/wrong password, dashboard, chat (incl. rollback needs "yes"), metrics, apps, sign-out — all passed on both URLs.
+Last run: 2026-09-26 (local pods, no tunnel/admin password, so the tunnel-only checks skipped) — 73 PASS, 1 FAIL (RAM budget, known, listed below), 14 skipped for the reasons below. Earlier that day, with a tunnel and a real Chrome UI pass: 69 PASS, 1 FAIL, 9 skipped. Live UI checks: login/wrong password, dashboard, chat (incl. rollback needs "yes"), metrics, apps, sign-out — all passed on both URLs.
 
 ## ✅ Works (verified live)
 
@@ -25,6 +25,10 @@ Last run: 2026-09-26 (with a real Chrome UI pass on localhost and a Cloudflare t
 | One real AI-produced fix PR (runtime/silent bug) | PR #10 (free mode, Claude Code CLI) |
 | One real AI CI-fix on a PR, end to end | PR #14 |
 | No Docker files in the repo | scan |
+| OTLP ingest: token required (401 without), JSON and gzipped protobuf accepted, error stored against the right app | verify_all |
+| **Node (Express) example**: seeded `TypeError` captured over OpenTelemetry at `examples/node_app/src/users.js:15`; scan flags the failing test | `scripts/demo_examples.py` (run by verify_all) |
+| **Go example**: seeded divide-by-zero panic captured over OpenTelemetry at `examples/go_app/calc.go:12`; scan flags the failing test, `govulncheck` reported as skipped (not installed) | same |
+| Per-language stack-trace parsers, scanner detection, patch-guard test-skip rejection, onboarding file per language | verify_all + pytest |
 
 ## ⚠️ Built but not verified live
 
@@ -45,7 +49,7 @@ Last run: 2026-09-26 (with a real Chrome UI pass on localhost and a Cloudflare t
 
 | What | Note |
 |---|---|
-| OpenTelemetry / any-language support (OTLP ingest, JS/Java/Go/C#/PHP/Ruby trace parsing, per-language anti-cheat, Node and Go example apps) | Roadmap. Only Python, Flask, Django middleware exist |
+| Live capture/scan for Java, C#, PHP, Ruby | Parsers, scanner detection and anti-cheat are unit-tested only; no example app or toolchain run for these (see the README support table) |
 | CI-fix for connected external repos | Runtime-fix only |
 | Idle RAM under 300 MB | Not met: ~360 MB measured on Windows this run (up to ~480 MB earlier); not measured on Linux |
 | Dashboard/chat/metrics screenshots | Only the login page is captured (see README) |
