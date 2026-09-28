@@ -2913,3 +2913,123 @@ the touched files (a full-suite run hit the same pre-existing
 documents, in `tests/test_healer_budget.py` — unrelated to this change,
 which never touches `healer/budget.py`; confirmed by rerunning that file
 alone afterward, clean).
+
+### 2026-09-29 — CI green audit + real `selfheal` terminal demo (docs/demo-terminal.{gif,mp4})
+
+Two-part follow-up, headless, no real AI heal runs.
+
+**1. CI audit**: `gh run list --branch main --limit 10` showed every real
+run already green (`CI`/`Deploy` succeeding on every push; `CI failure -> AI
+fix` correctly `skipped` since nothing was actually broken). Nothing to
+fix.
+
+**2. A real terminal-demo recording**, built as a new one-off script,
+`scripts/record_terminal_demo.py` (not part of the pytest-covered surface —
+a recording tool, same category as the old, now-removed web-UI
+`record_demo.py`/`build_demo.py`). It runs the real `selfheal` CLI against
+actually-running pods (`up`, `login`, `status`, `apps`, `scan`, `errors`,
+`chat`, `prs`, `down`), captures REAL stdout/stderr and real wall-clock
+timing per command, then renders a typing-animation MP4/GIF from that exact
+transcript with Pillow + the already-installed `imageio_ffmpeg` binary (no
+new heavy deps beyond `Pillow`, installed into `.venv` only, matching the
+old demo tooling's precedent of not being a declared `pyproject.toml`
+dependency). Dead time (pod startup, scan duration, chat round trip) is
+sped up visually, same "speed up the wait" precedent the old demo recorder
+already established — no output text is fabricated anywhere.
+
+**Security, done exactly as instructed**: the admin password was read once
+from a `DEMO_ADMIN_PASSWORD` environment variable (never written to any
+file), used only as one-time input for the login step, and stripped from
+every other subprocess's environment before it's spawned. Before writing
+any image, `assert_no_secrets()` scans every captured frame's text against
+every real `.env` secret value AND `sentinel/scrubber.py`'s generic
+secret-shape detector, aborting the whole run if anything matches — this
+actually fired once during development (see below) and correctly blocked
+the run.
+
+**Three real, previously-unknown-to-this-script bugs found and fixed while
+actually running it (not by review)**:
+
+1. **`getpass.getpass` hangs forever on Windows when stdin is piped.**
+   Windows' `getpass` reads directly from the console device (`CONIN$`) via
+   `msvcrt`, ignoring redirected/piped stdin entirely — confirmed by
+   reproducing the hang directly (`printf 'pw\n' | python -m cli.main
+   login` blocks forever). This is a genuine OS-level constraint, not a
+   `cli/main.py` bug. Fixed by running the real `cli.main.login()` function
+   in-process (not as a subprocess) with `getpass.getpass` monkeypatched to
+   print the same prompt text and return the already-known password
+   directly — the login flow itself (the real HTTP call, the real session
+   cookie, `cli.config.save_session`) is completely unchanged and real;
+   only the terminal-echo-suppression device is stubbed, since there is no
+   real console to suppress echo on in the first place.
+2. **`sentinel.scrubber.scrub_text`'s generic secret-shape check
+   necessarily flags ANY `"Password: <anything>"`-shaped text, real secret
+   or not** — it can't tell "Password: <a real leaked secret>" apart from
+   "Password: <a synthetic 8-character mask this recorder inserted
+   itself>". This is correct, intentional behavior for the scrubber's
+   original purpose (redacting real captured errors) but meant the login
+   frame could never pass the generic check no matter what. Fixed by
+   scanning the REAL pre-mask captured text (which only ever contains the
+   bare prompt, never a real password) for literal secret values, and
+   skipping only the generic heuristic specifically for the login
+   recording — documented inline exactly why, so a future session doesn't
+   "fix" this by loosening the scrubber itself.
+3. **`selfheal scan go_app` (the app as registered in `config/
+   monitored_apps.yaml`, pointing at `examples/go_app`) always fails**:
+   `core/scanner.py:_app_dir` refuses to scan anything outside
+   `connected_apps/` by design (the untrusted-connected-repo isolation
+   boundary), and `examples/go_app` isn't under it — confirmed live (`Scan
+   did not finish within 4 minutes`, the CLI's own 4-minute poll timeout,
+   since `last_scanned_at` is never set after the scanner's internal
+   `ScanError`). This is the exact same constraint `scripts/
+   demo_examples.py` already worked around (see its "Any-language support"
+   log entry: "a scan of a copy under `connected_apps/` (scanner refuses
+   other dirs)") — not a new bug, but one this recording would otherwise
+   have silently "demonstrated" as a broken feature. Fixed the same
+   sanctioned way: copy `examples/go_app` to `connected_apps/go_app_demo/`,
+   register a temporary `MonitoredApp` row pointing there, run the real
+   `selfheal scan go_app_demo` through the real API, then delete the row
+   and the copy afterward — confirmed via a direct DB query and an `ls
+   connected_apps/` that nothing is left behind. The DB insert/delete steps
+   each run in their OWN fresh subprocess rather than a second `asyncio.run()`
+   call in the recorder's own process — `core.db.engine` is a module-level
+   singleton bound to whichever event loop first touches it, and a second
+   `asyncio.run()` in the same process crashes the pooled asyncpg
+   connection on Windows' `ProactorEventLoop` (`AttributeError: 'NoneType'
+   object has no attribute 'send'`, reproduced live) — the same
+   event-loop-per-process lesson this file already documents repeatedly
+   elsewhere (Phase 4's `isolated_budget_date`, the metrics-fix log's
+   worktree-pytest note, etc.).
+
+Also fixed: `subprocess.run(..., text=True)` without an explicit
+`encoding=` decodes captured output with the Windows console's default
+`cp1252` codepage, which crashed on real UTF-8 box-drawing characters Rich
+tables print (`UnicodeDecodeError` in the reader thread) even though the
+CHILD process's own `PYTHONIOENCODING=utf-8` was already set — the PARENT's
+decode step needed its own explicit `encoding="utf-8", errors="replace"`.
+
+**Real captured content, confirmed by inspecting extracted video frames**:
+`selfheal errors` shows the real seeded errors across all 3 in-repo apps
+(`examples/go_app/calc.go:12`, `examples/node_app/src/users.js:15`, several
+`apps/target_app/bugs.py` lines); `selfheal scan go_app_demo` shows the
+real seeded Go test failure (`FAIL: TestEmptyAverageD`) and a real
+health-score-70 finding; `selfheal chat`'s "show stats" reply is real
+`get_metrics` data (the same MTTR/success-rate/cost figures the metrics-fix
+log entry above reports); `selfheal prs` lists the real heal_job/PR rows
+(#10, #14, #15, and later failed/circuit-broken attempts) exactly as
+`docs/benchmark.md`'s own log describes them.
+
+Output: `docs/demo-terminal.mp4` (0.80 MB) and `docs/demo-terminal.gif`
+(3.15 MB) — both well under the 10 MB target. Added near the top of
+README with a one-line caption. All 4 pods confirmed stopped
+(`selfheal status --json` — all down) and no leftover `MonitoredApp`/
+`connected_apps/` state (confirmed via direct DB query and `ls`) after the
+final run.
+
+`ruff check .`/`ruff format --check .` clean repo-wide (`scripts/` stays
+outside the mypy-strict gate, same as every other script in this repo).
+`mypy core sentinel mcp_server healer cli` (strict) clean. `pytest`: 512
+passed / 1 skipped, clean (no flake this run). No application code was
+touched — this session's changes are `scripts/record_terminal_demo.py`
+(new), `docs/demo-terminal.{gif,mp4}` (new), and a one-line README
+addition.

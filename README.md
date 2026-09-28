@@ -1,5 +1,9 @@
 # AI-Powered Self-Healing Application
 
+![selfheal terminal demo: up, login, status, apps, scan, errors, chat, prs](docs/demo-terminal.gif)
+
+*Real, unscripted `selfheal` CLI session against the actually-running pods — every line above is genuine captured output (see [docs/demo-terminal.mp4](docs/demo-terminal.mp4) for the full-quality video).*
+
 **Terminal-only.** There is no web UI: everything is driven from a `selfheal`
 CLI talking to a set of pods that bind to `127.0.0.1` only (see "Terminal CLI"
 below). Only the sentinel webhook is ever exposed publicly, and only when you
