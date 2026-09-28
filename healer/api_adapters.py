@@ -305,7 +305,7 @@ class _GeminiMessages:
         async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(
                 f"{GEMINI_API_BASE}/models/{settings.gemini_api_model}:generateContent",
-                params={"key": self._api_key},
+                headers={"x-goog-api-key": self._api_key},
                 json=payload,
             )
         _raise_for_status_classified(response, backend="gemini_api")
@@ -344,6 +344,15 @@ class _GeminiMessages:
 
 class GeminiApiClient:
     """`AnthropicClientLike` adapter over Gemini's `generateContent` API.
+
+    Note on key format/transport: since 2026-05-28 Google AI Studio issues
+    "auth keys" starting with `AQ.` instead of the legacy `AIzaSy...`
+    standard keys, and auth keys are rejected by the `?key=` query-param
+    style -- they must go in the `x-goog-api-key` header (which Google's
+    docs say works for legacy `AIzaSy` keys too), confirmed via
+    https://ai.google.dev/gemini-api/docs/api-key and Google's own AI
+    Developer forum threads reporting the exact 401 this project's
+    original `?key=` implementation hit. Don't switch back to `?key=`.
 
     Note on tool_use ids: Gemini's `functionCall`/`functionResponse` protocol
     matches calls by function *name*, not by an id the way Anthropic/OpenAI

@@ -187,7 +187,7 @@ def test_groq_client_requires_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_gemini_text_only_response(respx_mock: Any) -> None:
-    respx_mock.post(f"{GEMINI_API_BASE}/models/gemini-2.0-flash:generateContent").mock(
+    route = respx_mock.post(f"{GEMINI_API_BASE}/models/gemini-2.0-flash:generateContent").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -208,6 +208,8 @@ async def test_gemini_text_only_response(respx_mock: Any) -> None:
     assert response.content[0].text == "hi from gemini"
     assert response.usage.input_tokens == 3
     assert response.usage.output_tokens == 4
+    assert route.calls.last.request.headers["x-goog-api-key"] == "fake-key"
+    assert "key" not in route.calls.last.request.url.params
 
 
 async def test_gemini_function_call_response(respx_mock: Any) -> None:
