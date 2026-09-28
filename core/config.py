@@ -119,7 +119,11 @@ class Settings(BaseSettings):
     chat_daily_budget_usd: Decimal = Decimal("1.00")
 
     # --- Safety guardrails -----------------------------------------------
+    #: Global fallback only -- a heal_job's effective auto-merge decision is
+    #: `HealJob.auto_merge_override` if set, else `MonitoredApp.auto_merge`
+    #: if the job has an app, else this setting. See healer/automerge.py.
     auto_merge: bool = False
+    auto_merge_poll_seconds: int = 60
 
     # --- Cloud deployment ------------------------------------------------
     deploy_host: str | None = None

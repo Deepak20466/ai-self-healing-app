@@ -37,6 +37,7 @@ async def enqueue_heal_job(
     source_pipeline_run_id: int | None = None,
     pr_number: int | None = None,
     app_id: int | None = None,
+    auto_merge_override: bool | None = None,
 ) -> HealJob:
     """Insert a queued HealJob and NOTIFY listeners. Caller commits.
 
@@ -49,6 +50,11 @@ async def enqueue_heal_job(
     job belongs to — set at insert time from the source error/violation's
     own `app_id`, never from a caller parameter downstream, so
     `propose_patch`'s write-scope lookup stays server-side-only.
+
+    `auto_merge_override` (terminal-only v1.0 Step 3) is a one-time per-fix
+    auto-merge decision (`selfheal fix --auto-merge`); left `None`, the
+    effective decision falls back to the app's own `auto_merge` setting —
+    see `healer/automerge.py:effective_auto_merge`.
     """
     job = HealJob(
         type=type,
@@ -59,6 +65,7 @@ async def enqueue_heal_job(
         source_pipeline_run_id=source_pipeline_run_id,
         pr_number=pr_number,
         app_id=app_id,
+        auto_merge_override=auto_merge_override,
     )
     session.add(job)
     await session.flush()

@@ -2247,3 +2247,93 @@ same pre-existing Windows flake, not hit this run). Real `selfheal up`/
 
 **Not yet done**: Steps 3-7 (per-app auto-merge, AI fallback chains,
 privacy guard, PyPI release, final verify).
+
+### 2026-09-28 — Terminal-only v1.0 (Step 3 of 7: per-app auto-merge)
+
+**Real gap found before building this**: `AUTO_MERGE` (`core/config.py`)
+already existed, but only as a note in the PR body
+(`healer/github_ops.py:_auto_merge_note`) -- nothing anywhere actually
+called GitHub's merge endpoint. "Per-app auto-merge" therefore needed a
+real merge mechanism built from scratch, not just a new column threaded
+through an existing one.
+
+Built:
+- `alembic/versions/0006_per_app_auto_merge.py`: `monitored_apps.auto_merge`
+  (bool, default OFF for every app -- connected repos always start OFF; the
+  demo app is merely *allowed* to be turned on, not on by default) and
+  `heal_jobs.auto_merge_override` (nullable bool -- `NULL` = "use the app's
+  own setting", set once at fix-request time for `selfheal fix
+  --auto-merge`'s one-time per-fix override).
+- `healer/automerge.py`: `effective_auto_merge(job, app)` (override ->
+  app -> global `settings.auto_merge`, in that precedence) and
+  `check_and_merge_eligible_jobs()`, a poller (same shape as sentinel-pod's
+  prober/anomaly loops, started as a background task in `healer/app.py`'s
+  lifespan) that merges a heal_job's PR only when its effective decision is
+  on AND GitHub reports `mergeable_state: "clean"` AND every check run on
+  the PR's head sha is `completed` with a `success`/`neutral`/`skipped`
+  conclusion. The local full-suite pass is not re-checked here -- it's
+  already a precondition for the PR existing at all (`healer/
+  full_suite.py`); this loop's whole job is confirming GitHub's *own* CI
+  independently agrees, since a real CI failure a local run can't reproduce
+  must still block a merge.
+- `mcp_server/github_client.py:merge_pull_request` (`PUT .../pulls/{n}/merge`).
+- `core/queue.py:enqueue_heal_job` gained `auto_merge_override`;
+  `healer/findings_actions.py:request_fix_for_finding` threads it through.
+  `healer/app.py`: `PATCH /api/apps/{id}` accepts `auto_merge`;
+  `POST /api/findings/{id}/fix` accepts an optional `{"auto_merge": bool}`
+  body (also fixed a latent gap: this endpoint's response never included
+  `finding_id`, only `heal_job_id` -- needed for `selfheal fix`'s
+  Step-2-written "Enqueued heal_job N for finding M" message to actually
+  show M).
+- `cli/main.py`: `selfheal apps set <app> --auto-merge on|off` (new `apps`
+  subcommand), and bare `selfheal apps` (no subcommand) now defaults to
+  listing, via a `Typer(invoke_without_command=True)` callback -- Step 2
+  had only wired `selfheal apps list`. `selfheal fix --auto-merge` now
+  actually posts `{"auto_merge": true}` (Step 2 accepted the flag but never
+  sent it anywhere).
+
+**Real bug found and fixed via a real test, not reasoning**: `/api/prs`
+(added in Step 2) ordered by `pr_opened_at.desc()`; almost every
+`heal_jobs` row in this repo's own heavily-reused test database has
+`pr_opened_at IS NULL` (including this session's own new automerge test
+rows), so a DESC sort over all-NULL values ties arbitrarily and a real
+query against the real dev-shaped test DB reliably failed to surface a
+freshly-inserted row within `LIMIT 20`. Fixed by ordering on `HealJob.id.
+desc()` instead (always populated, monotonic) -- caught by
+`test_api_prs_lists_heal_jobs_with_a_pr_number` actually failing against
+the real `selfheal_test` DB, not by reading the code and guessing.
+
+**Same "shared DB, unscoped global query" bug class hit again, twice, in
+one sitting** -- `check_and_merge_eligible_jobs()` deliberately queries
+*every* `heal_jobs` row with `status=pr_opened`, globally, by design (a
+heal_job's PR looks the same regardless of which app/backend produced it).
+That means:
+1. A test that creates a `pr_opened` row but never merges/fails it left a
+   real, permanently-committed row (`session_scope()`, no rollback) that
+   every *subsequent* test's own call to the same global query would also
+   try to process -- hitting GitHub routes that test never mocked. Fixed
+   with an autouse `_cleanup_created_jobs` fixture in
+   `tests/test_healer_automerge.py` that marks every job a test created as
+   `failed` in teardown, so it can never bleed into another test's run of
+   the same global query.
+2. That fix alone wasn't enough on its own -- **82 real leftover rows**
+   from this same file's own earlier (pre-cleanup-fixture) failed runs
+   were already sitting in `selfheal_test` from hardcoded `pr_number`s
+   (101-106) colliding across reruns, the exact "hardcoded key is a ticking
+   time bomb the moment a test runs more than once" trap CLAUDE.md's Phase
+   5 log already named. Cleaned the 82 rows directly (one-off, via
+   `TEST_DATABASE_URL`) and switched every test to a random `pr_number`
+   (`_random_pr_number()`), same pattern `test_healer_circuit_breaker.py`/
+   `test_healer_ci_agent.py` already established.
+
+Verified: `ruff check .`/`ruff format --check .` clean, `mypy core sentinel
+mcp_server healer cli` (strict) clean, `pytest` 481/482 (1 pre-existing
+skip; a `test_healer_budget.py` flake and two worktree-pytest tests failed
+on the *uncommitted* migration -- both already-documented, known-benign
+situations: `isolated_budget_date`'s rare cross-test collision (see Phase
+5's log), and "a new alembic revision breaks tests that run pytest inside a
+worktree of HEAD until it's committed" (see the 2026-09-26 metrics-fix log
+entry) -- confirmed fixed by rerunning after this commit).
+
+**Not yet done**: Steps 4-7 (AI fallback chains, privacy guard, PyPI
+release, final verify).

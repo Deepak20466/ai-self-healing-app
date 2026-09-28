@@ -44,6 +44,7 @@ from healer.auth import (
     require_auth,
     verify_socketio_token,
 )
+from healer.automerge import run_auto_merge_loop
 from healer.chat_agent import as_tool_list, handle_chat_message
 from healer.findings_actions import maybe_auto_fix_high_severity, request_fix_for_finding
 from healer.job_progress import recent_job_progress, run_progress_broadcaster
@@ -87,10 +88,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _mcp_client = mcp
     worker_task = asyncio.create_task(run_worker())
     progress_task = asyncio.create_task(run_progress_broadcaster(_socket_broadcast))
+    automerge_task = asyncio.create_task(run_auto_merge_loop())
     logger.info("healer_pod_started", mcp_url=mcp_url)
     try:
         yield
     finally:
+        automerge_task.cancel()
+        try:
+            await automerge_task
+        except asyncio.CancelledError:
+            pass
         progress_task.cancel()
         if worker_task is not None:
             worker_task.cancel()
@@ -252,6 +259,7 @@ def _app_summary(app_row: MonitoredApp, *, open_findings: int) -> dict[str, Any]
         "github_repo": app_row.github_repo,
         "connected": app_row.repo_url is not None,
         "auto_fix_high_severity": app_row.auto_fix_high_severity,
+        "auto_merge": app_row.auto_merge,
         "health_score": app_row.health_score,
         "last_scanned_at": app_row.last_scanned_at.isoformat() if app_row.last_scanned_at else None,
         "open_findings": open_findings,
@@ -381,6 +389,7 @@ async def rescan_app(
 
 class UpdateAppRequest(BaseModel):
     auto_fix_high_severity: bool | None = None
+    auto_merge: bool | None = None
 
 
 @app.patch("/api/apps/{app_id}")
@@ -395,6 +404,8 @@ async def update_app(
         raise HTTPException(status_code=404, detail="No such app")
     if body.auto_fix_high_severity is not None:
         app_row.auto_fix_high_severity = body.auto_fix_high_severity
+    if body.auto_merge is not None:
+        app_row.auto_merge = body.auto_merge
     await db.commit()
     return _app_summary(app_row, open_findings=await _open_findings_count(db, app_id))
 
@@ -438,9 +449,16 @@ async def capture_test(
     }
 
 
+class FixFindingRequest(BaseModel):
+    auto_merge: bool | None = None
+
+
 @app.post("/api/findings/{finding_id}/fix")
 async def fix_finding(
-    finding_id: int, username: str = Depends(require_auth), db: AsyncSession = Depends(get_db)
+    finding_id: int,
+    body: FixFindingRequest | None = None,
+    username: str = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     finding = await db.get(Finding, finding_id)
     if finding is None:
@@ -448,12 +466,15 @@ async def fix_finding(
     app_row = await db.get(MonitoredApp, finding.app_id)
     if app_row is None:
         raise HTTPException(status_code=404, detail="No such app")
-    job = await request_fix_for_finding(db, finding, app_row)
+    auto_merge_override = body.auto_merge if body is not None else None
+    job = await request_fix_for_finding(
+        db, finding, app_row, auto_merge_override=auto_merge_override
+    )
     await db.commit()
     await notifier.notify(
         "fix_requested", f"Fix requested for finding #{finding_id} (heal_job #{job.id})"
     )
-    return {"heal_job_id": job.id, "status": "queued"}
+    return {"heal_job_id": job.id, "finding_id": finding_id, "status": "queued"}
 
 
 @app.post("/api/apps/{app_id}/onboard-pr")

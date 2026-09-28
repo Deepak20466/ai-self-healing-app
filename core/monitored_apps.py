@@ -57,6 +57,7 @@ async def sync_monitored_apps(
             "lint_command": cfg.get("lint_command"),
             "health_url": cfg.get("health_url"),
             "ingest_token": cfg["ingest_token"],
+            "auto_merge": cfg.get("auto_merge", False),
         }
         stmt = (
             pg_insert(MonitoredApp)

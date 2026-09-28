@@ -195,6 +195,21 @@ class GitHubClient:
         data: dict[str, Any] = response.json()
         return data
 
+    async def merge_pull_request(
+        self, pr_number: int, *, merge_method: str = "squash"
+    ) -> dict[str, Any]:
+        """Merge a PR -- used only by `healer/automerge.py`'s poller, and only
+        after it has independently confirmed CI passed and mergeable_state is
+        clean (never trusted from a caller-supplied flag alone)."""
+        repo = self._repo_or_raise()
+        response = await self._request(
+            "PUT",
+            f"/repos/{repo}/pulls/{pr_number}/merge",
+            json={"merge_method": merge_method},
+        )
+        data: dict[str, Any] = response.json()
+        return data
+
     async def add_labels(self, issue_or_pr_number: int, labels: list[str]) -> None:
         """Add labels to a PR or issue (PRs are issues for labeling purposes)."""
         repo = self._repo_or_raise()

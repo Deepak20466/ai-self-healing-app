@@ -21,7 +21,11 @@ _HIGH_SEVERITY = ("high", "critical")
 
 
 async def request_fix_for_finding(
-    session: AsyncSession, finding: Finding, app: MonitoredApp
+    session: AsyncSession,
+    finding: Finding,
+    app: MonitoredApp,
+    *,
+    auto_merge_override: bool | None = None,
 ) -> HealJob:
     """Create a runtime_error heal_job for `finding` and mark it fix_requested.
 
@@ -30,6 +34,9 @@ async def request_fix_for_finding(
     attempt -- the circuit breaker (`healer.circuit_breaker.
     fingerprint_circuit_open`) is what actually prevents runaway repeat
     fixing of the same finding, same as it does for a real runtime error.
+
+    `auto_merge_override` is `selfheal fix --auto-merge`'s one-time
+    per-fix decision -- see `healer/automerge.py:effective_auto_merge`.
     """
     error = Error(
         fingerprint=finding.fingerprint,
@@ -50,6 +57,7 @@ async def request_fix_for_finding(
         fingerprint=finding.fingerprint,
         source_error_id=error.id,
         app_id=app.id,
+        auto_merge_override=auto_merge_override,
     )
     finding.status = FindingStatus.FIX_REQUESTED
     finding.heal_job_id = job.id

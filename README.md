@@ -367,9 +367,12 @@ it — no code changes, no separate deployment, still 100% free:
    high-severity finding) opens a `runtime_error` heal_job for it — same
    guardrails, same worktree/circuit-breaker/patch-size rules as every
    other heal job — which opens a PR directly against *that app's* own
-   GitHub repo. `selfheal apps set <app> --auto-merge on` does this
-   automatically for new high/critical findings after each scan; off by
-   default for connected repos.
+   GitHub repo. `selfheal apps set <app> --auto-merge on` merges that PR
+   automatically once the local full test suite AND GitHub CI both pass —
+   default OFF for every app (connected repos always start OFF; only this
+   project's own demo app is allowed to turn it on). `selfheal fix ...
+   --auto-merge` is a one-time override for a single fix, regardless of the
+   app's own setting.
 5. **Onboarding PR**: one click opens a PR adding a small, dependency-free
    error-reporting snippet to the connected repo (no LLM call — a fixed
    template picked by detected language), so once merged and wired up, live

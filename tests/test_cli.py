@@ -133,6 +133,35 @@ def test_apps_list(respx_mock: Any) -> None:
     assert "node_app" in result.output
 
 
+def test_bare_apps_defaults_to_list(respx_mock: Any) -> None:
+    _log_in()
+    respx_mock.get(f"{BASE_URL}/api/apps").mock(
+        return_value=httpx.Response(200, json=[{"id": 5, "name": "node_app"}])
+    )
+    result = runner.invoke(app, ["apps"])
+    assert result.exit_code == 0, result.output
+    assert "node_app" in result.output
+
+
+def test_apps_set_auto_merge(respx_mock: Any) -> None:
+    _log_in()
+    respx_mock.get(f"{BASE_URL}/api/apps").mock(
+        return_value=httpx.Response(200, json=[{"id": 5, "name": "node_app"}])
+    )
+    patch_route = respx_mock.patch(f"{BASE_URL}/api/apps/5").mock(
+        return_value=httpx.Response(200, json={"id": 5, "name": "node_app", "auto_merge": True})
+    )
+    result = runner.invoke(app, ["apps", "set", "node_app", "--auto-merge", "on"])
+    assert result.exit_code == 0, result.output
+    assert patch_route.called
+    assert patch_route.calls.last.request.content == b'{"auto_merge":true}'
+
+
+def test_apps_set_requires_a_value() -> None:
+    result = runner.invoke(app, ["apps", "set", "node_app"])
+    assert result.exit_code == 1
+
+
 def test_scan_resolves_app_name_and_polls_until_scanned(respx_mock: Any) -> None:
     _log_in()
     respx_mock.get(f"{BASE_URL}/api/apps").mock(

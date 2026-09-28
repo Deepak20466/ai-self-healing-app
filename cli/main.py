@@ -26,8 +26,16 @@ app = typer.Typer(
     help="Terminal client for the AI-powered self-healing system.",
     no_args_is_help=True,
 )
-apps_app = typer.Typer(help="Manage connected apps.")
+apps_app = typer.Typer(help="Manage connected apps.", invoke_without_command=True)
 app.add_typer(apps_app, name="apps")
+
+
+@apps_app.callback()
+def apps_callback(ctx: typer.Context) -> None:
+    """`selfheal apps` alone lists connected apps; see subcommands for more."""
+    if ctx.invoked_subcommand is None:
+        apps_list()
+
 
 console = Console()
 error_console = Console(stderr=True)
@@ -255,6 +263,34 @@ def apps_list(json_out: Annotated[bool, typer.Option("--json")] = False) -> None
     _print_or_json(rows, json_out, render)
 
 
+@apps_app.command("set")
+def apps_set(
+    app_name: str,
+    auto_merge: Annotated[
+        str | None,
+        typer.Option("--auto-merge", help="on|off -- merge this app's PRs once CI+tests pass."),
+    ] = None,
+) -> None:
+    """Change a connected app's settings, e.g. `selfheal apps set node_app --auto-merge on`."""
+    if auto_merge is None:
+        error_console.print("[red]Nothing to set. Pass --auto-merge on|off.[/red]")
+        raise typer.Exit(code=1)
+    if auto_merge not in ("on", "off"):
+        error_console.print("[red]--auto-merge must be 'on' or 'off'.[/red]")
+        raise typer.Exit(code=1)
+
+    async def _set() -> dict[str, Any]:
+        async with HealerClient.from_saved_session() as client:
+            app_id = await _resolve_app_id(client, app_name)
+            result: dict[str, Any] = await client.patch(
+                f"/api/apps/{app_id}", json={"auto_merge": auto_merge == "on"}
+            )
+            return result
+
+    result = _run(_set())
+    console.print(f"auto_merge for '{app_name}': [green]{result.get('auto_merge')}[/green]")
+
+
 async def _resolve_app_id(client: HealerClient, name_or_id: str) -> int:
     if name_or_id.isdigit():
         return int(name_or_id)
@@ -343,7 +379,10 @@ def fix(
                     raise typer.Exit(code=0)
             results = []
             for f in findings:
-                result: dict[str, Any] = await client.post(f"/api/findings/{f['id']}/fix")
+                body = {"auto_merge": True} if auto_merge else None
+                result: dict[str, Any] = await client.post(
+                    f"/api/findings/{f['id']}/fix", json=body
+                )
                 results.append(result)
             return results
 
