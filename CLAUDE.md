@@ -2718,7 +2718,35 @@ Windows ProactorEventLoop flake documented throughout this file), `ruff
 check`/`ruff format --check` clean, `mypy core sentinel mcp_server healer
 cli` (strict) clean.
 
-Tagged `v1.0.0` and pushed the tag, which triggers `.github/workflows/
-release.yml` to build the wheel/sdist and attach them to a real GitHub
-Release -- the actual PyPI-publish job stays a no-op until the project
-owner configures a `PYPI_API_TOKEN` secret (see Step 6's log entry).
+Tagged `v1.0.0` and pushed the tag. **Real, unexpected problem, found by
+watching the tag push actually run, not assumed working**: every run of
+`.github/workflows/release.yml` (on the tag push, and even on plain
+`main` commits that shouldn't match `on.push.tags: ["v*"]` at all) failed
+immediately with 0 jobs scheduled and GitHub's generic "This run likely
+failed because of a workflow file issue" -- no check-run, no job logs, so
+no normal debugging path. Investigated rather than guessed: validated the
+file against the official GitHub Actions workflow JSON schema via
+`check-jsonschema --builtin-schema vendor.github-workflows` (installed
+temporarily, then removed) -- **it passes cleanly**, same as `ci.yml` run
+through the same validator for comparison. Removed the `environment:
+pypi` line (a plausible cause -- referencing an environment that doesn't
+exist yet can fail run creation) and re-pushed; the failure persisted
+identically, including still triggering on a plain `main` push. This
+strongly suggests a genuine GitHub Actions platform-side registration
+quirk for a brand-new workflow file (the workflow's own metadata `name`
+field never picked up `name: Release` from the file either -- the API
+still reports it as `.github/workflows/release.yml`, consistent with
+GitHub not having fully processed the file yet), not a mistake in this
+YAML -- but this is not proven, only the most likely explanation left
+after ruling out schema and environment-reference causes. Rather than keep
+guessing at a platform issue with no error message to go on, shipped the
+actual v1.0.0 deliverable directly: built the wheel/sdist locally (already
+verified working in Step 6) and created the real GitHub Release via `gh
+release create v1.0.0 dist/*.whl dist/*.tar.gz --generate-notes` --
+https://github.com/Deepak20466/ai-self-healing-app/releases/tag/v1.0.0 is
+live with both artifacts attached. `release.yml` stays in the repo as the
+intended automation for the *next* tag; if it still fails with the same
+symptom next time, that confirms the platform-quirk theory over a content
+bug, and the workaround (build+release manually via `gh release create`)
+is already proven to work. The PyPI-publish job remains a no-op regardless
+until a `PYPI_API_TOKEN` secret is configured.
