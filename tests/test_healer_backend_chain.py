@@ -26,8 +26,12 @@ def test_has_key_for_cli_backends_is_always_true() -> None:
 def test_has_key_for_api_backends_reflects_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(core_settings, "gemini_api_key", None)
     monkeypatch.setattr(core_settings, "groq_api_key", "gsk_x")
+    monkeypatch.setattr(core_settings, "anthropic_api_key", None)
     assert backend_chain.has_key_for("gemini_api") is False
     assert backend_chain.has_key_for("groq_api") is True
+    assert backend_chain.has_key_for("openrouter_api") is False
+    monkeypatch.setattr(core_settings, "anthropic_api_key", "sk-or-x")
+    assert backend_chain.has_key_for("openrouter_api") is True
 
 
 def test_mark_cooldown_and_is_cooling_down() -> None:

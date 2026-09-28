@@ -391,7 +391,7 @@ async def _llm_fallback(mcp: MCPToolClient, text: str) -> ChatReply:
         try:
             if name == "claude_cli":
                 text_out = await _claude_cli_chat(text)
-            elif name in ("gemini_api", "groq_api", "api"):
+            elif name in ("gemini_api", "groq_api", "openrouter_api", "api"):
                 text_out = await _api_chat(name, mcp, text)
             else:
                 # codex_cli/gemini_cli chat isn't wired up (no read-only mode built for them yet)
@@ -441,6 +441,10 @@ async def _api_chat(name: str, mcp: MCPToolClient, text: str) -> str:
         from healer.api_adapters import GroqClient
 
         client = GroqClient()
+    elif name == "openrouter_api":
+        from healer.api_adapters import OpenRouterClient
+
+        client = OpenRouterClient()
     else:
         from healer.anthropic_client import build_anthropic_client
 

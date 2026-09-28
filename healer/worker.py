@@ -163,9 +163,28 @@ def _select_backend(name: str | None = None) -> _JobRunners:
             ci_failure=partial(run_ci_heal_job, anthropic_client=groq_client),
         )
 
+    if backend == "openrouter_api":
+        from functools import partial
+
+        from healer.anthropic_client import AnthropicClientLike
+        from healer.api_adapters import OpenRouterClient
+        from healer.ci_agent import run_ci_heal_job
+        from healer.runtime_agent import run_heal_job
+
+        openrouter_client: AnthropicClientLike = OpenRouterClient()
+        logger.info(
+            "worker.backend_selected",
+            backend="openrouter_api (OpenRouter free-tier HTTP API)",
+            model=settings.anthropic_model,
+        )
+        return _JobRunners(
+            runtime_or_contract=partial(run_heal_job, anthropic_client=openrouter_client),
+            ci_failure=partial(run_ci_heal_job, anthropic_client=openrouter_client),
+        )
+
     raise ValueError(
         f"unknown AI_BACKEND {backend!r}; expected one of "
-        "'claude_cli', 'codex_cli', 'gemini_cli', 'api', 'gemini_api', 'groq_api'"
+        "'claude_cli', 'codex_cli', 'gemini_cli', 'api', 'gemini_api', 'groq_api', 'openrouter_api'"
     )
 
 

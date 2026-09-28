@@ -1,15 +1,16 @@
 """Log every MCP tool call to `audit_log` (SPEC.md mcp-pod section), and --
 terminal-only v1.0 Step 5 -- scrub every tool RESULT before it goes back to
-whichever AI backend made the call. This is the one place all six AI
+whichever AI backend made the call. This is the one place all seven AI
 backends' tool calls funnel through regardless of who's driving the loop:
 `codex_cli`/`gemini_cli`/`claude_cli` call mcp-pod directly over HTTP (their
 own tool loop lives entirely outside this process, so this is the only
 Python-side chance to scrub before their content reaches a third-party LLM),
-and `api`/`gemini_api`/`groq_api` reach the exact same registered tool
-functions via `MCPToolClient.call_tool` from `runtime_agent.py`/`ci_agent.py`.
-Scrubbing here, once, covers every backend uniformly instead of duplicating
-scrub calls into each of `agent_free.py`/`agent_codex.py`/`agent_gemini.py`/
-`runtime_agent.py`/`ci_agent.py`/`chat_agent.py`.
+and `api`/`gemini_api`/`groq_api`/`openrouter_api` reach the exact same
+registered tool functions via `MCPToolClient.call_tool` from
+`runtime_agent.py`/`ci_agent.py`. Scrubbing here, once, covers every backend
+uniformly instead of duplicating scrub calls into each of `agent_free.py`/
+`agent_codex.py`/`agent_gemini.py`/`runtime_agent.py`/`ci_agent.py`/
+`chat_agent.py`.
 
 `audited_tool` is a drop-in replacement for `@mcp.tool()` that wraps
 registration with before/after audit logging — every tool in `tools/*.py`

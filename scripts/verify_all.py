@@ -1134,6 +1134,7 @@ def check_ai_backend_switching(report: Report) -> None:
         "api": "run_heal_job",
         "gemini_api": "run_heal_job",
         "groq_api": "run_heal_job",
+        "openrouter_api": "run_heal_job",
     }
     for value, want in expected.items():
         env = {

@@ -28,8 +28,9 @@ the tunnel-and-login-gated checks below are SKIPPED, not FAILED) —
 | Heal jobs get queued for triggered bugs; circuit breaker state readable | 20 recent jobs |
 | 13 read-only MCP tools respond against real data; `run_tests` runs in a real worktree | verify_all |
 | Write outside an app's allowed scope rejected by `propose_patch` | verify_all |
-| `AI_BACKEND`/`AI_CHAIN` backend selection: `claude_cli`, `codex_cli`, `gemini_cli`, `api`, `gemini_api`, `groq_api` all pick the right runner; a bad value fails at startup | fresh process per value (selection only, no CLI/HTTP call made) |
+| `AI_BACKEND`/`AI_CHAIN` backend selection: `claude_cli`, `codex_cli`, `gemini_cli`, `api`, `gemini_api`, `groq_api`, `openrouter_api` all pick the right runner; a bad value fails at startup | fresh process per value (selection only, no CLI/HTTP call made) |
 | `groq_api` backend: real HTTP tool-calling round trip | `scripts/check_ai_backends.py` — `PASS`, real response `'pong'` |
+| `openrouter_api` backend: real HTTP tool-calling round trip (`openrouter/free`) | `scripts/check_ai_backends.py` — `PASS`, real response `'pong'`; a separate direct call with a tool definition returned a genuine `tool_calls` response |
 | Daily budget cap pauses the healer | $999 spend vs $2 cap -> paused |
 | Local deploy, then forced-failure rollback (marker flips back) | `local_deploy.py` |
 | CI green on `main` | latest `ci.yml` run: success |
@@ -49,7 +50,7 @@ the tunnel-and-login-gated checks below are SKIPPED, not FAILED) —
 |---|---|
 | Codex CLI and Gemini CLI backends: running a fix | Neither CLI is installed here; built from public docs, mocked tests only. Only backend *selection* was verified |
 | `api` (Anthropic SDK) backend: real PR | Mocked Anthropic client only; no API key/billing used |
-| `gemini_api` backend: running a fix, or even the tiny live probe | First key tried was `AQ.`-format; `scripts/check_ai_backends.py` got `401 ACCESS_TOKEN_TYPE_UNSUPPORTED` even via the correct `x-goog-api-key` header — matches several reports on Google's own AI Developer Forum of the same failure for `AQ.`-format keys specifically. A follow-up `AIzaSy`-format key instead got `400 API_KEY_INVALID` on the plainest possible call (`GET /v1beta/models`) — a key-specific problem (wrong project / API not enabled / bad copy), not the `AQ.` bug. Neither key has worked yet; not a code bug in either case — see CLAUDE.md Step 5 and its 2026-09-29 follow-up |
+| `gemini_api` backend: running a fix, or even the tiny live probe — **now BLOCKED, not just unverified, and removed from this project's own default AI_CHAIN/CHAT_CHAIN** | First key tried was `AQ.`-format; `scripts/check_ai_backends.py` got `401 ACCESS_TOKEN_TYPE_UNSUPPORTED` even via the correct `x-goog-api-key` header — matches several reports on Google's own AI Developer Forum of the same failure for `AQ.`-format keys specifically. A follow-up `AIzaSy`-format key instead got `400 API_KEY_INVALID` on the plainest possible call (`GET /v1beta/models`) — a key-specific problem (wrong project / API not enabled / bad copy), not the `AQ.` bug. Neither key has worked yet; not a code bug in either case — see CLAUDE.md Step 5 and its 2026-09-29 follow-ups |
 | Login, `/api/prs`, `/api/backends`, per-app `auto_merge` PATCH, chat, metrics, `/api/apps` through the real API | Needs the admin password (only a hash exists) and a public tunnel; both absent this run. Covered by pytest, and by an earlier session's real Cloudflare-tunnel pass (see below) |
 | Signed CI webhook over the public internet | Tunnel not running this pass. Verified earlier through a Cloudflare tunnel; covered by pytest now |
 | Fresh CI-fix run | Costs AI usage; PR #14 is the earlier real run |

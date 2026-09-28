@@ -34,6 +34,7 @@ from sentinel.scrubber import scrub_text
 
 GROQ_API_BASE = "https://api.groq.com/openai/v1"
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 
 
 @dataclass
@@ -236,6 +237,99 @@ class GroqClient:
 
     @property
     def messages(self) -> _GroqMessages:
+        return self._messages
+
+
+class _OpenRouterMessages(_GroqMessages):
+    """Same OpenAI-compatible chat-completions wire format as Groq (subclass
+    reuses `_GroqMessages._to_openai_messages`/`_to_openai_tools` unchanged
+    -- OpenRouter's `/chat/completions` shape is byte-for-byte the same
+    request/response shape Groq's is), pointed at OpenRouter's endpoint and
+    model instead. Deliberately reuses `settings.anthropic_api_key`/
+    `settings.anthropic_model` rather than adding new `OPENROUTER_*`
+    settings: this project's `.env` already configures an OpenRouter key via
+    those two fields (they were already there for `api`-mode's
+    `ANTHROPIC_BASE_URL` override), and `openrouter_api` just reads the same
+    values -- no reason to duplicate the setting under a second name.
+    """
+
+    async def create(self, **kwargs: Any) -> _Response:
+        system = kwargs.get("system")
+        messages = kwargs["messages"]
+        tools = kwargs.get("tools", [])
+        max_tokens = kwargs.get("max_tokens", 4096)
+
+        payload: dict[str, Any] = {
+            "model": settings.anthropic_model,
+            "messages": self._to_openai_messages(system, messages),
+            "max_tokens": max_tokens,
+            # `openrouter/free` (and other free OpenRouter models) are often
+            # reasoning models -- verified live this session that a small
+            # max_tokens budget (e.g. this project's own live-check probe,
+            # 64 tokens) can be spent entirely on the hidden `reasoning`
+            # field, returning empty `content` -- same failure mode already
+            # documented and fixed for groq_api's default model above.
+            # "low" keeps that overhead small and predictable for a
+            # tool-calling agent loop; OpenRouter passes it through to
+            # whichever underlying model supports it, ignored otherwise.
+            "reasoning_effort": "low",
+        }
+        if tools:
+            payload["tools"] = self._to_openai_tools(tools)
+            payload["tool_choice"] = "auto"
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                f"{OPENROUTER_API_BASE}/chat/completions",
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                json=payload,
+            )
+        _raise_for_status_classified(response, backend="openrouter_api")
+        body = response.json()
+
+        message = body["choices"][0]["message"]
+        blocks: list[_Block] = []
+        if message.get("content"):
+            blocks.append(_Block(type="text", text=message["content"]))
+        for call in message.get("tool_calls") or []:
+            try:
+                args = json.loads(call["function"]["arguments"])
+            except (json.JSONDecodeError, TypeError):
+                args = {}
+            blocks.append(
+                _Block(type="tool_use", id=call["id"], name=call["function"]["name"], input=args)
+            )
+
+        usage = body.get("usage", {})
+        return _Response(
+            content=blocks,
+            usage=_Usage(
+                input_tokens=usage.get("prompt_tokens", 0),
+                output_tokens=usage.get("completion_tokens", 0),
+            ),
+        )
+
+
+class OpenRouterClient:
+    """`AnthropicClientLike` adapter over OpenRouter's OpenAI-compatible
+    `/chat/completions` API. Verified live this session against the real
+    `openrouter/free` model (OpenRouter's own free-tier auto-router): it
+    declares `"tools"`/`"tool_choice"` in `supported_parameters` and a real
+    call with a tool definition returned a genuine `tool_calls` response
+    (queried https://openrouter.ai/api/v1/models live, and made a real
+    tool-calling round trip, before trusting it -- not guessed from
+    training data, per this project's own standing "don't guess a model
+    slug" lesson). No need to pick a different model.
+    """
+
+    def __init__(self, api_key: str | None = None) -> None:
+        key = api_key or settings.anthropic_api_key
+        if not key:
+            raise RuntimeError("ANTHROPIC_API_KEY is not configured (used as the OpenRouter key)")
+        self._messages = _OpenRouterMessages(key)
+
+    @property
+    def messages(self) -> _OpenRouterMessages:
         return self._messages
 
 

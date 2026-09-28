@@ -100,6 +100,12 @@ class Settings(BaseSettings):
     # Real tool-calling backends via each provider's own REST API (not a CLI),
     # implemented as thin `AnthropicClientLike` adapters over
     # `healer/runtime_agent.py`/`healer/ci_agent.py` — see healer/api_adapters.py.
+    # `gemini_api` is BLOCKED as of 2026-09-29: every real key tried (both
+    # AQ.-format and AIzaSy-format) has failed live (see VERIFICATION.md's
+    # "Built but not verified live" table for the exact two Google-side
+    # errors) — the code/adapter is kept (it may start working once Google's
+    # side is fixed, or with a correctly-configured key), but it is no longer
+    # in this project's own default AI_CHAIN/CHAT_CHAIN.
     gemini_api_key: str | None = None
     gemini_api_model: str = "gemini-2.0-flash"
     groq_api_key: str | None = None
@@ -110,11 +116,16 @@ class Settings(BaseSettings):
     #: live instead (same lesson CLAUDE.md's Phase 4 log already names for
     #: OpenRouter slugs).
     groq_api_model: str = "openai/gpt-oss-120b"
+    # `openrouter_api` reuses `anthropic_api_key`/`anthropic_model` above
+    # rather than adding new settings — see healer/api_adapters.py's
+    # `OpenRouterClient` docstring for why. Verified live this session: the
+    # real `openrouter/free` model declares tool-calling support and a real
+    # tool-calling round trip against it succeeded.
 
     # --- AI fallback chains (terminal-only v1.0 Step 4) -----------------------
     # Ordered, comma-separated backend names, e.g.
-    # "claude_cli,gemini_api,groq_api". A backend with no key configured is
-    # skipped; one that returns a quota/rate-limit/auth error is put in
+    # "claude_cli,groq_api,openrouter_api". A backend with no key configured
+    # is skipped; one that returns a quota/rate-limit/auth error is put in
     # cooldown (see healer/backend_chain.py) and the next is tried. Unset =
     # a single-item chain from `ai_backend`/`chat_backend` (below), so
     # existing single-backend setups keep working unchanged.

@@ -1,8 +1,9 @@
 """One tiny, real, non-destructive HTTP call per free-tier AI backend that
-has a key configured in `.env` (`GEMINI_API_KEY`/`GROQ_API_KEY`) -- NOT a
-heal run, never spends a real AI_CHAIN attempt against a real bug. Prints
-only PASS/FAIL per backend, never the key itself (never write it to any
-file, log or commit -- see CLAUDE.md's terminal-only v1.0 log entry).
+has a key configured in `.env` (`GEMINI_API_KEY`/`GROQ_API_KEY`/
+`ANTHROPIC_API_KEY` for `openrouter_api`) -- NOT a heal run, never spends a
+real AI_CHAIN attempt against a real bug. Prints only PASS/FAIL per
+backend, never the key itself (never write it to any file, log or commit
+-- see CLAUDE.md's terminal-only v1.0 log entry).
 
 Usage: `python scripts/check_ai_backends.py`
 """
@@ -16,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.config import settings  # noqa: E402
-from healer.api_adapters import GeminiApiClient, GroqClient  # noqa: E402
+from healer.api_adapters import GeminiApiClient, GroqClient, OpenRouterClient  # noqa: E402
 from healer.backend_chain import BackendCooldownError  # noqa: E402
 
 _PROBE_TOOLS: list[dict[str, object]] = []
@@ -54,6 +55,10 @@ async def main() -> int:
         results.append(await _probe("groq_api", GroqClient))
     else:
         results.append("groq_api: SKIPPED (GROQ_API_KEY not set) -- untested live")
+    if settings.anthropic_api_key:
+        results.append(await _probe("openrouter_api", OpenRouterClient))
+    else:
+        results.append("openrouter_api: SKIPPED (ANTHROPIC_API_KEY not set) -- untested live")
 
     for line in results:
         print(line)

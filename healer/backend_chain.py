@@ -27,7 +27,7 @@ from core.config import settings
 logger = structlog.get_logger(__name__)
 
 CLI_BACKENDS = frozenset({"claude_cli", "codex_cli", "gemini_cli"})
-API_KEY_BACKENDS = frozenset({"gemini_api", "groq_api"})
+API_KEY_BACKENDS = frozenset({"gemini_api", "groq_api", "openrouter_api"})
 ALL_BACKENDS = CLI_BACKENDS | API_KEY_BACKENDS | frozenset({"api"})
 
 
@@ -76,6 +76,8 @@ def has_key_for(name: str) -> bool:
         return bool(settings.gemini_api_key)
     if name == "groq_api":
         return bool(settings.groq_api_key)
+    if name == "openrouter_api":
+        return bool(settings.anthropic_api_key)
     if name == "api":
         return bool(settings.anthropic_api_key)
     if name in CLI_BACKENDS:

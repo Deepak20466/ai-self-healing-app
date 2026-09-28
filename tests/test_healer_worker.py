@@ -204,6 +204,7 @@ def test_select_backend_by_explicit_name_builds_api_key_backends(
     adapter differs."""
     monkeypatch.setattr(core_settings, "groq_api_key", "gsk_test")
     monkeypatch.setattr(core_settings, "gemini_api_key", "test-key")
+    monkeypatch.setattr(core_settings, "anthropic_api_key", "sk-or-test")
 
     from healer.ci_agent import run_ci_heal_job
     from healer.runtime_agent import run_heal_job
@@ -214,6 +215,10 @@ def test_select_backend_by_explicit_name_builds_api_key_backends(
 
     gemini_runners = worker_module._select_backend("gemini_api")
     assert gemini_runners.runtime_or_contract.func is run_heal_job  # type: ignore[attr-defined]
+
+    openrouter_runners = worker_module._select_backend("openrouter_api")
+    assert openrouter_runners.runtime_or_contract.func is run_heal_job  # type: ignore[attr-defined]
+    assert openrouter_runners.ci_failure.func is run_ci_heal_job  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

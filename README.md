@@ -105,7 +105,7 @@ unauthenticated-401 without them.
 ## AI backend: pluggable (Claude Code / Codex / Gemini CLIs, the Anthropic API, or free Gemini/Groq HTTP APIs)
 
 The healer (`healer/`) drives every automated fix (and the AI chat) through
-one of **six** interchangeable backends, selected by `AI_BACKEND` in `.env`:
+one of **seven** interchangeable backends, selected by `AI_BACKEND` in `.env`:
 
 | `AI_BACKEND` | Module | Auth | Status |
 |---|---|---|---|
@@ -114,53 +114,75 @@ one of **six** interchangeable backends, selected by `AI_BACKEND` in `.env`:
 | `gemini_cli` | `healer/agent_gemini.py` | local Google Gemini CLI, your Google account login | **documented-only, untested live** — see caveat below |
 | `api` | `healer/runtime_agent.py` + `healer/ci_agent.py` | `ANTHROPIC_API_KEY`, official `anthropic` SDK | tested (mocked), no real end-to-end PR yet — see CLAUDE.md Phase 4 |
 | `groq_api` | `healer/api_adapters.py` (`GroqClient`) | `GROQ_API_KEY`, free tier | **live-verified** (real HTTP tool-calling round trip — see below) |
-| `gemini_api` | `healer/api_adapters.py` (`GeminiApiClient`) | `GEMINI_API_KEY`, free tier | code-complete, unit-tested, **not live-verified** — see caveat below |
+| `openrouter_api` | `healer/api_adapters.py` (`OpenRouterClient`) | `ANTHROPIC_API_KEY` (reused — see below), OpenRouter free tier | **live-verified** (real HTTP tool-calling round trip — see below) |
+| `gemini_api` | `healer/api_adapters.py` (`GeminiApiClient`) | `GEMINI_API_KEY`, free tier | **blocked** — every real key tried has failed live with a Google-side error; kept in the code, not in this project's own default chains — see caveat below |
 
 ### AI fallback chains (`AI_CHAIN`/`CHAT_CHAIN`)
 
 Instead of one fixed backend, set an ordered, comma-separated chain —
-e.g. `AI_CHAIN=claude_cli,groq_api,gemini_api` — and the worker tries each
-in order per job. A backend with no key configured is skipped; one that
-returns a quota/rate-limit/auth error is put in cooldown (default 1h, or
-the provider's own `Retry-After` if it sends one) and the next is tried —
-the SAME job is requeued for the next backend, not failed. Once every
-chain entry is exhausted or cooling down, the job is paused (not failed) so
-it can be re-tried automatically once a backend recovers. `CHAT_CHAIN`
-does the same for the `chat` command's LLM fallback (unset, it uses
-`CHAT_BACKEND` or falls back to `AI_BACKEND`). `selfheal status` shows each
-chain backend's live state (active / no key / cooling down until). A PR a
-fallback backend produced is never auto-merged, regardless of the app's own
-`auto_merge` setting — only the chain's first choice is trusted for that.
-`groq_api`/`gemini_api` reuse `healer/runtime_agent.py`/`healer/ci_agent.py`
-completely unchanged (they satisfy the same narrow `AnthropicClientLike`
-Protocol `api` mode already used) — no new tool-call loop, no new guardrail
-surface. Get free keys: Groq at https://console.groq.com/keys, Gemini at
-https://aistudio.google.com/apikey. Since 2026-05-28 AI Studio issues "auth
-keys" starting with `AQ.` (the legacy `AIzaSy...` format is being phased
-out); both are sent as the `x-goog-api-key` header (never `?key=`, which
-`AQ.` keys reject). **Known Google-side issue with `AQ.`-format keys**:
-several 401 with `ACCESS_TOKEN_TYPE_UNSUPPORTED` regardless of transport —
-multiple reports on Google's AI Developer Forum describe the same failure
-with a legacy `AIzaSy` key on the same account working fine, so this looks
-like a Google rollout bug affecting `AQ.` keys specifically, not a code
-issue here. A follow-up `AIzaSy`-format key still got `400
-API_KEY_INVALID` ("API key not valid") on the plainest possible call
-(`GET /v1beta/models` with the key in `x-goog-api-key`) — a key-specific
-problem (wrong project, Generative Language API not enabled for it, or a
-copy/paste issue), not the `AQ.` bug above. If `scripts/
-check_ai_backends.py` reports `gemini_api: FAIL`, check which of these two
-errors it is: `ACCESS_TOKEN_TYPE_UNSUPPORTED` means try a different Cloud
-project or wait for Google's `AQ.` bug to be fixed (no client-side
-workaround); `API_KEY_INVALID` means regenerate the key itself and confirm
-the Generative Language API is enabled for that project.
-`groq_api` remains **live-verified** — `scripts/check_ai_backends.py`
-returns a real `'pong'` HTTP response every time it's been tried.
+e.g. `AI_CHAIN=claude_cli,groq_api,openrouter_api` — and the worker tries
+each in order per job. A backend with no key configured is skipped; one
+that returns a quota/rate-limit/auth error is put in cooldown (default 1h,
+or the provider's own `Retry-After` if it sends one) and the next is
+tried — the SAME job is requeued for the next backend, not failed. Once
+every chain entry is exhausted or cooling down, the job is paused (not
+failed) so it can be re-tried automatically once a backend recovers.
+`CHAT_CHAIN` does the same for the `chat` command's LLM fallback (unset, it
+uses `CHAT_BACKEND` or falls back to `AI_BACKEND`) — this project's own
+`.env` sets `CHAT_CHAIN=groq_api,openrouter_api,claude_cli`. `selfheal
+status` shows each chain backend's live state (active / no key / cooling
+down until). A PR a fallback backend produced is never auto-merged,
+regardless of the app's own `auto_merge` setting — only the chain's first
+choice is trusted for that. `groq_api`/`openrouter_api`/`gemini_api` reuse
+`healer/runtime_agent.py`/`healer/ci_agent.py` completely unchanged (they
+satisfy the same narrow `AnthropicClientLike` Protocol `api` mode already
+used) — no new tool-call loop, no new guardrail surface.
+
+Get a free Groq key at https://console.groq.com/keys, and a free
+OpenRouter key at https://openrouter.ai/keys. `openrouter_api` deliberately
+reuses `ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL` (rather than adding new
+`OPENROUTER_*` settings) since OpenRouter accepts the same kind of bearer
+key there; set `ANTHROPIC_MODEL` to a real, free, tool-calling-capable
+OpenRouter model slug — `openrouter/free` (OpenRouter's own free-tier
+auto-router) is confirmed live-verified: it declares `tools`/`tool_choice`
+support in `GET https://openrouter.ai/api/v1/models` and a real
+tool-calling round trip against it returned a genuine `tool_calls`
+response. Query that endpoint live before picking a different model —
+don't guess a slug from training data (see CLAUDE.md's Phase 4 log for why
+this matters: free-tier slugs drift and get deprecated constantly).
+
+`gemini_api` is **blocked**, not merely unverified: get a free key at
+https://aistudio.google.com/apikey if you want to retry it yourself. Since
+2026-05-28 AI Studio issues "auth keys" starting with `AQ.` (the legacy
+`AIzaSy...` format is being phased out); both are sent as the
+`x-goog-api-key` header (never `?key=`, which `AQ.` keys reject). **Known
+Google-side issue with `AQ.`-format keys**: several 401 with
+`ACCESS_TOKEN_TYPE_UNSUPPORTED` regardless of transport — multiple reports
+on Google's AI Developer Forum describe the same failure with a legacy
+`AIzaSy` key on the same account working fine, so this looks like a Google
+rollout bug affecting `AQ.` keys specifically, not a code issue here. A
+follow-up `AIzaSy`-format key still got `400 API_KEY_INVALID` ("API key
+not valid") on the plainest possible call (`GET /v1beta/models` with the
+key in `x-goog-api-key`) — a key-specific problem (wrong project,
+Generative Language API not enabled for it, or a copy/paste issue), not the
+`AQ.` bug above. If `scripts/check_ai_backends.py` reports `gemini_api:
+FAIL`, check which of these two errors it is: `ACCESS_TOKEN_TYPE_UNSUPPORTED`
+means try a different Cloud project or wait for Google's `AQ.` bug to be
+fixed (no client-side workaround); `API_KEY_INVALID` means regenerate the
+key itself and confirm the Generative Language API is enabled for that
+project. Because neither key format has worked, `gemini_api` is left out
+of this project's own default `AI_CHAIN`/`CHAT_CHAIN`.
+
+`groq_api` and `openrouter_api` both remain **live-verified** —
+`scripts/check_ai_backends.py` returns a real `'pong'` HTTP response for
+each every time it's been tried.
 
 ### Privacy guard: secret scrubbing for AI backend payloads
 
 Every AI backend's tool calls — whether driven by a local CLI
 (`claude_cli`/`codex_cli`/`gemini_cli`, calling mcp-pod directly over HTTP)
-or by this process's own tool loop (`api`/`gemini_api`/`groq_api`, via
+or by this process's own tool loop (`api`/`gemini_api`/`groq_api`/
+`openrouter_api`, via
 `MCPToolClient.call_tool`) — pass through the *same* registered MCP tool
 functions in `mcp_server/tools/*.py`. `mcp_server/audit.py`'s
 `audited_tool()` wrapper (already used to log every call) now also runs
@@ -169,7 +191,7 @@ before returning it to whichever backend asked — the same scrubber
 sentinel-pod already uses to redact captured errors before they're ever
 persisted, extended with patterns for this project's own AI backend key
 formats (`gsk_...`, `AIzaSy...`, `AQ....`) and connection-string credentials
-(`user:pass@host`). This is one choke point covering all six backends, not
+(`user:pass@host`). This is one choke point covering all seven backends, not
 six separate call sites. `healer/api_adapters.py`'s `GroqClient`/
 `GeminiApiClient` additionally scrub their own final HTTP payload text as a
 second, defense-in-depth pass right before the network call. None of this

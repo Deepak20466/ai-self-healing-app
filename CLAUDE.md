@@ -2848,3 +2848,68 @@ mcp_server healer cli` (strict) clean, `pytest` 507 passed / 1 skipped
 application code besides the `healer/api_adapters.py` header-vs-query-param
 Gemini fix from the prior session (already committed) — this session's
 changes are docs + the `release.yml` workflow file only.
+
+### 2026-09-29 — new `openrouter_api` backend; `gemini_api` dropped from default chains
+
+The user added a real OpenRouter key (via `ANTHROPIC_API_KEY`, with
+`ANTHROPIC_MODEL=openrouter/free` and `ANTHROPIC_BASE_URL=https://
+openrouter.ai/api`) and set `AI_CHAIN=claude_cli,groq_api,openrouter_api` /
+`CHAT_CHAIN=groq_api,openrouter_api,claude_cli` — a backend name
+(`openrouter_api`) that didn't exist yet, distinct from the pre-existing
+`api` mode (the real Anthropic SDK client pointed at a base URL — which
+speaks Anthropic's Messages wire format, not something OpenRouter's REST
+API actually serves; `openrouter_api` instead talks OpenRouter's own
+OpenAI-compatible `/chat/completions` endpoint directly, the same pattern
+Step 4's `gemini_api`/`groq_api` adapters already established).
+
+Built `healer/api_adapters.py:OpenRouterClient`/`_OpenRouterMessages`
+(subclasses `_GroqMessages` to reuse its OpenAI-compatible message/tool
+conversion unchanged — OpenRouter's request/response shape is byte-for-byte
+the same as Groq's) — another `AnthropicClientLike` adapter over the SAME
+unchanged `runtime_agent.py`/`ci_agent.py`, same as `gemini_api`/`groq_api`.
+Deliberately reuses `settings.anthropic_api_key`/`settings.anthropic_model`
+rather than adding new `OPENROUTER_*` settings, since that's exactly what
+the user had already put in `.env` for this key. Wired into
+`healer/backend_chain.py` (`API_KEY_BACKENDS`, `has_key_for`),
+`healer/worker.py` (`_select_backend`), and `healer/chat_agent.py`
+(`_api_chat`) alongside the other two API-key backends — no other code
+path needed to change.
+
+**Live-tested before writing any adapter code, not assumed**: queried
+`GET https://openrouter.ai/api/v1/models` with the real key (never
+guessing a slug from training data, per this project's own standing rule)
+and confirmed `openrouter/free` (OpenRouter's own free-tier auto-router)
+is real, free (`pricing: {"prompt": "0", "completion": "0"}`), and declares
+`tools`/`tool_choice` in `supported_parameters`; a real tool-calling round
+trip against it (a plain `add(a, b)` function tool) returned a genuine
+`tool_calls` response. No need to pick a different model — `openrouter/free`
+already supports tool calling for real.
+
+**Real bug found and fixed via the live probe script, not review**:
+`scripts/check_ai_backends.py`'s tiny live check (max_tokens=64) got an
+empty-string response the first time it ran against `openrouter_api` —
+`openrouter/free` routes to a reasoning model that can spend the entire
+token budget on its hidden `reasoning` field and return empty `content`,
+the *exact* same failure mode Step 4's log already documents for Groq's
+`openai/gpt-oss-120b` default. Fixed identically: always send
+`"reasoning_effort": "low"` in the OpenRouter payload. Reran the live probe
+3 times after the fix — consistent real `'pong'`/`'Pong'` responses every
+time.
+
+Per the user's instruction, `gemini_api` is now dropped from this project's
+own default `AI_CHAIN`/`CHAT_CHAIN` and `.env.example` (code kept, marked
+"blocked" in `core/config.py`'s comment, `.env.example`, README, and
+VERIFICATION.md) — every real key tried against it (both `AQ.`-format and
+`AIzaSy`-format) has failed live with a Google-side error, documented in
+detail in the 2026-09-29 entry above.
+
+Verified: `scripts/check_ai_backends.py` — `groq_api: PASS`,
+`openrouter_api: PASS` (real HTTP tool-calling round trip),
+`gemini_api: SKIPPED` (key removed from `.env`, as expected). `ruff check
+.`/`ruff format --check .` clean, `mypy core sentinel mcp_server healer
+cli` (strict) clean, `pytest`: 512 passed / 1 skipped on a clean rerun of
+the touched files (a full-suite run hit the same pre-existing
+`isolated_budget_date` rare-collision flake this file's Phase 5 log already
+documents, in `tests/test_healer_budget.py` — unrelated to this change,
+which never touches `healer/budget.py`; confirmed by rerunning that file
+alone afterward, clean).
