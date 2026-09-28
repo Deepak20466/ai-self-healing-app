@@ -347,12 +347,16 @@ hourly heal-job cap is open.
 [**VERIFICATION.md**](VERIFICATION.md) — an automated verifier
 (`scripts/verify_all.py`) tests the *live running system* (all 4 pods, the
 public tunnel, real GitHub) against every item in SPEC.md's ACCEPTANCE
-CRITERIA and prints a PASS/FAIL/SKIPPED table with one-line evidence per
-row. Latest run: **63 PASS, 1 FAIL (RAM over budget on Windows — see below),
-6 SKIPPED** (destructive actions and AI-subscription-costing checks that are
-deliberately not re-run live; each cites the existing mocked test that
-covers it instead). Never invokes the Claude Code CLI, so it's safe to
-re-run anytime without spending AI usage.
+CRITERIA plus every terminal-only v1.0 feature (the `selfheal` CLI itself,
+`/api/prs`, `/api/backends`/AI fallback chains, per-app `auto_merge`,
+packaging) and prints a PASS/FAIL/SKIPPED table with one-line evidence per
+row. Latest run (local pods, no tunnel): **68 PASS, 1 FAIL (RAM over budget
+on Windows — see below), 18 SKIPPED** (destructive actions,
+AI-subscription-costing checks, and tunnel/login-gated checks that are
+deliberately not re-run without a real admin password; each cites the
+existing mocked test or earlier live pass that covers it instead). Never
+invokes the Claude Code CLI, so it's safe to re-run anytime without
+spending AI usage.
 
 [**docs/benchmark.md**](docs/benchmark.md) — `scripts/benchmark.py`, a
 companion script that *does* spend real Claude Code CLI usage: it triggers

@@ -2649,3 +2649,76 @@ touches application code).
 
 **Not yet done**: Step 7 (final terminal-only `verify_all.py`/
 `VERIFICATION.md` pass).
+
+### 2026-09-29 — Terminal-only v1.0 (Step 7 of 7: final verify pass, v1.0.0 tag)
+
+`scripts/verify_all.py` was already mostly terminal-appropriate (every
+check talks over `httpx`/the real `mcp` protocol, never a browser) --
+Step 7 added coverage for what Steps 2-6 actually built, which had no live
+check yet:
+- `check_terminal_v1_features` (new): shells out to the real `selfheal`
+  entry point (`python -m cli.main --help` / `status --json`) and, when a
+  public URL + admin password are available, exercises `/api/prs`,
+  `/api/backends` (AI fallback chain state), and a real `auto_merge`
+  PATCH-toggle-and-restore round trip against `target_app`'s row.
+- `check_ai_backend_switching` extended to also cover `gemini_api`/
+  `groq_api` backend selection (was `claude_cli`/`codex_cli`/`gemini_cli`/
+  `api` only).
+- `check_packaging` (new): runs a real `python -m build` into a throwaway
+  directory and confirms both a `.whl` and a `.tar.gz` come out.
+- Privacy guard (Step 5) is deliberately NOT re-proven here: there's no
+  live tool call in this system that naturally echoes a secret back to
+  the caller, so a live check would have to contrive one, testing the
+  verifier's own fixture more than the real deployment. It's already
+  proven for real (not mocked) by `tests/test_mcp_audit.py::
+  test_audited_tool_scrubs_the_returned_result_not_just_logged_args`,
+  cited in VERIFICATION.md instead -- same "cite existing evidence rather
+  than fabricate new evidence" principle this script's own docstring has
+  used since Post-Phase-8.
+
+**Two real bugs in the new checks themselves, found by actually running
+them, not by review** (same lesson as literally every prior "real bug
+found by live testing" entry in this file): both of my first-draft
+assertions were wrong about the CLI's actual output shape.
+1. `selfheal --help` run via `python -m cli.main` (not the installed
+   `selfheal` script) prints `Usage: python -m cli.main ...` in its Rich
+   help panel -- the literal string `"selfheal"` never appears anywhere in
+   that output, so an assertion requiring it always failed. Fixed to check
+   for `"Usage:"` instead, which is what actually indicates the entry
+   point ran successfully.
+2. My check for `status --json` assumed a bare list of `{"status": ...}`
+   rows; `cli/main.py`'s real `status` command returns
+   `{"pods": {...}, "logged_in": bool, "backends": {...}}`. Fixed to read
+   `status["pods"].values()`.
+
+Ran for real: started all 4 pods via `AI_BACKEND=api
+ANTHROPIC_API_KEY=invalid ANTHROPIC_BASE_URL=http://127.0.0.1:9 python -m
+cli.main up` (the documented pattern for running verify_all without
+spending AI budget), ran `scripts/verify_all.py` (no public tunnel/admin
+password this session -- same security constraint as every other step:
+never write the real admin password to any file/log/commit), fixed the
+two bugs above, reran to confirm, then `python -m cli.main down` and
+deleted the build/ directory `check_packaging` leaves behind. **68 PASS, 1
+FAIL, 18 SKIPPED** -- the one FAIL is the same pre-existing, documented
+Windows-vs-Linux RAM gap (535.8MB vs the 300MB target) every prior
+verification run has reported; nothing regressed by any of Steps 1-7.
+
+Rewrote `VERIFICATION.md` for the terminal-only v1.0 world: removed the
+"predates terminal-only v1.0" banner (this run supersedes it), added rows
+for the CLI/packaging/fallback-chain checks above, moved the `gemini_api`
+credential finding (Step 5) into "Built but not verified live" with the
+precise Google-side error, and kept the still-accurate cross-session notes
+(the MCP-reconnect gap, the broken 32-bit Git on PATH) under a renamed
+"Notes from earlier sessions" section. Updated README's "Verification"
+section summary numbers/description to match.
+
+**This closes the terminal-only v1.0 build.** All 7 steps are done,
+tested, and documented. `pytest` 508 passed / 1 skipped (same pre-existing
+Windows ProactorEventLoop flake documented throughout this file), `ruff
+check`/`ruff format --check` clean, `mypy core sentinel mcp_server healer
+cli` (strict) clean.
+
+Tagged `v1.0.0` and pushed the tag, which triggers `.github/workflows/
+release.yml` to build the wheel/sdist and attach them to a real GitHub
+Release -- the actual PyPI-publish job stays a no-op until the project
+owner configures a `PYPI_API_TOKEN` secret (see Step 6's log entry).

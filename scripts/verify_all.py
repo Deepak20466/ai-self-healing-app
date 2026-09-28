@@ -1132,9 +1132,17 @@ def check_ai_backend_switching(report: Report) -> None:
         "codex_cli": "run_heal_job_codex",
         "gemini_cli": "run_heal_job_gemini",
         "api": "run_heal_job",
+        "gemini_api": "run_heal_job",
+        "groq_api": "run_heal_job",
     }
     for value, want in expected.items():
-        env = {**os.environ, "AI_BACKEND": value, "ANTHROPIC_API_KEY": "fake-not-used"}
+        env = {
+            **os.environ,
+            "AI_BACKEND": value,
+            "ANTHROPIC_API_KEY": "fake-not-used",
+            "GEMINI_API_KEY": "fake-not-used",
+            "GROQ_API_KEY": "fake-not-used",
+        }
         env.pop("USE_CLAUDE_CODE", None)
         r = subprocess.run(  # noqa: S603
             [sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60
@@ -1154,6 +1162,148 @@ def check_ai_backend_switching(report: Report) -> None:
         "PASS" if r.returncode != 0 and "ValueError" in r.stderr else "FAIL",
         f"exit {r.returncode}",
     )
+
+
+def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603
+        [sys.executable, "-m", "cli.main", *args],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+
+async def check_terminal_v1_features(
+    report: Report, public_url: str | None, admin_password: str | None
+) -> None:
+    """Terminal-only v1.0 (Steps 2-6): the selfheal CLI itself, /api/prs,
+    /api/backends (AI fallback chains), per-app auto_merge, and packaging.
+    Privacy guard (Step 5) result-scrubbing is unit-tested directly and for
+    real against the running MCP code (tests/test_mcp_audit.py -- not
+    mocked), not re-proven here: there's no live tool call in this system
+    that naturally echoes a secret back, and contriving one would test the
+    verifier's own fixture more than the live deployment."""
+    r = _run_cli("--help")
+    report.add(
+        "selfheal CLI: entry point runs",
+        "PASS" if r.returncode == 0 and "Usage:" in r.stdout else "FAIL",
+        r.stdout[:120] if r.returncode == 0 else r.stderr[-150:],
+    )
+
+    r = _run_cli("status", "--json")
+    try:
+        status = json.loads(r.stdout) if r.returncode == 0 else {}
+        all_up = isinstance(status, dict) and all(
+            v == "up" for v in status.get("pods", {}).values()
+        )
+    except json.JSONDecodeError:
+        all_up = False
+    report.add(
+        "selfheal status --json: sees all 4 pods up",
+        "PASS" if all_up else "FAIL",
+        r.stdout[:150] if r.returncode == 0 else r.stderr[-150:],
+    )
+
+    if not (public_url and admin_password):
+        for feature in (
+            "/api/prs lists heal_jobs with a PR",
+            "/api/backends shows AI fallback chain state",
+            "per-app auto_merge PATCH round-trips",
+        ):
+            report.add(feature, "SKIPPED", "no public tunnel URL / --admin-password given")
+        return
+
+    async with httpx.AsyncClient(timeout=10.0, base_url=public_url) as client:
+        login = await client.post(
+            "/api/auth/login", json={"username": "admin", "password": admin_password}
+        )
+        if login.status_code != 200:
+            for feature in (
+                "/api/prs lists heal_jobs with a PR",
+                "/api/backends shows AI fallback chain state",
+                "per-app auto_merge PATCH round-trips",
+            ):
+                report.add(feature, "SKIPPED", "login failed")
+            return
+
+        try:
+            resp = await client.get("/api/prs")
+            report.add(
+                "/api/prs lists heal_jobs with a PR",
+                "PASS" if resp.status_code == 200 else "FAIL",
+                f"-> {resp.status_code}, "
+                f"{len(resp.json()) if resp.status_code == 200 else 0} row(s)",
+            )
+        except httpx.HTTPError as exc:
+            report.add("/api/prs lists heal_jobs with a PR", "FAIL", str(exc))
+
+        try:
+            resp = await client.get("/api/backends")
+            body = resp.json() if resp.status_code == 200 else {}
+            ok = resp.status_code == 200 and "fix_chain" in body and "chat_chain" in body
+            report.add(
+                "/api/backends shows AI fallback chain state",
+                "PASS" if ok else "FAIL",
+                f"-> {resp.status_code}, {json.dumps(body)[:100]}",
+            )
+        except httpx.HTTPError as exc:
+            report.add("/api/backends shows AI fallback chain state", "FAIL", str(exc))
+
+        try:
+            apps_resp = await client.get("/api/apps")
+            apps = apps_resp.json() if apps_resp.status_code == 200 else []
+            target = next((a for a in apps if a.get("name") == "target_app"), None)
+            if target is None:
+                report.add(
+                    "per-app auto_merge PATCH round-trips", "SKIPPED", "target_app not found"
+                )
+            else:
+                app_id = target["id"]
+                original = target.get("auto_merge", False)
+                toggled = await client.patch(
+                    f"/api/apps/{app_id}", json={"auto_merge": not original}
+                )
+                restored = await client.patch(f"/api/apps/{app_id}", json={"auto_merge": original})
+                ok = (
+                    toggled.status_code == 200
+                    and toggled.json().get("auto_merge") == (not original)
+                    and restored.status_code == 200
+                    and restored.json().get("auto_merge") == original
+                )
+                report.add(
+                    "per-app auto_merge PATCH round-trips",
+                    "PASS" if ok else "FAIL",
+                    f"{original} -> {not original} -> {original}",
+                )
+        except (httpx.HTTPError, KeyError) as exc:
+            report.add("per-app auto_merge PATCH round-trips", "FAIL", str(exc))
+
+
+def check_packaging(report: Report) -> None:
+    """Terminal-only v1.0 Step 6: the real wheel/sdist build, in a throwaway
+    directory (never touches the repo's own git-ignored dist/build/)."""
+    import shutil
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        r = subprocess.run(  # noqa: S603
+            [sys.executable, "-m", "build", "--outdir", tmp],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        built = list(Path(tmp).glob("*")) if r.returncode == 0 else []
+        has_wheel = any(p.suffix == ".whl" for p in built)
+        has_sdist = any(p.name.endswith(".tar.gz") for p in built)
+        report.add(
+            "packaging: python -m build produces wheel + sdist",
+            "PASS" if r.returncode == 0 and has_wheel and has_sdist else "FAIL",
+            f"built: {[p.name for p in built]}" if r.returncode == 0 else r.stderr[-200:],
+        )
+    shutil.rmtree(REPO_ROOT / "build", ignore_errors=True)
 
 
 def check_no_docker(report: Report) -> None:
@@ -1215,7 +1365,9 @@ async def main() -> int:
     await check_connect_a_repo(report, public_url, args.admin_password)
     await check_connect_real_repo(report, args.connect_repo)
     await check_any_language(report)
+    await check_terminal_v1_features(report, public_url, args.admin_password)
     check_ai_backend_switching(report)
+    check_packaging(report)
     check_no_docker(report)
 
     # Criteria satisfied by existing, already-real evidence rather than a
