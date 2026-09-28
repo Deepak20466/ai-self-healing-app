@@ -11,7 +11,9 @@ of those instead.
 
 from __future__ import annotations
 
-from mcp_server.audit import log_tool_call
+from typing import Any
+
+from mcp_server.audit import audited_tool, log_tool_call
 
 
 async def test_successful_call_is_logged_with_scrubbed_and_truncated_args(db_session) -> None:
@@ -72,3 +74,38 @@ async def test_long_argument_values_are_truncated(db_session) -> None:
     logged_value = matching[0].details["args"]["unified_diff"]
     assert len(logged_value) < 1000
     assert "chars omitted" in logged_value
+
+
+class _FakeMcp:
+    """Minimal stand-in for MCPServer.tool(): registers nothing, just returns
+    the function unwrapped -- audited_tool's own wrapper is what's under test."""
+
+    def tool(self, name: str | None = None, **kwargs: Any):  # noqa: ANN201
+        def decorator(func):  # noqa: ANN001, ANN202
+            return func
+
+        return decorator
+
+
+async def test_audited_tool_scrubs_the_returned_result_not_just_logged_args(
+    db_session,
+) -> None:
+    """Privacy guard (terminal-only v1.0 Step 5): a tool's RETURN VALUE is
+    what actually reaches whichever AI backend made the call (via
+    MCPToolClient.call_tool, or directly for a CLI backend talking to
+    mcp-pod) -- log_tool_call only ever scrubbed the logged args, never the
+    result handed back to the caller. This is the regression test for that
+    gap."""
+
+    @audited_tool(_FakeMcp(), "fake_tool_with_a_leaky_result")
+    async def fake_tool(error_id: int) -> dict[str, Any]:
+        return {
+            "error_id": error_id,
+            "message": "connection failed: postgresql://svc:hunter2@dbhost:5432/app",
+            "github_token": "ghp_" + "a" * 36,
+        }
+
+    result = await fake_tool(error_id=1)
+    assert "hunter2" not in result["message"]
+    assert "svc" not in result["message"]
+    assert result["github_token"] == "[REDACTED]"

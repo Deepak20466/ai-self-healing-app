@@ -30,6 +30,7 @@ import httpx
 
 from core.config import settings
 from healer.backend_chain import BackendCooldownError
+from sentinel.scrubber import scrub_text
 
 GROQ_API_BASE = "https://api.groq.com/openai/v1"
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
@@ -145,6 +146,14 @@ class _GroqMessages:
                         )
                     elif isinstance(item, dict) and item.get("type") == "text":
                         out.append({"role": "user", "content": item.get("text", "")})
+        # Privacy guard, defense-in-depth (terminal-only v1.0 Step 5): scrub
+        # every plain-text message content field right before it goes out
+        # over the wire to Groq. Tool RESULTS are already scrubbed once at
+        # the MCP layer (mcp_server/audit.py) -- this is a second, cheap
+        # pass on the final HTTP payload, not the only line of defense.
+        for m in out:
+            if isinstance(m.get("content"), str):
+                m["content"] = scrub_text(m["content"])
         return out
 
     @staticmethod
@@ -272,6 +281,15 @@ class _GeminiMessages:
                     elif isinstance(item, dict) and item.get("type") == "text":
                         parts.append({"text": item.get("text", "")})
                 out.append({"role": "user", "parts": parts})
+        # Privacy guard, defense-in-depth (terminal-only v1.0 Step 5): see
+        # the matching comment in _GroqMessages._to_openai_messages above.
+        for m in out:
+            for part in m.get("parts", []):
+                if isinstance(part.get("text"), str):
+                    part["text"] = scrub_text(part["text"])
+                response = part.get("functionResponse", {}).get("response")
+                if isinstance(response, dict) and isinstance(response.get("content"), str):
+                    response["content"] = scrub_text(response["content"])
         return out
 
     @staticmethod
@@ -296,7 +314,7 @@ class _GeminiMessages:
             "contents": self._to_gemini_contents(messages),
             "generationConfig": {"maxOutputTokens": max_tokens},
         }
-        system_text = _system_text(system)
+        system_text = scrub_text(_system_text(system))
         if system_text:
             payload["systemInstruction"] = {"parts": [{"text": system_text}]}
         if tools:

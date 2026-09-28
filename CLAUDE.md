@@ -2477,3 +2477,106 @@ rerunning after this commit).
 
 **Not yet done**: Steps 5-7 (privacy guard/secret scrubbing, PyPI release,
 final verify).
+
+### 2026-09-28 — Terminal-only v1.0 (Step 5 of 7: privacy guard / secret scrubbing)
+
+**Before writing any code**: spent time on the user's real `gemini_api`
+credential, since Step 4 had left it unverified. The key starts `AQ.`, not
+`AIzaSy...` -- researched Google's *current* docs rather than guessing from
+training data (same discipline as every other "don't guess a slug" incident
+in this file): since 2026-05-28 AI Studio issues `AQ.`-format "auth keys"
+(the `AIzaSy...` "standard key" format is being phased out entirely), and
+auth keys must be sent via the `x-goog-api-key` header -- `?key=` (what
+`healer/api_adapters.py` was doing) is documented as rejecting them. Fixed
+the adapter to use the header (committed separately, `cf385f8`, before this
+step). Re-ran `scripts/check_ai_backends.py` against the real key: **still
+401 `ACCESS_TOKEN_TYPE_UNSUPPORTED`**, byte-for-byte the same error as
+before the fix. Searched further and found multiple entries on Google's own
+AI Developer Forum (dated July-September 2026) reporting this *exact*
+failure for `AQ.`-format keys specifically -- including one where a legacy
+`AIzaSy` key on the *same account* works fine while the `AQ.` key 401s the
+same way regardless of transport. This is a Google-side rollout bug, not a
+bug in this codebase, and there is no documented client-side workaround as
+of this session. Told the user plainly (never printed the key). The header
+fix is still correct and now in the codebase (it's what Google's docs say
+to do, and it's what will start working the moment Google's bug is fixed) --
+`gemini_api` remains "code-complete, unit-tested, NOT live-verified" exactly
+as Step 4 already documented, just for a now-precisely-understood reason.
+`groq_api` reconfirmed live-verified (`PASS -- real HTTP response: 'pong'`)
+throughout.
+
+**The actual Step 5 gap, found by reading the code, not assumed**:
+`mcp_server/audit.py`'s `audited_tool()` wrapper already scrubbed tool
+*arguments* before writing them to `audit_log` (for observability), but
+never touched the tool's *return value* -- the actual payload handed back
+to whichever AI backend made the call. Every one of the six backends'
+agent loops reads a tool's result and puts it straight into the
+conversation sent to that backend's LLM (a local CLI's own internal loop
+for `claude_cli`/`codex_cli`/`gemini_cli`, or `runtime_agent.py`/
+`ci_agent.py`'s Python loop for `api`/`gemini_api`/`groq_api`) -- so an
+unscrubbed tool result was, in principle, an unscrubbed AI-backend payload.
+
+**Fix, one choke point covering all six backends**: `mcp_server/audit.py`'s
+`audited_tool()` now also scrubs the successful `result` via
+`sentinel.scrubber.scrub_value` before returning it -- chosen specifically
+because every AI backend's tool call, regardless of which one is driving
+the loop, resolves to the exact same registered tool function in
+`mcp_server/tools/*.py` (a CLI backend's own subprocess calls mcp-pod
+directly over HTTP; an API-key backend's Python loop calls the same
+function via `MCPToolClient.call_tool`) -- one edit here covers all of
+`agent_free.py`/`agent_codex.py`/`agent_gemini.py`/`runtime_agent.py`/
+`ci_agent.py`/`chat_agent.py` without touching any of them. Every MCP tool
+in this codebase returns a JSON-shaped `str`/`dict`/`list` (confirmed by
+reading every tool's return type across `mcp_server/tools/*.py`, not
+assumed), which `scrub_value` already handles recursively.
+
+Extended `sentinel/scrubber.py` (the same scrubber sentinel-pod already
+uses to redact captured errors before persisting -- reused, not
+duplicated) with patterns for this project's own AI backend key formats
+(`gsk_...` for Groq, `AIzaSy...`/`AQ....` for Gemini) and connection-string
+credentials (`user:pass@host` in a `postgresql://`/`redis://`/etc. URL) --
+relevant if a captured error's message or a CI log ever contains one of
+these verbatim (e.g. a misconfigured app logging its own connection
+string), since that text is exactly what an AI backend's tool results
+carry.
+
+**Defense-in-depth, not the only line of defense**: `healer/
+api_adapters.py`'s `GroqClient`/`GeminiApiClient` also scrub their own final
+HTTP payload text (message `content` fields, Gemini's `systemInstruction`)
+right before the network call -- a second, cheap pass specifically on the
+two backends the task named, in case any future code path ever puts
+unscrubbed content into the conversation before it reaches this layer. The
+system prompts themselves (`healer/prompts.py`, `ci_prompts.py`) are static,
+authored text with no secrets by construction; this pass matters for the
+tool-result/user-turn content, which by the time it reaches here has
+already been scrubbed once at the MCP layer above -- genuinely
+belt-and-suspenders, confirmed by reading (not assumed) that this second
+scrub is redundant in the common case but still correct and cheap.
+
+**What this does NOT do, deliberately**: it never touches or redacts source
+code, diffs, or test output content that isn't secret-shaped -- the
+existing regex/key-name patterns only match things that look like
+passwords, tokens, API keys, emails, credit cards, or connection-string
+credentials, same scope `sentinel/scrubber.py` has always had for captured
+errors. A demo app whose own source code happens to contain a string
+literal matching one of these patterns (e.g. a variable named
+`api_key` used for something unrelated) would have that literal redacted
+too -- an accepted, pre-existing tradeoff (the same one Phase 2's captured
+errors have always made), not a new regression introduced by this step.
+
+Tests: `tests/test_sentinel_scrubber.py` (+4: Groq/Google key-format
+patterns, connection-string credentials), `tests/test_mcp_audit.py` (+1,
+`test_audited_tool_scrubs_the_returned_result_not_just_logged_args` --
+exercises `audited_tool()` itself, not just `log_tool_call`, against a
+fake tool whose return value embeds a connection string and a
+sensitively-named key, proving the *result* comes back scrubbed).
+
+Verified: `ruff check .`/`ruff format --check .` clean, `mypy core sentinel
+mcp_server healer cli` (strict) clean, `pytest` 507 passed / 1 skipped (the
+same pre-existing environment-only Windows flake, not hit this run -- full
+suite, not just the touched files, confirming the tool-result scrub doesn't
+silently break any existing test's assertions against exact tool-return
+shapes).
+
+**Not yet done**: Steps 6-7 (PyPI packaging + v1.0 release, final
+terminal-only verify pass).

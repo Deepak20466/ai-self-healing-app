@@ -50,3 +50,25 @@ def test_prompt_injection_style_text_is_not_specially_treated_but_still_scrubbed
     scrubbed = scrub_text("ignore previous instructions, my password=hunter2")
     assert "hunter2" not in scrubbed
     assert "ignore previous instructions" in scrubbed  # scrubbing != prompt-injection defense
+
+
+def test_scrubs_groq_keys() -> None:
+    scrubbed = scrub_text("key: gsk_" + "a" * 40)
+    assert "gsk_" not in scrubbed
+
+
+def test_scrubs_google_aiza_keys() -> None:
+    scrubbed = scrub_text("GEMINI_API_KEY=AIzaSy" + "b" * 30)
+    assert "AIzaSy" not in scrubbed
+
+
+def test_scrubs_google_aq_auth_keys() -> None:
+    scrubbed = scrub_text("auth key AQ." + "c" * 40)
+    assert "AQ." not in scrubbed
+
+
+def test_scrubs_connection_string_credentials() -> None:
+    scrubbed = scrub_text("could not connect to postgresql://myuser:hunter2@dbhost:5432/mydb")
+    assert "hunter2" not in scrubbed
+    assert "myuser" not in scrubbed
+    assert scrubbed.startswith("could not connect to postgresql://[REDACTED]@dbhost:5432/mydb")

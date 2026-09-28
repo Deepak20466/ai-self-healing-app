@@ -135,8 +135,39 @@ fallback backend produced is never auto-merged, regardless of the app's own
 completely unchanged (they satisfy the same narrow `AnthropicClientLike`
 Protocol `api` mode already used) — no new tool-call loop, no new guardrail
 surface. Get free keys: Groq at https://console.groq.com/keys, Gemini at
-https://aistudio.google.com/apikey (a real key looks like `AIzaSy...` — an
-OAuth access token copied from somewhere else will 401).
+https://aistudio.google.com/apikey. Since 2026-05-28 AI Studio issues "auth
+keys" starting with `AQ.` (the legacy `AIzaSy...` format is being phased
+out); both are sent as the `x-goog-api-key` header (never `?key=`, which
+`AQ.` keys reject). **Known Google-side issue as of this session**: several
+`AQ.`-format keys 401 with `ACCESS_TOKEN_TYPE_UNSUPPORTED` regardless of
+transport — multiple reports on Google's AI Developer Forum describe the
+same failure with a legacy `AIzaSy` key on the same account working fine,
+so this looks like a Google rollout bug affecting `AQ.` keys specifically,
+not a code issue here. If `scripts/check_ai_backends.py` reports
+`gemini_api: FAIL` with that exact error, try requesting a key from a
+different Cloud project, or wait for Google to fix it — there is no
+client-side workaround.
+
+### Privacy guard: secret scrubbing for AI backend payloads
+
+Every AI backend's tool calls — whether driven by a local CLI
+(`claude_cli`/`codex_cli`/`gemini_cli`, calling mcp-pod directly over HTTP)
+or by this process's own tool loop (`api`/`gemini_api`/`groq_api`, via
+`MCPToolClient.call_tool`) — pass through the *same* registered MCP tool
+functions in `mcp_server/tools/*.py`. `mcp_server/audit.py`'s
+`audited_tool()` wrapper (already used to log every call) now also runs
+every tool's **result** through `sentinel/scrubber.py`'s `scrub_value`
+before returning it to whichever backend asked — the same scrubber
+sentinel-pod already uses to redact captured errors before they're ever
+persisted, extended with patterns for this project's own AI backend key
+formats (`gsk_...`, `AIzaSy...`, `AQ....`) and connection-string credentials
+(`user:pass@host`). This is one choke point covering all six backends, not
+six separate call sites. `healer/api_adapters.py`'s `GroqClient`/
+`GeminiApiClient` additionally scrub their own final HTTP payload text as a
+second, defense-in-depth pass right before the network call. None of this
+touches what gets sent *to* fix a bug (source code, diffs, test output) —
+only secret-shaped substrings that might incidentally appear in captured
+error text or tool output.
 
 The old `USE_CLAUDE_CODE` boolean still works as a backwards-compatible
 alias (`true` → `ai_backend=claude_cli`, `false` → `ai_backend=api`) — see
