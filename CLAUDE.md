@@ -2750,3 +2750,101 @@ symptom next time, that confirms the platform-quirk theory over a content
 bug, and the workaround (build+release manually via `gh release create`)
 is already proven to work. The PyPI-publish job remains a no-op regardless
 until a `PYPI_API_TOKEN` secret is configured.
+
+### 2026-09-29 — new AI keys re-tested; release.yml's real root cause found and fixed
+
+**AI backend keys**: the user replaced `GEMINI_API_KEY` (new `AIzaSy...`
+key) and `GROQ_API_KEY` in `.env`. Re-ran `scripts/check_ai_backends.py`
+(no heal run, key never printed):
+- `groq_api`: **PASS**, real HTTP response `'pong'` — reconfirmed
+  live-verified, unchanged from before.
+- `gemini_api`: still fails, but with a *different* error than the
+  previous `AQ.`-format key — now `400 API_KEY_INVALID` ("API key not
+  valid") on the plainest possible call (`GET /v1beta/models` with the key
+  in `x-goog-api-key`, confirmed directly, not just through the adapter).
+  This is a key-specific problem (wrong Cloud project, Generative Language
+  API not enabled for that project, or a copy/paste error) — not the
+  `AQ.`-format platform bug from before, and not a code bug either time.
+  Reported the exact Google error back rather than guessing further; the
+  user needs to fix or regenerate the key project-side. Updated the
+  README's fallback-chain section and `VERIFICATION.md`'s `gemini_api` row
+  to describe both known failure modes (`ACCESS_TOKEN_TYPE_UNSUPPORTED` vs
+  `API_KEY_INVALID`) so a future session can tell them apart immediately.
+
+**release.yml real root cause found and fixed, by bisecting with real test
+tags, not by more guessing.** Every prior theory (environment reference,
+schema validity) had already been ruled out; this session found the actual
+cause: `check-jsonschema --builtin-schema vendor.github-workflows` (the
+official GitHub Actions JSON schema) validates the file cleanly — schema
+validation cannot catch this class of bug, because **the `secrets` context
+is not a valid named-value inside any `if:` expression, job-level or
+step-level** (confirmed via the IDE's own GitHub Actions extension
+diagnostics: "Unrecognized named-value: 'secrets'" / "Unexpected symbol:
+'${{'" pointing exactly at the `if:` lines). Referencing it there doesn't
+just fail that one job's condition — it makes the **entire workflow file**
+fail to register: every run showed 0 jobs scheduled, a generic "workflow
+file issue" with no logs or check-run, and the file's own `name: Release`
+never took effect in `gh workflow list` (it kept showing the literal path
+instead), even on plain `main` pushes that should never have matched
+`on.push.tags: ["v*"]` at all -- a broken-workflow run bypasses its own
+trigger filter to surface the error, which is what made it look like the
+tag filter itself was broken.
+
+**Verified by real bisection**, exactly as asked, using disposable test
+tags (`v1.0.1-rc1` through `rc4`, each cleaned up after):
+1. `v1.0.1-rc1` — stripped to one trivial job, no `if:` anywhere: **real
+   jobs ran**, correctly triggered only by the tag (not by the `main`
+   pushes in between), proving the base file/trigger shape is fine.
+2. `v1.0.1-rc2` — added back the full `build` job (all real steps):
+   **real jobs ran**, failed only at the (deliberate, expected) version-
+   mismatch check, since the test tag doesn't match `pyproject.toml`'s
+   version — proves job 1's content was never the problem.
+3. `v1.0.1-rc3` — added back `publish-to-pypi` with `secrets.*` moved out
+   of `if:` into a job-level `env:` block, gating on `env.PYPI_API_TOKEN
+   != ''` instead: **real jobs ran for both jobs**, `publish-to-pypi`
+   correctly shown as `skipped` (its `needs: build` failed) — confirms the
+   fix.
+4. `v1.0.1-rc4` — final file with full comments restored: same real,
+   correct result, confirming comments weren't a factor.
+
+Fixed `.github/workflows/release.yml` for real (not just theorized): the
+`publish-to-pypi` job now copies `${{ secrets.PYPI_API_TOKEN }}` into a
+job-level `env:` var and gates both its steps on `env.PYPI_API_TOKEN !=
+''` — the `env` context IS permitted in `if:`, unlike `secrets`. **Rule
+for any future workflow in this repo: never put `secrets.*` directly
+inside an `if:` condition, anywhere, job- or step-level** — route it
+through `env:` first. Documented this directly in the workflow file's own
+header comment so it isn't rediscovered the hard way again.
+
+Cleanup performed exactly as asked: deleted all 4 test tags/refs
+(`v1.0.1-rc1..rc4`, remote and local) — no releases were ever created for
+them, since every rc's `build` job correctly failed at the version-mismatch
+check before reaching the release-creation step. Also deleted every
+prior failed `Release` workflow run (both the original pre-fix 0-job
+failures and the rc2-rc4 bisection runs) via `gh run delete`, so the
+Actions tab now shows a clean slate for this workflow going forward — the
+next real tag push (e.g. a genuine v1.0.1) will be its first real,
+non-deleted run.
+
+**README audit for leftover web-UI/screenshot/demo-video references**:
+found and fixed two real stale mentions the terminal-only v1.0 pass had
+missed — the "Project layout" section still described `web/` (React 18 +
+htm UI) as part of the repo, built in Phases 6-7 (false: removed in
+Terminal-only v1.0 Step 1); fixed to describe `cli/` instead and state
+plainly there is no `web/` directory. The "Benchmark" section referenced
+"the Metrics page" (a browser UI concept); reworded to "`selfheal
+metrics`". Also caught and fixed a claim this session's own earlier edit
+had introduced without checking: "Onboarding PR: one click..." implied a
+`selfheal` subcommand exists for it — checked `cli/main.py` directly (no
+such command), and reworded to describe the real, correct interface
+(`POST /api/apps/{id}/onboard-pr`, not yet wrapped by the CLI). No other
+`docs/images/`, `demo.mp4`/`demo.gif`, or dashboard/browser references
+remain (all were already removed correctly in the original terminal-only
+v1.0 pass — confirmed by a fresh grep, not assumed).
+
+Verified: `ruff check .`/`ruff format --check .` clean, `mypy core sentinel
+mcp_server healer cli` (strict) clean, `pytest` 507 passed / 1 skipped
+(same pre-existing Windows flake). Nothing in this session touched
+application code besides the `healer/api_adapters.py` header-vs-query-param
+Gemini fix from the prior session (already committed) — this session's
+changes are docs + the `release.yml` workflow file only.

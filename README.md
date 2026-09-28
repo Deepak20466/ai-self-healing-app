@@ -138,15 +138,23 @@ surface. Get free keys: Groq at https://console.groq.com/keys, Gemini at
 https://aistudio.google.com/apikey. Since 2026-05-28 AI Studio issues "auth
 keys" starting with `AQ.` (the legacy `AIzaSy...` format is being phased
 out); both are sent as the `x-goog-api-key` header (never `?key=`, which
-`AQ.` keys reject). **Known Google-side issue as of this session**: several
-`AQ.`-format keys 401 with `ACCESS_TOKEN_TYPE_UNSUPPORTED` regardless of
-transport — multiple reports on Google's AI Developer Forum describe the
-same failure with a legacy `AIzaSy` key on the same account working fine,
-so this looks like a Google rollout bug affecting `AQ.` keys specifically,
-not a code issue here. If `scripts/check_ai_backends.py` reports
-`gemini_api: FAIL` with that exact error, try requesting a key from a
-different Cloud project, or wait for Google to fix it — there is no
-client-side workaround.
+`AQ.` keys reject). **Known Google-side issue with `AQ.`-format keys**:
+several 401 with `ACCESS_TOKEN_TYPE_UNSUPPORTED` regardless of transport —
+multiple reports on Google's AI Developer Forum describe the same failure
+with a legacy `AIzaSy` key on the same account working fine, so this looks
+like a Google rollout bug affecting `AQ.` keys specifically, not a code
+issue here. A follow-up `AIzaSy`-format key still got `400
+API_KEY_INVALID` ("API key not valid") on the plainest possible call
+(`GET /v1beta/models` with the key in `x-goog-api-key`) — a key-specific
+problem (wrong project, Generative Language API not enabled for it, or a
+copy/paste issue), not the `AQ.` bug above. If `scripts/
+check_ai_backends.py` reports `gemini_api: FAIL`, check which of these two
+errors it is: `ACCESS_TOKEN_TYPE_UNSUPPORTED` means try a different Cloud
+project or wait for Google's `AQ.` bug to be fixed (no client-side
+workaround); `API_KEY_INVALID` means regenerate the key itself and confirm
+the Generative Language API is enabled for that project.
+`groq_api` remains **live-verified** — `scripts/check_ai_backends.py`
+returns a real `'pong'` HTTP response every time it's been tried.
 
 ### Privacy guard: secret scrubbing for AI backend payloads
 
@@ -452,10 +460,12 @@ it — no code changes, no separate deployment, still 100% free:
    project's own demo app is allowed to turn it on). `selfheal fix ...
    --auto-merge` is a one-time override for a single fix, regardless of the
    app's own setting.
-5. **Onboarding PR**: one click opens a PR adding a small, dependency-free
-   error-reporting snippet to the connected repo (no LLM call — a fixed
-   template picked by detected language), so once merged and wired up, live
-   runtime errors in that app flow into this system's detection loop too.
+5. **Onboarding PR**: `POST /api/apps/{id}/onboard-pr` opens a PR adding a
+   small, dependency-free error-reporting snippet to the connected repo (no
+   LLM call — a fixed template picked by detected language), so once merged
+   and wired up, live runtime errors in that app flow into this system's
+   detection loop too. Not yet wrapped by a `selfheal` subcommand — call the
+   API endpoint directly for now.
 
 See `core/repo_connect.py` (clone/detect/register), `core/scanner.py` (the
 isolated scan), and `healer/onboarding.py` for the implementation; a repo
@@ -737,9 +747,12 @@ Q&A, and real bugs found while building this), see
 ## Project layout
 
 See `SPEC.md`'s "PROJECT STRUCTURE" section — the repo matches it exactly,
-plus `.github/workflows/`, `deploy/` (systemd units + Caddyfile), and `web/`
-(the React 18 + htm, no-build-step UI), all built in Phases 6-7.
+plus `.github/workflows/`, `deploy/` (systemd units + Caddyfile), and `cli/`
+(the `selfheal` Typer + Rich CLI, terminal-only v1.0's replacement for the
+Phase 6-7 browser UI — see "Terminal CLI" above). There is no `web/`
+directory; it was removed entirely in terminal-only v1.0 Step 1 (see
+`CLAUDE.md`'s "Terminal-only v1.0" log entry).
 
 ## Benchmark
 
-**Clean benchmark: in progress. See [docs/benchmark.md](docs/benchmark.md).** The full write-up of the first run (0/2, with root causes: pinned demo tests and a `git push` timeout, both fixed since) is there. The all-time and AI-attempted success rates on the Metrics page are unaffected.
+**Clean benchmark: in progress. See [docs/benchmark.md](docs/benchmark.md).** The full write-up of the first run (0/2, with root causes: pinned demo tests and a `git push` timeout, both fixed since) is there. The all-time and AI-attempted success rates reported by `selfheal metrics` are unaffected.
