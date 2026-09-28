@@ -124,14 +124,16 @@ def status(json_out: Annotated[bool, typer.Option("--json")] = False) -> None:
             pod_status[name] = "up" if await pods.pod_is_up(name) else "down"
         session = load_session()
         logged_in = False
+        backends: dict[str, Any] = {}
         if session is not None:
             try:
                 async with HealerClient(session) as client:
                     await client.get("/api/auth/session")
-                logged_in = True
+                    logged_in = True
+                    backends = await client.get("/api/backends")
             except CliError:
                 logged_in = False
-        return {"pods": pod_status, "logged_in": logged_in}
+        return {"pods": pod_status, "logged_in": logged_in, "backends": backends}
 
     result = _run(_status())
     if json_out:
@@ -147,6 +149,26 @@ def status(json_out: Annotated[bool, typer.Option("--json")] = False) -> None:
     login_color = "green" if result["logged_in"] else "yellow"
     login_text = "logged in" if result["logged_in"] else "not logged in (run selfheal login)"
     console.print(f"Auth: [{login_color}]{login_text}[/{login_color}]")
+
+    def _render_chain(title: str, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        chain_table = Table(title=title)
+        chain_table.add_column("Backend")
+        chain_table.add_column("State")
+        for row in rows:
+            if not row.get("has_key"):
+                state, color = "no key", "dim"
+            elif row.get("cooling_down_until"):
+                state, color = f"cooling down until {row['cooling_down_until']}", "yellow"
+            else:
+                state, color = "active", "green"
+            chain_table.add_row(row["name"], f"[{color}]{state}[/{color}]")
+        console.print(chain_table)
+
+    if result.get("backends"):
+        _render_chain("AI fix chain", result["backends"].get("fix_chain", []))
+        _render_chain("AI chat chain", result["backends"].get("chat_chain", []))
 
 
 @app.command()

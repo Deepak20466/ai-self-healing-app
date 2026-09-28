@@ -95,6 +95,20 @@ os.environ["DATABASE_URL"] = _test_database_url()
 os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test-mock-do-not-use"
 os.environ["GITHUB_TOKEN"] = "github_pat_test-mock-do-not-use"
 os.environ["GITHUB_REPO"] = "test-org/test-repo"
+# gemini_api/groq_api (terminal-only v1.0 Step 4): same principle -- a real
+# key in the ambient .env/shell must never let a test reach the real Gemini/
+# Groq HTTP APIs. AI_CHAIN/CHAT_CHAIN are also cleared so a real .env's chain
+# (e.g. "gemini_api,groq_api,claude_cli") can't make an unmocked test exercise
+# a backend it never set up respx routes for -- tests that want a specific
+# chain set `core.config.settings.ai_chain`/`chat_chain` explicitly.
+os.environ["GEMINI_API_KEY"] = "test-mock-gemini-key-do-not-use"
+os.environ["GROQ_API_KEY"] = "gsk_test-mock-groq-key-do-not-use"
+# Explicit empty string (not `.pop`) so this overrides an env-var AI_CHAIN/
+# CHAT_CHAIN too, not just one from a loaded .env file — an env var normally
+# outranks a dotenv value in pydantic-settings, so a bare pop() could still
+# leave a real .env's AI_CHAIN in effect if it's also exported ambiently.
+os.environ["AI_CHAIN"] = ""
+os.environ["CHAT_CHAIN"] = ""
 
 # --- safe to import project modules from here on ---------------------------
 

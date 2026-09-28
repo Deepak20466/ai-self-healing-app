@@ -2337,3 +2337,143 @@ entry) -- confirmed fixed by rerunning after this commit).
 
 **Not yet done**: Steps 4-7 (AI fallback chains, privacy guard, PyPI
 release, final verify).
+
+### 2026-09-28 — Terminal-only v1.0 (Step 4 of 7: AI fallback chains)
+
+**Design decision made before writing any code, and the one that made this
+step tractable**: `healer/runtime_agent.py:run_heal_job`/`healer/ci_agent.
+run_ci_heal_job` already depend only on `healer.anthropic_client.
+AnthropicClientLike` -- a narrow structural Protocol (`client.messages.
+create(**kwargs) -> object with .content/.usage`), not the real `anthropic`
+SDK class. That means `gemini_api`/`groq_api` don't need a second tool-call
+loop written from scratch: `healer/api_adapters.py`'s `GeminiApiClient`/
+`GroqClient` are ADAPTERS that translate Anthropic's wire shape to/from
+each provider's own real HTTP API, then get passed into the SAME unchanged
+`run_heal_job`/`run_ci_heal_job` — so every guardrail (sandboxed write
+scope, patch anti-cheat, budget caps, circuit breakers, fail-before-pass
+proof) is enforced identically, satisfying "don't change core healing
+logic" by construction rather than by care.
+
+Built:
+- `core/config.py`: `AI_CHAIN`/`CHAT_CHAIN` (ordered comma-separated
+  backend lists; unset = a single-item chain from `ai_backend`/
+  `chat_backend`, so an existing single-backend `.env` is unaffected),
+  `GEMINI_API_KEY`/`GROQ_API_KEY`/`*_api_model`,
+  `backend_cooldown_default_seconds`.
+- `healer/backend_chain.py`: in-memory cooldown store (`mark_cooldown`/
+  `is_cooling_down`, reset on a healer-pod restart -- same "safe to lose"
+  tradeoff `chat_agent.py`'s `_pending` confirmation dict already makes),
+  `has_key_for`, `first_eligible`/`next_eligible_after` (chain scanning
+  always starts at index 0, so recovery naturally returns to the first
+  choice), and `BackendCooldownError` (quota/rate-limit/auth -> try the
+  next backend; anything else is a normal failure, per the task's own
+  classification).
+- `healer/api_adapters.py`: `GeminiApiClient` (Google's `generateContent`
+  function-calling API) / `GroqClient` (Groq's OpenAI-compatible
+  chat-completions API with tool calling) -- both raise
+  `BackendCooldownError` on 401/403/429 (with `Retry-After` if the response
+  has one), a plain `RuntimeError` otherwise.
+- `healer/worker.py`: `_process_next_job` now resolves a fresh job's
+  backend from `settings.ai_chain_list` (an `audit_log` "backend_attempt"
+  row per try tracks which backends a given job has already used, so a
+  resurrected job never retries the same one); a `BackendCooldownError`
+  marks that backend cooling down and puts the job back on the queue
+  (`QUEUED`, not `FAILED`) for the next chain entry, returning `False` (not
+  `True`) so the main loop backs off instead of busy-spinning on the same
+  job -- the identical bug shape (and fix) as the pre-existing global-hourly-
+  cap path just above it in this file. Every chain entry exhausted/cooling
+  down -> `paused_budget` (reusing that status rather than adding a new
+  enum value + Postgres enum migration for what's functionally the same
+  "AI is blocked right now" state). `_select_backend()` (no args) is
+  untouched for backward compatibility -- three pre-existing tests call it
+  directly and still pass unmodified; the chain path calls
+  `_select_backend(name)` with an explicit name instead.
+- Attribution: `heal_jobs.produced_by_backend` (migration 0007) is set the
+  first time a job's dispatch succeeds and it now has a `pr_number`, plus
+  one GitHub PR comment naming the backend -- best-effort, never turns a
+  successful fix into a failure if the comment call itself errors.
+  `healer/automerge.py:effective_auto_merge` now refuses to auto-merge a
+  fix whose `produced_by_backend` isn't the chain's first choice,
+  regardless of the app's/fix's own auto-merge setting -- a fallback
+  backend was only used because the primary one was unavailable, a strictly
+  lower-confidence signal.
+- `healer/chat_agent.py`: generalized the old `settings.use_claude_code`
+  boolean branch (claude_cli-or-nothing) into the same chain-with-cooldown
+  loop, sharing a new minimal `_run_readonly_tool_loop` (a much smaller
+  tool-call loop than `runtime_agent.py`'s -- chat only ever needs
+  read-only tools, no worktree/patch-size/fail-before-pass machinery) across
+  the `gemini_api`/`groq_api`/`api` chat backends. Every reply is suffixed
+  `_(via <backend>)_`. `codex_cli`/`gemini_cli` chat isn't wired up (no
+  read-only mode built for either CLI) -- a chain entry naming one of them
+  is silently skipped, documented in code, not a crash.
+- `GET /api/backends` (`healer/app.py`) + `selfheal status` (`cli/main.py`):
+  shows each fix/chat chain backend's key/cooldown state as a Rich table.
+- `scripts/check_ai_backends.py`: one tiny, real, non-heal-run HTTP call per
+  API-key backend that has a key in `.env` -- prints only PASS/FAIL, never
+  the key.
+
+**Two real bugs found via that live check script, not by review, and fixed
+before this could be called done** (same "verify against the real thing,
+don't just trust the mocked tests" lesson as every CLI backend's own
+CLAUDE.md history):
+1. **`groq_api_model`'s original default (`llama-3.3-70b-versatile`) 404'd**
+   -- decommissioned on this account. Queried `GET https://api.groq.com/
+   openai/v1/models` live (never guessed a slug from training data --
+   Phase 4's log already names this exact mistake for OpenRouter) and
+   switched the default to `openai/gpt-oss-120b`, a real, currently-served
+   model confirmed via that same live call.
+2. **That replacement model is a reasoning model** and, at Groq's default
+   reasoning effort, can spend an entire `max_tokens` budget on its hidden
+   `reasoning` field and return empty `content` (`finish_reason: "length"`)
+   -- reproduced live (empty text on a trivial "reply with one word"
+   prompt), then fixed by always sending `"reasoning_effort": "low"` in
+   `_GroqMessages.create`'s payload, confirmed live afterward (`groq_api:
+   PASS -- verified live (real HTTP response: 'pong')`).
+
+**What's live-verified vs. documented-only, stated plainly** (same
+principle the Codex/Gemini-CLI backends' own log entry already
+established):
+- `groq_api`: **live-verified**, both for fixes (this is literally the same
+  `run_heal_job`/`run_ci_heal_job` `claude_cli`/`api` already exercise
+  end-to-end in PRs #10/#14/#15, now proven to also accept a real Groq
+  response through the adapter) and via `scripts/check_ai_backends.py`'s
+  real HTTP round trip.
+- `gemini_api`: **code-complete, unit-tested (mocked), NOT live-verified**.
+  This session's own `.env` `GEMINI_API_KEY` value (`AQ.Ab8...`) is shaped
+  like a short-lived Google OAuth2 access token, not a Gemini API key
+  (those look like `AIzaSy...`, from https://aistudio.google.com/apikey) --
+  confirmed by testing both `Authorization: Bearer` and `?key=` auth styles
+  live and getting the identical `401 ACCESS_TOKEN_TYPE_UNSUPPORTED` either
+  way. This is a credential problem, not a code bug: get a real key from
+  AI Studio, put it in `.env`, and rerun `scripts/check_ai_backends.py`
+  before trusting this backend beyond its mocked tests.
+- Chain fallback/cooldown/attribution/no-auto-merge-on-fallback logic
+  itself: unit- and integration-tested (11 new worker tests, 8 backend_chain
+  tests, 10 api_adapters tests) against fakes/respx, not yet exercised
+  against a real mid-chain cooldown from the real Groq/Gemini APIs (would
+  need to actually exhaust a real quota) -- the classification logic
+  (`BackendCooldownError` on 401/403/429) is unit-tested directly instead.
+
+**Also fixed, a real gap this step's own testing surfaced**: `tests/
+conftest.py` mocked `ANTHROPIC_API_KEY`/`GITHUB_TOKEN` for the whole test
+process but not `GEMINI_API_KEY`/`GROQ_API_KEY` -- meaning this repo's own
+real `.env` (which already had `AI_CHAIN`/`CHAT_CHAIN` set, anticipating
+this feature) could have let an unmocked test reach the real Gemini/Groq
+APIs. Caught immediately (a chat test failed with a real cooldown log line
+naming `gemini_api`) before any test suite run actually completed an
+unmocked call. Fixed: both keys now get obviously-fake test values, and
+`AI_CHAIN`/`CHAT_CHAIN` are forced to empty strings for the whole test
+process (an env var, not just `.env`, so it overrides an ambiently-exported
+real value too) -- any test that wants a specific chain sets
+`core.config.settings.ai_chain`/`chat_chain` explicitly via monkeypatch,
+same as every other settings override in this test suite.
+
+Verified: `ruff check .`/`ruff format --check .` clean, `mypy core sentinel
+mcp_server healer cli` (strict) clean, `pytest` 502/503 (1 pre-existing
+skip; the same two already-documented benign situations as Step 3's log --
+`isolated_budget_date`'s rare collision, and worktree-pytest tests failing
+against migration 0007 before it was committed -- confirmed resolved by
+rerunning after this commit).
+
+**Not yet done**: Steps 5-7 (privacy guard/secret scrubbing, PyPI release,
+final verify).

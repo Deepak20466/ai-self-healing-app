@@ -36,6 +36,46 @@ def test_status_when_logged_out_and_pods_down() -> None:
     assert "not logged in" in result.stdout
 
 
+def test_status_when_logged_in_shows_backend_chains(respx_mock: Any) -> None:
+    _log_in()
+    respx_mock.get(url__regex=r"http://127\.0\.0\.1:\d+/healthz").mock(
+        return_value=httpx.Response(404)
+    )
+    respx_mock.get("http://127.0.0.1:8003/mcp").mock(return_value=httpx.Response(404))
+    respx_mock.get(f"{BASE_URL}/api/auth/session").mock(
+        return_value=httpx.Response(200, json={"username": "admin"})
+    )
+    respx_mock.get(f"{BASE_URL}/api/backends").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "fix_chain": [
+                    {
+                        "name": "claude_cli",
+                        "role": "fix",
+                        "has_key": True,
+                        "cooling_down_until": None,
+                        "active": True,
+                    },
+                    {
+                        "name": "groq_api",
+                        "role": "fix",
+                        "has_key": False,
+                        "cooling_down_until": None,
+                        "active": False,
+                    },
+                ],
+                "chat_chain": [],
+            },
+        )
+    )
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "logged in" in result.output
+    assert "claude_cli" in result.output
+    assert "no key" in result.output
+
+
 def test_login_success(respx_mock: Any) -> None:
     respx_mock.post(f"{BASE_URL}/api/auth/login").mock(
         return_value=httpx.Response(

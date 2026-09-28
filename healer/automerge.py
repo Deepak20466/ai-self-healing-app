@@ -33,7 +33,18 @@ _TERMINAL_CHECK_CONCLUSIONS = {"success", "neutral", "skipped"}
 
 
 def effective_auto_merge(job: HealJob, app: MonitoredApp | None) -> bool:
-    """NULL override -> the app's own setting -> the global fallback."""
+    """NULL override -> the app's own setting -> the global fallback.
+
+    A fix produced by a FALLBACK backend (not the AI_CHAIN's first choice)
+    never auto-merges, regardless of any of the above -- a backend chosen
+    only because the primary one was cooling down/exhausted is a strictly
+    lower-confidence signal than the operator's own explicit choice, so
+    "the task's own instruction" wins over any per-app/per-fix setting here.
+    """
+    if job.produced_by_backend is not None:
+        chain = settings.ai_chain_list
+        if chain and job.produced_by_backend != chain[0]:
+            return False
     if job.auto_merge_override is not None:
         return job.auto_merge_override
     if app is not None:

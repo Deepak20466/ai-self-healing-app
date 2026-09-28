@@ -194,3 +194,154 @@ def test_select_backend_rejects_unknown_ai_backend_value(monkeypatch: pytest.Mon
 
     with pytest.raises(ValueError, match="unknown AI_BACKEND"):
         worker_module._select_backend()
+
+
+def test_select_backend_by_explicit_name_builds_api_key_backends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_select_backend(name)` (the chain-dispatch path) reuses runtime_agent/
+    ci_agent unchanged for gemini_api/groq_api -- only the anthropic_client
+    adapter differs."""
+    monkeypatch.setattr(core_settings, "groq_api_key", "gsk_test")
+    monkeypatch.setattr(core_settings, "gemini_api_key", "test-key")
+
+    from healer.ci_agent import run_ci_heal_job
+    from healer.runtime_agent import run_heal_job
+
+    groq_runners = worker_module._select_backend("groq_api")
+    assert groq_runners.runtime_or_contract.func is run_heal_job  # type: ignore[attr-defined]
+    assert groq_runners.ci_failure.func is run_ci_heal_job  # type: ignore[attr-defined]
+
+    gemini_runners = worker_module._select_backend("gemini_api")
+    assert gemini_runners.runtime_or_contract.func is run_heal_job  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_chain_dispatch_picks_first_eligible_backend_per_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With `backend=None`, `_process_next_job` resolves the backend from
+    `settings.ai_chain_list` and records a `backend_attempt` audit row."""
+    from core.models import AuditLog
+    from healer import backend_chain
+
+    backend_chain.clear_cooldowns()
+    monkeypatch.setattr(core_settings, "ai_chain", "claude_cli,groq_api")
+
+    async def _cap_never_open(session: object, *, max_per_hour: int) -> bool:
+        return False
+
+    monkeypatch.setattr(worker_module, "global_hourly_circuit_open", _cap_never_open)
+
+    called_with: dict[str, Any] = {}
+
+    async def _fake_run_heal_job_free(job_id: int, *, mcp: Any, github: Any) -> None:
+        called_with["job_id"] = job_id
+
+    monkeypatch.setattr("healer.agent_free.run_heal_job_free", _fake_run_heal_job_free)
+
+    fingerprint = f"test-chain-{uuid.uuid4().hex}"
+    async with session_scope() as session:
+        job = await enqueue_heal_job(
+            session, type=HealJobType.RUNTIME_ERROR, fingerprint=fingerprint
+        )
+        job_id = job.id
+
+    claimed = await worker_module._process_next_job(mcp=None)  # type: ignore[arg-type]
+    assert claimed is True
+    assert called_with["job_id"] == job_id
+
+    async with session_scope() as session:
+        stmt = AuditLog.__table__.select().where(
+            AuditLog.heal_job_id == job_id, AuditLog.action == "backend_attempt"
+        )
+        rows = (await session.execute(stmt)).mappings().all()
+        assert any(r["details"]["backend"] == "claude_cli" for r in rows)
+        refreshed = await session.get(HealJob, job_id)
+        assert refreshed is not None
+        refreshed.status = HealJobStatus.FAILED  # cleanup: never leave it QUEUED/RUNNING
+
+
+@pytest.mark.asyncio
+async def test_backend_cooldown_error_requeues_job_for_the_next_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from healer import backend_chain
+
+    backend_chain.clear_cooldowns()
+    monkeypatch.setattr(core_settings, "ai_chain", "groq_api,claude_cli")
+    monkeypatch.setattr(core_settings, "groq_api_key", "gsk_test")
+
+    async def _cap_never_open(session: object, *, max_per_hour: int) -> bool:
+        return False
+
+    monkeypatch.setattr(worker_module, "global_hourly_circuit_open", _cap_never_open)
+
+    async def _raise_cooldown(job_id: int, *, anthropic_client: Any, mcp: Any, github: Any) -> None:
+        raise backend_chain.BackendCooldownError("quota exceeded", retry_after_seconds=999)
+
+    monkeypatch.setattr("healer.runtime_agent.run_heal_job", _raise_cooldown)
+
+    fingerprint = f"test-cooldown-{uuid.uuid4().hex}"
+    async with session_scope() as session:
+        job = await enqueue_heal_job(
+            session, type=HealJobType.RUNTIME_ERROR, fingerprint=fingerprint
+        )
+        job_id = job.id
+
+    claimed = await worker_module._process_next_job(mcp=None)  # type: ignore[arg-type]
+    assert claimed is False  # back off, don't busy-spin -- same as the global-cap path
+    assert backend_chain.is_cooling_down("groq_api") is True
+
+    async with session_scope() as session:
+        refreshed = await session.get(HealJob, job_id)
+        assert refreshed is not None
+        assert refreshed.status == HealJobStatus.QUEUED
+        assert refreshed.started_at is None
+
+    # Next dequeue: groq_api is cooling down, so it must pick claude_cli.
+    called: dict[str, Any] = {}
+
+    async def _fake_free(job_id: int, *, mcp: Any, github: Any) -> None:
+        called["ran"] = True
+
+    monkeypatch.setattr("healer.agent_free.run_heal_job_free", _fake_free)
+
+    claimed_again = await worker_module._process_next_job(mcp=None)  # type: ignore[arg-type]
+    assert claimed_again is True
+    assert called.get("ran") is True
+
+    async with session_scope() as session:
+        refreshed = await session.get(HealJob, job_id)
+        assert refreshed is not None
+        refreshed.status = HealJobStatus.FAILED  # cleanup
+    backend_chain.clear_cooldowns()
+
+
+@pytest.mark.asyncio
+async def test_all_backends_exhausted_pauses_the_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    from healer import backend_chain
+
+    backend_chain.clear_cooldowns()
+    monkeypatch.setattr(core_settings, "ai_chain", "groq_api")
+    monkeypatch.setattr(core_settings, "groq_api_key", None)  # no key -> never eligible
+
+    async def _cap_never_open(session: object, *, max_per_hour: int) -> bool:
+        return False
+
+    monkeypatch.setattr(worker_module, "global_hourly_circuit_open", _cap_never_open)
+
+    fingerprint = f"test-exhausted-{uuid.uuid4().hex}"
+    async with session_scope() as session:
+        job = await enqueue_heal_job(
+            session, type=HealJobType.RUNTIME_ERROR, fingerprint=fingerprint
+        )
+        job_id = job.id
+
+    claimed = await worker_module._process_next_job(mcp=None)  # type: ignore[arg-type]
+    assert claimed is True  # the job WAS processed -- paused, not left dangling
+
+    async with session_scope() as session:
+        refreshed = await session.get(HealJob, job_id)
+        assert refreshed is not None
+        assert refreshed.status == HealJobStatus.PAUSED_BUDGET

@@ -96,6 +96,39 @@ class Settings(BaseSettings):
     anthropic_base_url: str | None = None  # e.g. https://openrouter.ai/api for OpenRouter
     anthropic_model: str = "claude-sonnet-5"
 
+    # --- Gemini / Groq free-tier HTTP APIs (ai_backend="gemini_api"/"groq_api") -
+    # Real tool-calling backends via each provider's own REST API (not a CLI),
+    # implemented as thin `AnthropicClientLike` adapters over
+    # `healer/runtime_agent.py`/`healer/ci_agent.py` — see healer/api_adapters.py.
+    gemini_api_key: str | None = None
+    gemini_api_model: str = "gemini-2.0-flash"
+    groq_api_key: str | None = None
+    #: Verified live against `GET https://api.groq.com/openai/v1/models`
+    #: this session -- "llama-3.3-70b-versatile" (an earlier, guessed-from-
+    #: training-data choice) returned 404 "model_not_found" on a real call;
+    #: don't guess a Groq model slug from training data, query that endpoint
+    #: live instead (same lesson CLAUDE.md's Phase 4 log already names for
+    #: OpenRouter slugs).
+    groq_api_model: str = "openai/gpt-oss-120b"
+
+    # --- AI fallback chains (terminal-only v1.0 Step 4) -----------------------
+    # Ordered, comma-separated backend names, e.g.
+    # "claude_cli,gemini_api,groq_api". A backend with no key configured is
+    # skipped; one that returns a quota/rate-limit/auth error is put in
+    # cooldown (see healer/backend_chain.py) and the next is tried. Unset =
+    # a single-item chain from `ai_backend`/`chat_backend` (below), so
+    # existing single-backend setups keep working unchanged.
+    ai_chain: str | None = None
+    chat_chain: str | None = None
+    #: Which single backend answers `chat`'s LLM-fallback path when
+    #: `chat_chain` is unset. Independent from `ai_backend` (fixes use one
+    #: chain, chat can use a different one) but defaults to it for anyone
+    #: who hasn't configured chat separately.
+    chat_backend: str | None = None
+    #: Default cooldown when a backend's own response doesn't include a
+    #: usable Retry-After value.
+    backend_cooldown_default_seconds: int = 3600
+
     # --- GitHub --------------------------------------------------------------
     github_token: str | None = None
     github_repo: str | None = None
@@ -216,6 +249,23 @@ class Settings(BaseSettings):
     def sentinel_base_url(self) -> str:
         """Base URL target_app's middleware/handler use to reach sentinel-pod's ingest API."""
         return self.sentinel_ingest_url or f"http://localhost:{self.sentinel_port}"
+
+    @property
+    def ai_chain_list(self) -> list[str]:
+        """The fix backend chain, in order. `AI_CHAIN` unset -> a single-item
+        chain from `ai_backend`, so existing single-backend setups are
+        unaffected."""
+        if self.ai_chain:
+            return [b.strip() for b in self.ai_chain.split(",") if b.strip()]
+        return [self.ai_backend]
+
+    @property
+    def chat_chain_list(self) -> list[str]:
+        """The chat backend chain. `CHAT_CHAIN` unset -> a single-item chain
+        from `chat_backend`, or `ai_backend` if that's unset too."""
+        if self.chat_chain:
+            return [b.strip() for b in self.chat_chain.split(",") if b.strip()]
+        return [self.chat_backend or self.ai_backend]
 
 
 @lru_cache

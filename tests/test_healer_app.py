@@ -131,6 +131,31 @@ async def test_login_then_access_dashboard_endpoints(
         assert after_logout.status_code == 401
 
 
+async def test_unauthenticated_backends_returns_401(app_client: httpx.AsyncClient) -> None:
+    async with app_client as client:
+        resp = await client.get("/api/backends")
+    assert resp.status_code == 401
+
+
+async def test_backends_reports_fix_and_chat_chains(
+    app_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(core_settings, "ai_chain", "claude_cli,groq_api")
+    monkeypatch.setattr(core_settings, "chat_chain", "groq_api")
+    monkeypatch.setattr(core_settings, "groq_api_key", None)
+    async with app_client as client:
+        await client.post("/api/auth/login", json={"username": "admin", "password": PASSWORD})
+        resp = await client.get("/api/backends")
+    assert resp.status_code == 200
+    body = resp.json()
+    fix_names = {row["name"] for row in body["fix_chain"]}
+    assert fix_names == {"claude_cli", "groq_api"}
+    groq_row = next(r for r in body["fix_chain"] if r["name"] == "groq_api")
+    assert groq_row["has_key"] is False
+    assert groq_row["active"] is False
+    assert body["chat_chain"][0]["name"] == "groq_api"
+
+
 async def test_new_chat_session_and_history(app_client: httpx.AsyncClient) -> None:
     async with app_client as client:
         await client.post("/api/auth/login", json={"username": "admin", "password": PASSWORD})

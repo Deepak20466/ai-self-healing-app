@@ -102,10 +102,10 @@ Set `ADMIN_PASSWORD_HASH` (from the command above) and `SESSION_SECRET` in
 `.env` before starting healer-pod — the API `selfheal` talks to is
 unauthenticated-401 without them.
 
-## AI backend: pluggable (Claude Code / Codex / Gemini CLIs, or the Anthropic API)
+## AI backend: pluggable (Claude Code / Codex / Gemini CLIs, the Anthropic API, or free Gemini/Groq HTTP APIs)
 
 The healer (`healer/`) drives every automated fix (and the AI chat) through
-one of **four** interchangeable backends, selected by `AI_BACKEND` in `.env`:
+one of **six** interchangeable backends, selected by `AI_BACKEND` in `.env`:
 
 | `AI_BACKEND` | Module | Auth | Status |
 |---|---|---|---|
@@ -113,6 +113,30 @@ one of **four** interchangeable backends, selected by `AI_BACKEND` in `.env`:
 | `codex_cli` | `healer/agent_codex.py` | local OpenAI Codex CLI, your ChatGPT/API login | **documented-only, untested live** — see caveat below |
 | `gemini_cli` | `healer/agent_gemini.py` | local Google Gemini CLI, your Google account login | **documented-only, untested live** — see caveat below |
 | `api` | `healer/runtime_agent.py` + `healer/ci_agent.py` | `ANTHROPIC_API_KEY`, official `anthropic` SDK | tested (mocked), no real end-to-end PR yet — see CLAUDE.md Phase 4 |
+| `groq_api` | `healer/api_adapters.py` (`GroqClient`) | `GROQ_API_KEY`, free tier | **live-verified** (real HTTP tool-calling round trip — see below) |
+| `gemini_api` | `healer/api_adapters.py` (`GeminiApiClient`) | `GEMINI_API_KEY`, free tier | code-complete, unit-tested, **not live-verified** — see caveat below |
+
+### AI fallback chains (`AI_CHAIN`/`CHAT_CHAIN`)
+
+Instead of one fixed backend, set an ordered, comma-separated chain —
+e.g. `AI_CHAIN=claude_cli,groq_api,gemini_api` — and the worker tries each
+in order per job. A backend with no key configured is skipped; one that
+returns a quota/rate-limit/auth error is put in cooldown (default 1h, or
+the provider's own `Retry-After` if it sends one) and the next is tried —
+the SAME job is requeued for the next backend, not failed. Once every
+chain entry is exhausted or cooling down, the job is paused (not failed) so
+it can be re-tried automatically once a backend recovers. `CHAT_CHAIN`
+does the same for the `chat` command's LLM fallback (unset, it uses
+`CHAT_BACKEND` or falls back to `AI_BACKEND`). `selfheal status` shows each
+chain backend's live state (active / no key / cooling down until). A PR a
+fallback backend produced is never auto-merged, regardless of the app's own
+`auto_merge` setting — only the chain's first choice is trusted for that.
+`groq_api`/`gemini_api` reuse `healer/runtime_agent.py`/`healer/ci_agent.py`
+completely unchanged (they satisfy the same narrow `AnthropicClientLike`
+Protocol `api` mode already used) — no new tool-call loop, no new guardrail
+surface. Get free keys: Groq at https://console.groq.com/keys, Gemini at
+https://aistudio.google.com/apikey (a real key looks like `AIzaSy...` — an
+OAuth access token copied from somewhere else will 401).
 
 The old `USE_CLAUDE_CODE` boolean still works as a backwards-compatible
 alias (`true` → `ai_backend=claude_cli`, `false` → `ai_backend=api`) — see

@@ -209,6 +209,29 @@ async def api_health(
     return dict(result)
 
 
+@app.get("/api/backends")
+async def api_backends(username: str = Depends(require_auth)) -> dict[str, Any]:
+    """`selfheal status`'s AI-backend panel: each fix/chat chain backend's
+    key/cooldown state -- see healer/backend_chain.py."""
+    from healer import backend_chain
+
+    fix = backend_chain.chain_states(settings.ai_chain_list, role="fix")
+    chat = backend_chain.chain_states(settings.chat_chain_list, role="chat")
+
+    def _row(s: Any) -> dict[str, Any]:
+        return {
+            "name": s.name,
+            "role": s.role,
+            "has_key": s.has_key,
+            "cooling_down_until": s.cooling_down_until.isoformat()
+            if s.cooling_down_until
+            else None,
+            "active": s.active,
+        }
+
+    return {"fix_chain": [_row(s) for s in fix], "chat_chain": [_row(s) for s in chat]}
+
+
 @app.get("/api/prs")
 async def api_prs(
     username: str = Depends(require_auth), db: AsyncSession = Depends(get_db)

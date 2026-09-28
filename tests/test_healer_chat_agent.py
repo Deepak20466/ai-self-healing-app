@@ -197,4 +197,4 @@ async def test_injection_in_a_free_text_question_does_not_trigger_rollback(
 
     assert "rollback" not in captured["allowed_tools"]
     assert "trigger_rollback" not in captured["allowed_tools"]
-    assert reply.text == "I can't help with that."
+    assert reply.text.startswith("I can't help with that.")

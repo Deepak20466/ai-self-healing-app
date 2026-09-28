@@ -356,6 +356,10 @@ class HealJob(TimestampMixin, Base):
     #: NULL = use the app's own `monitored_apps.auto_merge`; True/False is a
     #: one-time override set at fix-request time (`selfheal fix --auto-merge`).
     auto_merge_override: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    #: Which AI_CHAIN/CHAT_CHAIN backend actually produced this job's fix
+    #: (e.g. "claude_cli", "groq_api") -- None for jobs from before this
+    #: column existed. See healer/worker.py and healer/automerge.py.
+    produced_by_backend: Mapped[str | None] = mapped_column(String(50), nullable=True)
     pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     app_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("monitored_apps.id", ondelete="SET NULL"), nullable=True

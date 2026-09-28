@@ -4,10 +4,10 @@ equivalently `python -m healer.main`).
 Dequeues `heal_jobs` with `SKIP LOCKED`, woken by `LISTEN/NOTIFY` (SPEC.md:
 "no polling spin") with a bounded fallback wait so a missed/raced NOTIFY
 can't stall the worker forever. Handles all three `HealJobType`s, dispatched
-by job type to one of four pluggable AI backends selected once at startup by
-`settings.ai_backend` (`settings.use_claude_code` still works too, as a
-backwards-compatible alias derived into `ai_backend` in `core/config.py` —
-see that module for exactly how):
+by job type to one of six pluggable AI backends, chosen PER JOB from
+`settings.ai_chain_list` (terminal-only v1.0 Step 4 -- `AI_CHAIN`, an
+ordered comma list; unset, this is just `[settings.ai_backend]`, the
+original single-backend behavior, unchanged):
 
 - `"claude_cli"` (default): `healer.agent_free.run_heal_job_free`/
   `run_ci_heal_job_free`, driving the fix loop through the local Claude Code
@@ -20,13 +20,30 @@ see that module for exactly how):
 - `"api"`: `healer.runtime_agent.run_heal_job`/`healer.ci_agent.
   run_ci_heal_job` via the `anthropic` SDK (an optional extra, imported
   lazily by `healer.anthropic_client.build_anthropic_client`).
+- `"gemini_api"`/`"groq_api"`: the SAME `run_heal_job`/`run_ci_heal_job`
+  functions as `"api"`, just with a `healer.api_adapters.GeminiApiClient`/
+  `GroqClient` in place of the real Anthropic client — see that module for
+  why this reuse is possible (both satisfy the same narrow
+  `AnthropicClientLike` Protocol).
 
-All four backends share the same `(job_id, *, mcp, github, remote)`-shaped
-interface (API mode's just also takes `anthropic_client`, bound in ahead of
-time via `functools.partial`), so this dispatch is the only place that needs
-to know which backend is active — every import is lazy (inside the matching
-branch), so a machine running one backend never needs the others' CLIs
-installed or their modules imported at all.
+All backends share the same `(job_id, *, mcp, github, remote)`-shaped
+interface (the API-key ones also take `anthropic_client`, bound in ahead of
+time via `functools.partial`), so `_select_backend` is the only place that
+needs to know which backend is active — every import is lazy (inside the
+matching branch), so a machine running one backend never needs the others'
+CLIs/keys installed or configured at all.
+
+`_process_next_job` resolves a fresh job's backend as the first chain entry
+with a key and no active cooldown; a quota/rate-limit/auth error (`healer.
+backend_chain.BackendCooldownError`, raised only by the two API-key
+adapters) puts that backend in cooldown and requeues the SAME job so the
+NEXT chain entry picks it up on a later dequeue (tracked via an
+`audit_log` "backend_attempt" row per attempt, so a resurrected job never
+retries a backend it already tried). If every chain entry is exhausted or
+cooling down, the job is marked `paused_budget` instead of `failed` — the
+same status `is_budget_paused` already uses, extended here to also mean
+"the AI chain, not the dollar budget, is what's exhausted" (see
+`selfheal status`/`GET /api/backends` for the distinction).
 """
 
 from __future__ import annotations
@@ -34,17 +51,20 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 import structlog
+from sqlalchemy import select
 
 from core.config import settings
 from core.db import dispose_engine, session_scope
 from core.logging import configure_logging
-from core.models import HealJob, HealJobStatus, HealJobType, MonitoredApp
+from core.models import AuditLog, HealJob, HealJobStatus, HealJobType, MonitoredApp
 from core.queue import HealJobListener, dequeue_heal_job
+from healer import backend_chain
 from healer.circuit_breaker import global_hourly_circuit_open
 from healer.mcp_client import MCPToolClient, connect_http
-from mcp_server.github_client import GitHubClient
+from mcp_server.github_client import GitHubClient, GitHubClientError
 
 logger = structlog.get_logger(__name__)
 
@@ -68,8 +88,12 @@ class _JobRunners:
     ci_failure: _JobRunner
 
 
-def _select_backend() -> _JobRunners:
-    backend = settings.ai_backend
+def _select_backend(name: str | None = None) -> _JobRunners:
+    """Build the runner pair for one backend NAME. Defaults to
+    `settings.ai_backend` (the pre-chain single-backend behavior, unchanged)
+    when called with no argument — `healer/backend_chain.py`'s per-job
+    chain dispatch calls this with an explicit name instead."""
+    backend = name or settings.ai_backend
 
     if backend == "claude_cli":
         from healer.agent_free import run_ci_heal_job_free, run_heal_job_free
@@ -109,14 +133,80 @@ def _select_backend() -> _JobRunners:
             ci_failure=partial(run_ci_heal_job, anthropic_client=anthropic_client),
         )
 
+    if backend == "gemini_api":
+        from functools import partial
+
+        from healer.anthropic_client import AnthropicClientLike
+        from healer.api_adapters import GeminiApiClient
+        from healer.ci_agent import run_ci_heal_job
+        from healer.runtime_agent import run_heal_job
+
+        client: AnthropicClientLike = GeminiApiClient()
+        logger.info("worker.backend_selected", backend="gemini_api (Gemini free-tier HTTP API)")
+        return _JobRunners(
+            runtime_or_contract=partial(run_heal_job, anthropic_client=client),
+            ci_failure=partial(run_ci_heal_job, anthropic_client=client),
+        )
+
+    if backend == "groq_api":
+        from functools import partial
+
+        from healer.anthropic_client import AnthropicClientLike
+        from healer.api_adapters import GroqClient
+        from healer.ci_agent import run_ci_heal_job
+        from healer.runtime_agent import run_heal_job
+
+        groq_client: AnthropicClientLike = GroqClient()
+        logger.info("worker.backend_selected", backend="groq_api (Groq free-tier HTTP API)")
+        return _JobRunners(
+            runtime_or_contract=partial(run_heal_job, anthropic_client=groq_client),
+            ci_failure=partial(run_ci_heal_job, anthropic_client=groq_client),
+        )
+
     raise ValueError(
         f"unknown AI_BACKEND {backend!r}; expected one of "
-        "'claude_cli', 'codex_cli', 'gemini_cli', 'api'"
+        "'claude_cli', 'codex_cli', 'gemini_cli', 'api', 'gemini_api', 'groq_api'"
     )
 
 
-async def _process_next_job(mcp: MCPToolClient, backend: _JobRunners) -> bool:
-    """Claim and (usually) run the next eligible job. Returns whether a job was claimed."""
+async def _tried_backends_for_job(session: Any, job_id: int) -> set[str]:
+    stmt = select(AuditLog.details).where(
+        AuditLog.heal_job_id == job_id, AuditLog.action == "backend_attempt"
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return {r["backend"] for r in rows if isinstance(r, dict) and r.get("backend")}
+
+
+async def _attribute_backend_if_pr_opened(
+    job_id: int, backend_name: str, github: GitHubClient
+) -> None:
+    """After a successful dispatch, if the job now has a PR, record which
+    backend produced it (`healer/automerge.py` refuses to auto-merge a
+    fallback-produced fix) and post one attribution comment. Best-effort —
+    a GitHub error here must never turn a successful fix into a failure."""
+    async with session_scope() as session:
+        job = await session.get(HealJob, job_id)
+        if job is None or job.pr_number is None or job.produced_by_backend is not None:
+            return
+        job.produced_by_backend = backend_name
+        pr_number = job.pr_number
+    try:
+        await github.create_issue_comment(pr_number, f"_Produced by AI backend: `{backend_name}`._")
+    except GitHubClientError:
+        logger.warning(
+            "worker.attribution_comment_failed", heal_job_id=job_id, backend=backend_name
+        )
+
+
+async def _process_next_job(mcp: MCPToolClient, backend: _JobRunners | None = None) -> bool:
+    """Claim and (usually) run the next eligible job. Returns whether a job was claimed.
+
+    `backend=None` (the normal `run_worker()` path) resolves the backend
+    PER JOB from `settings.ai_chain_list` — a single-item chain (the
+    default, from `ai_backend`) behaves exactly as before. Tests that pass
+    an explicit `backend` keep the old single-backend behavior unchanged.
+    """
+    chosen_backend_name: str | None = None
     async with session_scope() as session:
         job = await dequeue_heal_job(session, types=_ALL_JOB_TYPES)
         if job is None:
@@ -147,12 +237,66 @@ async def _process_next_job(mcp: MCPToolClient, backend: _JobRunners) -> bool:
             logger.warning("worker.global_hourly_cap_hit", heal_job_id=job_id)
             return False
 
+        if backend is None:
+            chain = settings.ai_chain_list
+            tried = await _tried_backends_for_job(session, job_id)
+            chosen_backend_name = (
+                backend_chain.next_eligible_after(chain, tried)
+                if tried
+                else backend_chain.first_eligible(chain)
+            )
+            if chosen_backend_name is None:
+                job.status = HealJobStatus.PAUSED_BUDGET
+                job.error_message = "all AI_CHAIN backends are exhausted or cooling down"
+                session.add(
+                    AuditLog(
+                        action="all_backends_exhausted",
+                        actor="healer",
+                        heal_job_id=job_id,
+                        details={"chain": chain},
+                    )
+                )
+                logger.warning("worker.all_backends_exhausted", heal_job_id=job_id, chain=chain)
+                return True
+            session.add(
+                AuditLog(
+                    action="backend_attempt",
+                    actor="healer",
+                    heal_job_id=job_id,
+                    details={"backend": chosen_backend_name},
+                )
+            )
+
+    runners = backend if backend is not None else _select_backend(chosen_backend_name)
     try:
         async with GitHubClient(repo=github_repo) as github:
             if job_type == HealJobType.CI_FAILURE:
-                await backend.ci_failure(job_id, mcp=mcp, github=github)
+                await runners.ci_failure(job_id, mcp=mcp, github=github)
             else:
-                await backend.runtime_or_contract(job_id, mcp=mcp, github=github)
+                await runners.runtime_or_contract(job_id, mcp=mcp, github=github)
+            if chosen_backend_name is not None:
+                await _attribute_backend_if_pr_opened(job_id, chosen_backend_name, github)
+    except backend_chain.BackendCooldownError as exc:
+        # A quota/rate-limit/auth error from an API-key backend: not "this
+        # bug is unfixable", so put the job back on the queue (like the
+        # global-cap path above) for the NEXT chain backend to pick up,
+        # rather than marking it failed.
+        if chosen_backend_name is not None:
+            backend_chain.mark_cooldown(
+                chosen_backend_name, retry_after_seconds=exc.retry_after_seconds
+            )
+        logger.warning(
+            "worker.backend_cooldown",
+            heal_job_id=job_id,
+            backend=chosen_backend_name,
+            error=str(exc),
+        )
+        async with session_scope() as session:
+            job = await session.get(HealJob, job_id)
+            if job is not None:
+                job.status = HealJobStatus.QUEUED
+                job.started_at = None
+        return False
     except Exception:
         # A single job's unhandled failure (e.g. a GitHub API error while
         # opening the fallback issue) must never take down the whole
@@ -167,13 +311,15 @@ async def _process_next_job(mcp: MCPToolClient, backend: _JobRunners) -> bool:
 
 async def run_worker() -> None:
     configure_logging(settings.log_level)
-    backend = _select_backend()
+    logger.info("worker.ai_chain", chain=settings.ai_chain_list)
     mcp_url = f"http://127.0.0.1:{settings.mcp_port}/mcp"
 
     async with connect_http(mcp_url) as mcp, HealJobListener() as listener:
         logger.info("worker.started", mcp_url=mcp_url)
         while True:
-            claimed = await _process_next_job(mcp, backend)
+            # backend=None -> resolved per job from settings.ai_chain_list
+            # (a single-item chain, the default, behaves exactly as before).
+            claimed = await _process_next_job(mcp)
             if claimed:
                 continue
             try:
