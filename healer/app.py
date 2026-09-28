@@ -1,12 +1,14 @@
-"""healer-pod FastAPI + Socket.io app (Phase 6): the autonomous fix worker
-(background task, same as sentinel-pod's prober/anomaly loops) plus the
-authenticated chat/dashboard/metrics UI's backend.
+"""healer-pod FastAPI + Socket.io app: the autonomous fix worker (background
+task, same as sentinel-pod's prober/anomaly loops) plus the authenticated
+JSON/Socket.io API the terminal-only `selfheal` CLI talks to (see `cli/`).
 
-Run with: `uvicorn healer.app:asgi_app --port $HEALER_PORT`. `asgi_app` wraps
-`app` (FastAPI) with `socketio.ASGIApp` so both HTTP routes and the
+Run with: `uvicorn healer.app:asgi_app --port $HEALER_PORT`, bound to
+127.0.0.1 only (see Procfile) -- this API is never exposed publicly, only
+sentinel-pod's CI webhook is (CLAUDE.md's "Terminal-only v1.0"). `asgi_app`
+wraps `app` (FastAPI) with `socketio.ASGIApp` so both HTTP routes and the
 `/socket.io/` real-time chat/notification channel are served from one port —
 matching SPEC.md's "4 pods" (not 5), since Phase 4/5 already put the worker
-loop and this phase's chat server in the same `healer/` pod.
+loop and Phase 6's chat server in the same `healer/` pod.
 """
 
 from __future__ import annotations
@@ -14,8 +16,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 import socketio
 import structlog
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
@@ -26,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.config import settings
 from core.db import dispose_engine, get_db, session_scope
 from core.logging import configure_logging
-from core.models import ChatMessage, ChatSession, Finding, FindingStatus, MonitoredApp
+from core.models import ChatMessage, ChatSession, Finding, FindingStatus, HealJob, MonitoredApp
 from core.ratelimit import check_and_consume
 from core.repo_connect import RepoConnectError, connect_repo
 from core.scanner import run_scan
@@ -196,6 +200,27 @@ async def api_health(
 ) -> dict[str, Any]:
     result = await mcp.call_tool("get_health", {})
     return dict(result)
+
+
+@app.get("/api/prs")
+async def api_prs(
+    username: str = Depends(require_auth), db: AsyncSession = Depends(get_db)
+) -> list[dict[str, Any]]:
+    stmt = (
+        select(HealJob).where(HealJob.pr_number.is_not(None)).order_by(HealJob.id.desc()).limit(20)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    return [
+        {
+            "heal_job_id": r.id,
+            "app_id": r.app_id,
+            "pr_number": r.pr_number,
+            "status": r.status.value,
+            "fingerprint": r.fingerprint,
+            "pr_opened_at": r.pr_opened_at.isoformat() if r.pr_opened_at else None,
+        }
+        for r in rows
+    ]
 
 
 @app.get("/api/deployments")
@@ -372,6 +397,45 @@ async def update_app(
         app_row.auto_fix_high_severity = body.auto_fix_high_severity
     await db.commit()
     return _app_summary(app_row, open_findings=await _open_findings_count(db, app_id))
+
+
+@app.post("/api/apps/{app_id}/capture-test")
+async def capture_test(
+    app_id: int, username: str = Depends(require_auth), db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    """Sends one synthetic error through sentinel-pod's real `/ingest/error`
+    using this app's own ingest token, to prove the capture pipeline is wired
+    up end to end -- `selfheal capture <app>`'s server side. Not a heal_job:
+    just a round-trip confirmation, so it never spends AI budget."""
+    app_row = await db.get(MonitoredApp, app_id)
+    if app_row is None:
+        raise HTTPException(status_code=404, detail="No such app")
+
+    payload = {
+        "exception_type": "SelfhealCaptureTest",
+        "message": f"selfheal capture test for '{app_row.name}'",
+        "traceback": "SelfhealCaptureTest: synthetic test error\n",
+        "file_path": "selfheal_capture_test",
+        "line_number": 1,
+        "function_name": "selfheal_capture_test",
+        "occurred_at": datetime.now(UTC).isoformat(),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{settings.sentinel_base_url}/ingest/error",
+                json=payload,
+                headers={"Authorization": f"Bearer {app_row.ingest_token}"},
+            )
+            resp.raise_for_status()
+            body = resp.json()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"sentinel-pod ingest failed: {exc}") from exc
+    return {
+        "status": "captured",
+        "error_id": body.get("error_id"),
+        "fingerprint": body.get("fingerprint"),
+    }
 
 
 @app.post("/api/findings/{finding_id}/fix")

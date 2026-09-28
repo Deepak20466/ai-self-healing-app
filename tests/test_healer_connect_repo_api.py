@@ -17,7 +17,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings as core_settings
 from core.db import get_db
-from core.models import Finding, FindingCategory, FindingSeverity, HealJob, MonitoredApp
+from core.models import (
+    Finding,
+    FindingCategory,
+    FindingSeverity,
+    HealJob,
+    HealJobStatus,
+    HealJobType,
+    MonitoredApp,
+)
 
 PASSWORD = "correct horse battery staple"
 
@@ -223,3 +231,57 @@ async def test_onboard_app_opens_a_pr(
         resp = await client.post(f"/api/apps/{app_row.id}/onboard-pr")
     assert resp.status_code == 200
     assert resp.json()["pr_number"] == 42
+
+
+async def test_api_prs_lists_heal_jobs_with_a_pr_number(
+    app_client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    app_row = await _make_app(db_session)
+    job = HealJob(
+        type=HealJobType.RUNTIME_ERROR,
+        status=HealJobStatus.PR_OPENED,
+        fingerprint=uuid.uuid4().hex,
+        pr_number=123,
+        app_id=app_row.id,
+    )
+    db_session.add(job)
+    await db_session.flush()
+
+    async with app_client as client:
+        await _login(client)
+        resp = await client.get("/api/prs")
+    assert resp.status_code == 200
+    rows = resp.json()
+    assert any(r["pr_number"] == 123 and r["heal_job_id"] == job.id for r in rows)
+
+
+async def test_api_prs_requires_auth(app_client: httpx.AsyncClient) -> None:
+    async with app_client as client:
+        resp = await client.get("/api/prs")
+    assert resp.status_code == 401
+
+
+async def test_capture_test_posts_a_synthetic_error_through_sentinel_ingest(
+    app_client: httpx.AsyncClient, db_session: AsyncSession, respx_mock: Any
+) -> None:
+    app_row = await _make_app(db_session)
+    respx_mock.post("http://localhost:8002/ingest/error").mock(
+        return_value=httpx.Response(202, json={"error_id": 7, "fingerprint": "abc123"})
+    )
+
+    async with app_client as client:
+        await _login(client)
+        resp = await client.post(f"/api/apps/{app_row.id}/capture-test")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body == {"status": "captured", "error_id": 7, "fingerprint": "abc123"}
+
+    sent = respx_mock.calls.last.request
+    assert sent.headers["authorization"] == f"Bearer {app_row.ingest_token}"
+
+
+async def test_capture_test_404_for_unknown_app(app_client: httpx.AsyncClient) -> None:
+    async with app_client as client:
+        await _login(client)
+        resp = await client.post("/api/apps/999999/capture-test")
+    assert resp.status_code == 404

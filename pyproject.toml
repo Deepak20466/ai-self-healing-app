@@ -24,7 +24,14 @@ dependencies = [
   "pydantic-settings>=2.5,<3.0",
   "psutil>=6.0",
   "pyyaml>=6.0,<7.0",
+  "typer>=0.12,<1.0",
+  "rich>=13.7,<14.0",
+  "platformdirs>=4.2,<5.0",
+  "aiohttp>=3.10,<4.0",
 ]
+
+[project.scripts]
+selfheal = "cli.main:app"
 
 [project.optional-dependencies]
 # API-mode backend (USE_CLAUDE_CODE=false). Free mode (the default) never
@@ -46,10 +53,8 @@ dev = [
   "ruff>=0.7",
   "mypy>=1.11",
   "honcho>=1.1",
-  # scripts/verify_all.py's socketio.AsyncClient needs aiohttp for its HTTP
-  # transport when testing chat live over a real (non-ASGI-in-process) URL.
-  "aiohttp>=3.10",
   "types-PyYAML>=6.0",
+  "types-psutil>=6.0",
   # sentinel/flask_middleware.py and sentinel/django_middleware.py are
   # optional integrations, only actually imported by an app that uses them
   # -- installed here so their tests can run.
@@ -63,7 +68,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "sentinel*", "mcp_server*", "healer*", "apps*"]
+include = ["core*", "sentinel*", "mcp_server*", "healer*", "apps*", "cli*"]
 
 [tool.ruff]
 line-length = 100
@@ -77,12 +82,17 @@ ignore = ["S101"]
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S105", "S106", "S603", "S607"]
 "scripts/*" = ["S105", "S106", "S603", "S607", "S310"]
+# The CLI starts pods/cloudflared as subprocesses (same shape as scripts/),
+# and a "friendly error, no traceback" try/except/pass around a best-effort
+# process kill or a not-strictly-JSON error body is deliberate here.
+"cli/*" = ["S105", "S106", "S603", "S607", "S110"]
 # Internal subprocess helpers with multiple call sites and a sensible
 # `timeout=` default; wrapping every caller in `asyncio.timeout()` instead
 # would add boilerplate at each of them for no real benefit here (unlike
 # core/queue.py's single-caller HealJobListener.wait()).
 "mcp_server/git_utils.py" = ["ASYNC109"]
 "core/scanner.py" = ["ASYNC109"]
+"cli/client.py" = ["ASYNC109"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's documented dependency-injection idiom is exactly `= Depends(...)`

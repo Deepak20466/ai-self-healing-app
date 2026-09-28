@@ -167,30 +167,54 @@ mode is the intended production option** for a server that runs
 autonomously; the CLI backends are meant for local development and demos
 where a human is around.
 
-## Running the pods
+## Terminal CLI
 
-Each pod is a native process (no Docker — see SPEC.md's hard constraints).
-Dev, all 4 at once:
-
-```powershell
-.venv\Scripts\honcho start
-```
-
-(reads `Procfile`) — or one per terminal:
+`selfheal` (Typer + Rich) is the only client — there is no web UI. It talks
+to healer-pod's JSON/Socket.io API, which binds to `127.0.0.1` only.
 
 ```powershell
-selfheal up
-selfheal login
+selfheal up                       # start all 4 pods (each 127.0.0.1-only)
+selfheal login                    # hidden password prompt; stores a
+                                   # session token in your user config dir,
+                                   # never in this repo
+selfheal status                   # pod health + login state
+selfheal connect <github-url>     # scan + AI-fix any repo GITHUB_TOKEN can push to
+selfheal apps                     # list connected apps
+selfheal scan <app>               # health report as a Rich table
+selfheal fix <app> <finding-id>   # confirms before spending AI budget
+selfheal fix <app> --high --yes   # fix every high-severity finding, no prompt
+selfheal watch                    # live heal-job progress
+selfheal errors                   # open errors
+selfheal prs                      # recent heal-job PRs
+selfheal metrics                  # MTTR, success rate, cost per fix
+selfheal capture <app>            # send a synthetic test error, confirm capture works
+selfheal chat                     # interactive AI chat; destructive actions need "yes"
+selfheal deploy                   # this project only (local_deploy.py)
+selfheal down                     # stop everything this CLI started
 ```
 
-`selfheal up` starts all 4 pods (each bound to `127.0.0.1` only —
-`--public` additionally opens a Cloudflare tunnel for the sentinel webhook
-alone, never the healer API). `healer.app` (not `healer.worker`/
+Every list/detail command supports `--json`. `selfheal up --public` also
+opens a Cloudflare quick tunnel for the sentinel CI webhook only (never the
+healer API) and prints the URL to set as `HEALER_WEBHOOK_URL`.
+
+Each pod is still a native process (no Docker — see SPEC.md's hard
+constraints); `selfheal up` is the one-command way to start all 4.
+`.venv\Scripts\honcho start` (reads `Procfile`) also works and is what
+`selfheal up` does under the hood. `healer.app` (not `healer.worker`/
 `healer.main`) is the pod entrypoint: it runs the Phase 4/5 worker loop as a
 background task *and* serves the JSON/Socket.io API the CLI talks to, in one
-process — SPEC.md's "4 pods", not 5. `selfheal login` prompts for the admin
-password you hashed above and stores a session token in your user config
-dir (never in the repo).
+process — SPEC.md's "4 pods", not 5.
+
+## Running the pods
+
+Equivalent to `selfheal up`, for reference or debugging a single pod:
+
+```powershell
+.venv\Scripts\uvicorn apps.target_app.main:app --host 127.0.0.1 --port 8001
+.venv\Scripts\uvicorn sentinel.app:app --host 127.0.0.1 --port 8002
+.venv\Scripts\python -m mcp_server.http_main
+.venv\Scripts\uvicorn healer.app:asgi_app --host 127.0.0.1 --port 8000
+```
 
 ## Tests
 

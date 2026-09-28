@@ -8,7 +8,7 @@ session can resume without re-deriving context.
 
 1. Read `SPEC.md` fully.
 2. Read the "Phase log" below to see what's done.
-3. Run `ruff check . && ruff format --check . && mypy core sentinel mcp_server healer`
+3. Run `ruff check . && ruff format --check . && mypy core sentinel mcp_server healer cli`
    (only check dirs that exist so far) and `pytest` before starting new work,
    to confirm the last phase is still green.
 4. Continue with the next unchecked phase in SPEC.md's "BUILD ORDER".
@@ -99,7 +99,8 @@ session can resume without re-deriving context.
   exists / non-obvious design choices, not what it does line-by-line.
 - Lint/type/test gate for every phase:
   `ruff check`, `ruff format --check`, `mypy` (strict on `core/`, `sentinel/`,
-  `mcp_server/`, `healer/` per SPEC.md), `pytest`.
+  `mcp_server/`, `healer/` per SPEC.md, plus `cli/` since the terminal-only
+  v1.0 pass added it), `pytest`.
 
 ## Ambiguities resolved (SPEC.md said "pick the simplest robust option")
 
@@ -2156,3 +2157,93 @@ the `selfheal` CLI itself (Step 2), per-app auto-merge (3), AI fallback
 chains for fixes/chat via `gemini_api`/`groq_api` (4), the free-AI privacy
 guard + secret scrubber (5), PyPI packaging + v1.0 tag/release (6), and a
 final terminal-only `verify_all.py`/`VERIFICATION.md` pass (7).
+
+### 2026-09-28 — Terminal-only v1.0 (Step 2 of 7: the `selfheal` CLI)
+
+Built a new top-level `cli/` package (added to `[tool.setuptools.packages.
+find]`'s `include` and to the mypy-strict gate), a thin Typer+Rich client
+over healer-pod's existing JSON/Socket.io API -- no new server-side business
+logic beyond three small additions:
+- `GET /api/prs` (`healer/app.py`): lists the most recent `heal_jobs` rows
+  that have a `pr_number`, ordered by `id.desc()` -- **not**
+  `pr_opened_at.desc()` as first written, which broke under this repo's own
+  heavily-reused test/dev database: almost every `heal_jobs` row (including
+  ones from this session's own new test) has `pr_opened_at=NULL`, so a
+  DESC sort over all-NULL values ties arbitrarily and a real live query
+  reliably failed to surface a freshly-created row within its `LIMIT 20`.
+  `id.desc()` is always populated and monotonic, so it's deterministic.
+  Caught by a real test against the real dev-pattern `selfheal_test` DB
+  (already carrying thousands of rows from `test_healer_ci_agent.py`'s own
+  randomized-PR-number tests), not by reasoning about it in the abstract --
+  same "shared DB, unscoped query" family of bug CLAUDE.md's Phase 3/5 log
+  entries already document.
+- `POST /api/apps/{id}/capture-test` (`healer/app.py`): `selfheal capture
+  <app>`'s server side -- posts one synthetic `CapturedError` to
+  sentinel-pod's real `/ingest/error` using that app's own `ingest_token`,
+  confirming the capture pipeline is wired end to end without spending any
+  AI budget (it's not a heal_job).
+- Config dir moved from `healer/app.py`'s no-longer-needed `WEB_DIR`
+  import of `mcp_server.sandbox.REPO_ROOT` -- deleted along with the
+  `StaticFiles` mount/`GET /` route (Step 1's leftover import).
+
+CLI design:
+- `cli/config.py`: session token + pod PIDs live in `platformdirs.
+  user_config_dir("selfheal")/state.json` -- never in this repo, never in
+  `.env`. `cli/client.py`: `HealerClient` wraps one short-lived
+  `httpx.AsyncClient` per invocation, sends the stored session token as a
+  plain `Cookie: selfheal_session=<token>` header (no browser involved, so
+  there's no `Secure`/`SameSite` semantics to replicate -- it's just a
+  signed itsdangerous string either way), and turns `httpx.ConnectError` /
+  401 into `NotRunningError`("run selfheal up")/`NotLoggedInError`("run
+  selfheal login") respectively, so no command needs its own try/except for
+  the two most common failure modes.
+- `cli/pods.py`: `up`/`down`/`status` reuse the exact same
+  healthz-then-spawn-if-down pattern `scripts/benchmark.py` already
+  established (real `subprocess.Popen` per pod, `--host 127.0.0.1` always),
+  persisting PIDs to the same state file so a later `selfheal down` (even
+  from a different terminal) can find and stop them. `--public` starts
+  exactly one `cloudflared` quick tunnel for port 8002 (the sentinel
+  webhook) only -- the healer API is never tunneled, matching Step 1's
+  guardrail; if `gh` isn't authenticated the CLI just prints the tunnel URL
+  and the manual `gh variable set` command instead of running it
+  automatically (deliberately simpler than the old deleted
+  `start_public_demo.ps1`, which did run `gh variable set` itself --
+  acceptable since this is a one-line copy-paste, not a repeated chore).
+- `selfheal fix` always confirms before spending AI budget (shows the
+  finding id(s); `--yes` skips the prompt, `--auto-merge` is accepted and
+  threaded through the confirmation message now, but not yet wired to a
+  real per-fix override on the server side -- that lands with Step 3's
+  per-app `auto_merge` column).
+- `selfheal watch`/`selfheal chat` use `python-socketio`'s async client
+  (added `aiohttp` as a base dependency, not just a dev one, since these
+  need it in a real end-user install too) over the same `auth={"token":
+  ...}` handshake `healer/app.py`'s Socket.io `connect` handler already
+  supports.
+- Every list/detail command supports `--json` (`selfheal errors --json`
+  etc.) via a shared `_print_or_json` helper. Caught and fixed a real bug
+  here during testing: passing an already-`json.dumps`-encoded string to
+  Rich's `console.print_json(data=...)` double-encodes it (Rich's own
+  `print_json` does the serialization) -- fixed by printing the dumped
+  string directly with `console.print(...)` instead of handing it back to
+  `print_json`.
+
+**Real, not just mocked, verification**: ran `selfheal up` for real (all 4
+pods started as real subprocesses, confirmed `selfheal status` reported all
+4 "up"), then `selfheal down` (confirmed all 4 stopped). Did **not** run a
+live `selfheal login` against the real `ADMIN_PASSWORD_HASH` in this
+session's `.env` -- the task's admin password was explicitly given
+"session only, never write to any file, log or commit," and this
+conversation transcript is itself something that gets persisted, so typing
+it into any tool call (even just to log in once) would violate that.
+Login/logout and every other command are instead covered by
+`tests/test_cli.py` (17 tests, `respx`-mocked HTTP, no real healer-pod
+process) plus 4 new tests on `/api/prs`/`/api/apps/{id}/capture-test` in
+`tests/test_healer_connect_repo_api.py`.
+
+Verified: `ruff check .`/`ruff format --check .` clean, `mypy core sentinel
+mcp_server healer cli` (strict) clean, `pytest` 467 passed / 1 skipped (the
+same pre-existing Windows flake, not hit this run). Real `selfheal up`/
+`down` confirmed against real pods (see above).
+
+**Not yet done**: Steps 3-7 (per-app auto-merge, AI fallback chains,
+privacy guard, PyPI release, final verify).
