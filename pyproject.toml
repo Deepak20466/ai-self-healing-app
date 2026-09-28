@@ -1,12 +1,27 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-self-healing"
-version = "0.1.0"
-description = "AI-Powered Self-Healing Application with MCP Server"
+version = "1.0.0"
+description = "AI-Powered Self-Healing Application with MCP Server -- terminal-only CLI, no browser UI"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+  { name = "K Deepak", email = "kdeepak162001@gmail.com" },
+]
 requires-python = ">=3.11"
+keywords = ["self-healing", "ai", "mcp", "observability", "autonomous-agent"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Software Development :: Bug Tracking",
+]
 dependencies = [
   "fastapi>=0.115,<1.0",
   "uvicorn[standard]>=0.32,<1.0",
@@ -29,6 +44,11 @@ dependencies = [
   "platformdirs>=4.2,<5.0",
   "aiohttp>=3.10,<4.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Deepak20466/ai-self-healing-app"
+Repository = "https://github.com/Deepak20466/ai-self-healing-app"
+Issues = "https://github.com/Deepak20466/ai-self-healing-app/issues"
 
 [project.scripts]
 selfheal = "cli.main:app"
@@ -55,6 +75,12 @@ dev = [
   "honcho>=1.1",
   "types-PyYAML>=6.0",
   "types-psutil>=6.0",
+  # For building the wheel/sdist locally (`python -m build`). `twine` (the
+  # actual PyPI upload tool) is deliberately NOT a dev dependency here -- its
+  # own dependency on a newer `rich` conflicts with this project's pinned
+  # `rich<14.0` (the CLI's own dependency). Run it via `pipx run twine` or a
+  # separate venv instead; `.github/workflows/release.yml` does exactly that.
+  "build>=1.2",
   # sentinel/flask_middleware.py and sentinel/django_middleware.py are
   # optional integrations, only actually imported by an app that uses them
   # -- installed here so their tests can run.

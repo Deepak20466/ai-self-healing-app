@@ -260,6 +260,26 @@ constraints); `selfheal up` is the one-command way to start all 4.
 background task *and* serves the JSON/Socket.io API the CLI talks to, in one
 process — SPEC.md's "4 pods", not 5.
 
+### Installing the CLI
+
+`selfheal` is a real, installable package (`pyproject.toml`'s
+`[project.scripts]`) — a checkout + `pip install -e ".[dev]"` (dev setup
+above) is the recommended path since `selfheal up` spawns the pods from
+*this* repo's own code. It also builds as a normal wheel/sdist:
+
+```powershell
+pip install build
+python -m build            # -> dist/ai_self_healing-1.0.0-{py3-none-any.whl,tar.gz}
+pip install dist/ai_self_healing-1.0.0-py3-none-any.whl
+selfheal --help
+```
+
+`.github/workflows/release.yml` builds both artifacts and attaches them to a
+GitHub Release on every `v*` tag push; publishing to the real PyPI is a
+separate job in that workflow, gated on a `PYPI_API_TOKEN` repo secret
+(skipped cleanly if unset — the same pattern `deploy.yml` already uses for
+`DEPLOY_HOST`).
+
 ## Running the pods
 
 Equivalent to `selfheal up`, for reference or debugging a single pod:

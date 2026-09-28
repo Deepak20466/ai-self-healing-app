@@ -1,0 +1,70 @@
+name: Release
+
+# Builds the wheel/sdist and attaches them to a GitHub Release whenever a
+# "v*" tag is pushed (e.g. v1.0.0). Publishing to the real PyPI is a
+# separate, opt-in step gated on a PYPI_API_TOKEN repo secret -- skipped
+# cleanly if it isn't set, same "skip cleanly when unconfigured" pattern
+# deploy.yml/notifier.py already use elsewhere in this project, since a real
+# PyPI account/token is something only the project owner can create.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install "setuptools>=69" build
+
+      - name: Build wheel + sdist
+        run: python -m build
+
+      - name: Verify the built version matches the pushed tag
+        # Belt-and-suspenders: pyproject.toml's [project].version must equal
+        # the tag (minus its leading "v"), so a forgotten version bump fails
+        # loudly here instead of silently publishing a mismatched release.
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          BUILT_VERSION=$(ls dist/*.tar.gz | sed -E 's/.*ai_self_healing-(.*)\.tar\.gz/\1/')
+          if [ "$TAG_VERSION" != "$BUILT_VERSION" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match pyproject.toml version $BUILT_VERSION" >&2
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  publish-to-pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ secrets.PYPI_API_TOKEN != '' }}
+    environment: pypi
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: pipx run twine upload --non-interactive dist/*

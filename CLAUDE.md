@@ -2580,3 +2580,72 @@ shapes).
 
 **Not yet done**: Steps 6-7 (PyPI packaging + v1.0 release, final
 terminal-only verify pass).
+
+### 2026-09-29 — Terminal-only v1.0 (Step 6 of 7: PyPI packaging + v1.0.0 release)
+
+Built:
+- `pyproject.toml`: version bumped `0.1.0` -> `1.0.0`; added `readme`,
+  `license`/`license-files` (PEP 639 -- MIT, `LICENSE` already existed),
+  `authors`, `keywords`, `classifiers`, `[project.urls]`. Bumped
+  `build-system.requires` from `setuptools>=68` to `setuptools>=69` -- the
+  new PEP 639 `license`/`license-files` fields aren't recognized by the
+  `setuptools==65.5.0` this venv actually had installed (confirmed by
+  trying to build first, not assumed); the real installed version now
+  matches (`pip install --upgrade "setuptools>=69"`).
+- `.github/workflows/release.yml`: on a `v*` tag push, builds the wheel +
+  sdist (`python -m build`), verifies the built version string matches the
+  pushed tag (fails loudly on a forgotten version bump rather than
+  silently releasing a mismatch), attaches both artifacts to a GitHub
+  Release (`softprops/action-gh-release`, auto-generated release notes),
+  then a second job publishes to the real PyPI *only if* a
+  `PYPI_API_TOKEN` repo secret is set -- skipped cleanly otherwise, the
+  same "skip cleanly when unconfigured" convention `deploy.yml`/
+  `notifier.py` already established for `DEPLOY_HOST`/Slack/SMTP. A real
+  PyPI account + token is something only the project owner can create, so
+  this session builds/verifies/tags but does not (and cannot) publish to
+  the real PyPI itself.
+- `.gitignore`: added `/dist/`/`/build/` (local build output, was
+  previously untracked-but-not-ignored).
+
+**Real, not just configured**: ran `python -m build` locally end to end --
+produced `ai_self_healing-1.0.0-py3-none-any.whl` and
+`ai_self_healing-1.0.0.tar.gz`, both with correct `1.0.0` metadata. Then,
+to actually prove the wheel is installable and usable stand-alone (not
+just that setuptools didn't error), created a throwaway venv, `pip
+install`ed the wheel into it with nothing else from this repo on that
+venv's `PYTHONPATH`, and ran the resulting `selfheal --help` from that
+venv's own `Scripts/` dir -- it printed the full Typer command list
+correctly, confirming the `[project.scripts]` entry point and package data
+really are wired correctly in the built artifact, not just in `pip install
+-e .`'s editable mode. Deleted the throwaway venv and `dist/`/`build/`
+afterward (nothing built locally is committed -- see `.gitignore` above).
+
+**Real bug found while installing build tooling, fixed immediately**:
+`pip install build twine` (tried first, since `twine` is the real
+PyPI-upload tool) silently upgraded this shared dev venv's `rich` from the
+project's pinned `<14.0` to `15.0.0` (a `twine` transitive dependency),
+which is exactly the CLI's own Typer/Rich dependency this project pins
+deliberately (per Step 2's log) -- a real, live conflict, not
+hypothetical (`pip`'s own resolver printed the incompatibility warning).
+Fixed by never installing `twine` into this project's own dev venv at all
+-- it isn't needed here (`python -m build` alone is enough to build; only
+`release.yml`'s actual-publish step needs `twine`, and it runs that via
+`pipx run twine`, an isolated environment, not this project's own
+dependencies). Restored `rich<14.0` in this venv afterward and reconfirmed
+the full test suite still passes (Typer's CLI output rendering is
+version-sensitive enough that this was worth verifying for real, not
+assumed).
+
+**Not done in this session, deliberately**: pushing the `v1.0.0` tag
+itself and creating the real GitHub Release/PyPI publish -- tracked as the
+very next action in this same session (tagging is safe/reversible, a real
+PyPI publish is not attempted without the user's own `PYPI_API_TOKEN`
+secret, which nobody has configured yet).
+
+Verified: `ruff check .`/`ruff format --check .` clean, `mypy core sentinel
+mcp_server healer cli` (strict) clean, `pytest` 508/509 (1 pre-existing
+skip; same as Step 5's entry -- unrelated to packaging, nothing here
+touches application code).
+
+**Not yet done**: Step 7 (final terminal-only `verify_all.py`/
+`VERIFICATION.md` pass).
