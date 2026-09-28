@@ -1,5 +1,25 @@
 name: Release
 
+# Builds the wheel/sdist and attaches them to a GitHub Release whenever a
+# "v*" tag is pushed (e.g. v1.0.0). Publishing to the real PyPI is a
+# separate, opt-in step gated on a PYPI_API_TOKEN repo secret -- skipped
+# cleanly if it isn't set, same "skip cleanly when unconfigured" pattern
+# deploy.yml/notifier.py already use elsewhere in this project, since a real
+# PyPI account/token is something only the project owner can create.
+#
+# Real bug found and fixed (see CLAUDE.md): the first version of this file
+# gated publish-to-pypi with `if: ${{ secrets.PYPI_API_TOKEN != '' }}` at the
+# job level. GitHub does not allow the `secrets` context inside an `if:`
+# condition (job- or step-level) -- referencing it there makes the ENTIRE
+# workflow file fail to register (every run failed with 0 jobs scheduled and
+# the generic "workflow file issue" error, and the file's own `name: Release`
+# never even took effect in the workflow list). Confirmed via VS Code's
+# GitHub Actions extension diagnostics ("Unrecognized named-value: 'secrets'"
+# at the `if:` line) and by bisecting with real test-tag pushes. Fixed by
+# copying the secret into a job-level `env:` var and gating on
+# `env.PYPI_API_TOKEN != ''` instead (the `env` context IS allowed in `if:`).
+# Never put `secrets.*` directly inside an `if:` anywhere in this file.
+
 on:
   push:
     tags: ["v*"]
@@ -23,6 +43,9 @@ jobs:
         run: python -m build
 
       - name: Verify the built version matches the pushed tag
+        # Belt-and-suspenders: pyproject.toml's [project].version must equal
+        # the tag (minus its leading "v"), so a forgotten version bump fails
+        # loudly here instead of silently publishing a mismatched release.
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           BUILT_VERSION=$(ls dist/*.tar.gz | sed -E 's/.*ai_self_healing-(.*)\.tar\.gz/\1/')
