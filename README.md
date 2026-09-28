@@ -1,48 +1,20 @@
 # AI-Powered Self-Healing Application
 
-[![Demo: an AI-fixed bug, an OpenTelemetry Go error, chat and metrics](docs/demo.gif)](docs/demo.mp4)
-
-*A ~2 minute silent walkthrough ([docs/demo.mp4](docs/demo.mp4)), recorded headless
-against the live system: a seeded Python bug detected and fixed by the AI into a
-real PR (waiting part sped up), the AI's CI-fix on PR #14, a Go error captured
-over OpenTelemetry with its health report, chat, and metrics. Regenerate with
-`scripts/record_demo.py` + `scripts/build_demo.py`.*
+**Terminal-only.** There is no web UI: everything is driven from a `selfheal`
+CLI talking to a set of pods that bind to `127.0.0.1` only (see "Terminal CLI"
+below). Only the sentinel webhook is ever exposed publicly, and only when you
+explicitly ask for it (`selfheal up --public`).
 
 A self-healing application with an MCP server: it detects runtime errors,
 silent wrong-output bugs and CI/CD failures, root-causes them with Claude
 through an MCP server, generates a fix plus a regression test, and opens a
 pull request for review (the deploy/rollback pipeline is built and was
-exercised locally; it has not been run on a real cloud VM) — with a real-time AI chat UI and a metrics
-dashboard proving MTTR, success rate and cost per fix.
+exercised locally; it has not been run on a real cloud VM).
 
-All 8 build phases in `SPEC.md`'s BUILD ORDER are complete. See `CLAUDE.md`
-for the full phase-by-phase build log, every ambiguity resolved along the
-way, and conventions for resuming work.
-
-## Screenshots
-
-Captured from a real running system (dark mode, desktop width) with Playwright
-driving Chrome, after logging in as the admin.
-
-<img src="docs/images/dashboard.png" alt="Dashboard: pod health and open errors" width="720">
-
-*Dashboard: live pod health, open errors and pipeline runs.*
-
-<img src="docs/images/chat.png" alt="AI chat asking for confirmation before a rollback" width="720">
-
-*AI chat: answers from live tool data; a rollback asks for "yes" and is cancelled when declined.*
-
-<img src="docs/images/metrics.png" alt="Metrics page" width="720">
-
-*Metrics: MTTR, fix success rate, CI auto-fix rate, contract catches, spend vs. budget.*
-
-<img src="docs/images/apps.png" alt="Apps page listing connected apps" width="720">
-
-*Apps: connected apps with health score and open findings.*
-
-<img src="docs/images/login.png" alt="Login page" width="360">
-
-*Login page.*
+All 8 build phases in `SPEC.md`'s BUILD ORDER are complete, plus a terminal-
+only v1.0 pass on top (see `CLAUDE.md`'s phase log). See `CLAUDE.md` for the
+full phase-by-phase build log, every ambiguity resolved along the way, and
+conventions for resuming work.
 
 Real proof this system works end to end, from the AI itself, not staged
 screenshots (three real AI fixes: PR #10 and PR #15 merged; PR #14 was a
@@ -82,12 +54,12 @@ flowchart TB
         App["app-pod<br/>apps/target_app<br/>7 seeded bugs"]
         Sentinel["sentinel-pod<br/>capture, prober,<br/>anomaly, CI webhook"]
         MCP["mcp-pod<br/>MCP server #quot;selfheal#quot;<br/>20 tools, 3 resources"]
-        Healer["healer-pod<br/>fix worker + AI chat<br/>+ dashboard UI"]
+        Healer["healer-pod<br/>fix worker + JSON/Socket.io API<br/>(127.0.0.1 only)"]
     end
 
     DB[("PostgreSQL<br/>errors, heal_jobs, pipeline_runs,<br/>deployments, chat, audit_log, ...")]
 
-    User["Browser<br/>login / chat / dashboard / metrics"]
+    User["selfheal CLI<br/>(Typer + Rich, localhost only)"]
 
     App -- "POST /ingest/error<br/>/ingest/metric" --> Sentinel
     Sentinel -- "probes every 5 min" --> App
@@ -98,7 +70,7 @@ flowchart TB
     Healer -- "git worktree, PR,<br/>issue, workflow dispatch" --> Repo
     Actions -- "HMAC-signed<br/>POST /webhooks/ci" --> Sentinel
     Actions -- "SSH: atomic release,<br/>migrate, restart, smoke test" --> Pods
-    User -- "HTTPS via Caddy<br/>(login, chat, Socket.io)" --> Healer
+    User -- "HTTP on 127.0.0.1<br/>(login, chat, Socket.io)" --> Healer
     Healer <--> DB
     Sentinel <--> DB
     App <--> DB
@@ -127,7 +99,7 @@ python scripts/hash_password.py            # generates ADMIN_PASSWORD_HASH
 ```
 
 Set `ADMIN_PASSWORD_HASH` (from the command above) and `SESSION_SECRET` in
-`.env` before starting healer-pod — the chat/dashboard/metrics UI is
+`.env` before starting healer-pod — the API `selfheal` talks to is
 unauthenticated-401 without them.
 
 ## AI backend: pluggable (Claude Code / Codex / Gemini CLIs, or the Anthropic API)
@@ -207,17 +179,18 @@ Dev, all 4 at once:
 (reads `Procfile`) — or one per terminal:
 
 ```powershell
-.venv\Scripts\uvicorn apps.target_app.main:app --port 8001
-.venv\Scripts\uvicorn sentinel.app:app --port 8002
-.venv\Scripts\python -m mcp_server.http_main
-.venv\Scripts\uvicorn healer.app:asgi_app --port 8000
+selfheal up
+selfheal login
 ```
 
-`healer.app` (not `healer.worker`/`healer.main`) is the pod entrypoint from
-Phase 6 onward: it runs the Phase 4/5 worker loop as a background task
-*and* serves the chat/dashboard/metrics UI + Socket.io, in one process —
-SPEC.md's "4 pods", not 5. Open `http://localhost:8000/` and log in with the
-admin password you hashed above.
+`selfheal up` starts all 4 pods (each bound to `127.0.0.1` only —
+`--public` additionally opens a Cloudflare tunnel for the sentinel webhook
+alone, never the healer API). `healer.app` (not `healer.worker`/
+`healer.main`) is the pod entrypoint: it runs the Phase 4/5 worker loop as a
+background task *and* serves the JSON/Socket.io API the CLI talks to, in one
+process — SPEC.md's "4 pods", not 5. `selfheal login` prompts for the admin
+password you hashed above and stores a session token in your user config
+dir (never in the repo).
 
 ## Tests
 
@@ -301,9 +274,9 @@ curl http://localhost:8001/trigger/zero
 ```
 sentinel-pod captures the `ZeroDivisionError` with its exact file/line,
 fingerprints it, and enqueues a `runtime_error` heal job. Watch the healer
-pick it up (`python -m healer.worker` logs, or the dashboard's Errors panel)
-— it reads the error and surrounding code via MCP, writes a fix plus a
-regression test that fails before and passes after, and opens a PR.
+pick it up (`python -m healer.worker` logs, or `selfheal watch`) — it reads
+the error and surrounding code via MCP, writes a fix plus a regression test
+that fails before and passes after, and opens a PR.
 
 **2. A silent, contract-detected bug.**
 ```
@@ -326,10 +299,10 @@ CI-fix loop (`healer/ci_agent.py` / `agent_free.run_ci_heal_job_free`)
 classifies it as a real failure (not flaky), pushes a fix commit to the same
 PR branch, and comments with the root cause and evidence.
 
-**4. Ask the chat.** Log into `http://localhost:8000/`, go to Chat, and try:
+**4. Ask the chat.** `selfheal login`, then `selfheal chat` and try:
 `show stats`, `what's the pipeline status`, `why did CI fail on PR #N`,
-`is production healthy`, `roll back production` (asks for "yes" first,
-never runs without it).
+`is production healthy`, `roll back production` (asks you to type "yes"
+first, never runs without it).
 
 **5. A bad fix, and the automatic rollback.** Force it locally without
 needing a real broken pod:
@@ -343,35 +316,36 @@ row was written and `healer.notifier.notify()` fired without raising.
 
 ## Connect any repo → health report → AI fix PRs
 
-Beyond the built-in `target_app` demo, the dashboard's **Apps** tab can
+Beyond the built-in `target_app` demo, `selfheal connect <github-url>` can
 connect *any* GitHub repo your `GITHUB_TOKEN` can see and start monitoring
 it — no code changes, no separate deployment, still 100% free:
 
-1. **Add app**: paste a repo URL (e.g. `https://github.com/owner/repo`).
-   The system confirms `GITHUB_TOKEN` can access it (a clear error tells you
-   to add the repo to the token's access list if not), clones it into
-   `connected_apps/<name>/` (git-ignored — a real, separate checkout, never
-   mixed with this repo's own history), and auto-detects its language,
-   test command, and lint command from its manifest (`pyproject.toml`/
-   `requirements.txt`, `package.json`, `go.mod`, `pom.xml`/`build.gradle*`,
-   `*.csproj`, `composer.json`, `Gemfile`).
-2. **Instant scan** runs immediately (and again anytime via "Rescan now"):
-   installs the app's own dependencies into a dedicated per-app virtualenv
-   (`.selfheal_venv/`, or its own `node_modules/` for a Node app — so one
-   connected app's dependency versions can never collide with another's or
-   with this project's own), then runs its tests, a linter (ruff for
-   Python), a type checker (mypy for Python), and a free dependency
-   vulnerability scan (`pip-audit` / `npm audit`). Every finding (file,
-   line, severity, message) is stored in the `findings` table; progress
-   streams live over Socket.io.
-3. **Health report**: the app's detail page shows a 0-100 health score,
-   the finding list by severity, and the last scan time.
-4. **Fix**: click **Fix** on any finding to open a `runtime_error` heal_job
-   for it — same guardrails, same worktree/circuit-breaker/patch-size rules
-   as every other heal job — which opens a PR directly against *that app's*
-   own GitHub repo. The **"Auto-fix high-severity findings"** toggle (off by
-   default) does this automatically for new high/critical findings after
-   each scan.
+1. **`selfheal connect <url>`**: the system confirms `GITHUB_TOKEN` can push
+   to it (a clear error tells you to add the repo to the token's access
+   list if not, or to add its owner to `ALLOWED_REPO_OWNERS`), clones it
+   into `connected_apps/<name>/` (git-ignored — a real, separate checkout,
+   never mixed with this repo's own history), and auto-detects its
+   language, test command, and lint command from its manifest
+   (`pyproject.toml`/`requirements.txt`, `package.json`, `go.mod`,
+   `pom.xml`/`build.gradle*`, `*.csproj`, `composer.json`, `Gemfile`).
+2. **Instant scan** runs immediately (`selfheal scan <app>` to re-run it
+   anytime): installs the app's own dependencies into a dedicated per-app
+   virtualenv (`.selfheal_venv/`, or its own `node_modules/` for a Node
+   app — so one connected app's dependency versions can never collide with
+   another's or with this project's own), then runs its tests, a linter
+   (ruff for Python), a type checker (mypy for Python), and a free
+   dependency vulnerability scan (`pip-audit` / `npm audit`). Every finding
+   (file, line, severity, message) is stored in the `findings` table;
+   progress streams live over Socket.io to `selfheal watch`.
+3. **Health report**: `selfheal scan <app>` prints a 0-100 health score,
+   the finding list by severity, and the last scan time as a Rich table.
+4. **Fix**: `selfheal fix <app> <finding-id>` (or `--high` for every
+   high-severity finding) opens a `runtime_error` heal_job for it — same
+   guardrails, same worktree/circuit-breaker/patch-size rules as every
+   other heal job — which opens a PR directly against *that app's* own
+   GitHub repo. `selfheal apps set <app> --auto-merge on` does this
+   automatically for new high/critical findings after each scan; off by
+   default for connected repos.
 5. **Onboarding PR**: one click opens a PR adding a small, dependency-free
    error-reporting snippet to the connected repo (no LLM call — a fixed
    template picked by detected language), so once merged and wired up, live
@@ -415,49 +389,42 @@ Both modes are idempotent: if the target is already at the original seeded
 state, the script prints a notice and does nothing (no empty commit, no
 duplicate PR).
 
-## Public demo via Cloudflare Tunnel
+## Public tunnel: webhook only
 
-No cloud VM? Expose your local pods publicly over HTTPS with a Cloudflare
-quick tunnel — no Cloudflare account, no Docker, no DNS setup.
+No cloud VM? `selfheal up --public` starts all 4 pods (each still bound to
+`127.0.0.1`) and opens exactly one Cloudflare quick tunnel — for the
+sentinel CI webhook (port 8002) only, no Cloudflare account, no Docker, no
+DNS setup.
 
-**Only the healer UI (port 8000) and the sentinel CI webhook (port 8002) are
-exposed.** The MCP server (8003), the target app (8001), and Postgres never
-are — the MCP server has no auth of its own (it's meant to be reached only
-by the healer, which runs on the same host), so tunneling it would let
-anyone on the internet call `propose_patch`/`run_tests`/etc. directly.
+**The healer API (8000, what the CLI talks to) is never tunneled.** Neither
+is the MCP server (8003, no auth of its own — meant to be reached only by
+the healer on the same host) or the target app (8001) or Postgres. This is
+a deliberate, narrower posture than earlier in this project's history (see
+CLAUDE.md's "Public demo via Cloudflare Tunnel" log entry for the
+now-removed dashboard-tunneling version) — v1.0 is terminal-only, and the
+CLI is meant to be run against `localhost` directly, never over a public
+tunnel.
 
 URLs change every time the tunnel restarts (a quick tunnel has no stable
-address), so this is for live demos, not a permanent deployment — for that,
-see "Cloud deploy" below.
+address), so this is for live CI demos, not a permanent deployment — for
+that, see "Cloud deploy" below.
 
 **Prerequisites**: `winget install Cloudflare.cloudflared`, `gh auth login`,
 and a real `ADMIN_PASSWORD_HASH` in `.env` (`python scripts/hash_password.py`)
-— the start script refuses to run without one.
+— `selfheal up --public` refuses to run without one.
 
 ```powershell
-.\scripts\start_public_demo.ps1
+selfheal up --public
+# ...
+selfheal down
 ```
 
-This starts all 4 pods, opens two `cloudflared tunnel --url` quick tunnels,
-prints both public URLs, and updates the `HEALER_WEBHOOK_URL`/`PUBLIC_URL`
-GitHub repo variables so `ci.yml` reports to the live webhook tunnel and
-`deploy.yml`'s notifications point at the live UI. `DEPLOY_HOST` is left
-alone — keep it unset so `deploy.yml` keeps skipping cleanly (this is a
-tunnel demo, not a real deploy target).
-
-Stop everything with:
-
-```powershell
-.\scripts\stop_public_demo.ps1
-```
-
-Because a Cloudflare quick tunnel does full HTTPS termination, the session
-cookie's `Secure` flag matters here — `ENVIRONMENT` must be `production` (not
-`development`) in `.env` for `healer/app.py` to set it. Verified: with
-`ENVIRONMENT=production`, an unauthenticated request to `/api/metrics`,
-`/api/errors`, `/api/health`, `/api/deployments`, or `/api/chat/history`
-through the tunnel returns 401; a signed `/webhooks/ci` POST returns 200,
-an unsigned or tampered one returns 401.
+`selfheal up --public` prints the webhook's public URL and updates the
+`HEALER_WEBHOOK_URL` GitHub repo variable so `ci.yml`/`ci-failure.yml`
+report to the live tunnel. `DEPLOY_HOST` is left alone — keep it unset so
+`deploy.yml` keeps skipping cleanly (this is a tunnel demo, not a real
+deploy target). A signed `/webhooks/ci` POST returns 200 through the
+tunnel; an unsigned or tampered one returns 401.
 
 ## Cloud deploy in ~10 minutes
 

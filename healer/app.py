@@ -19,8 +19,6 @@ from typing import Any
 import socketio
 import structlog
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,12 +47,9 @@ from healer.mcp_client import MCPToolClient, ReconnectingMCPToolClient, connect_
 from healer.onboarding import open_onboarding_pull_request
 from healer.worker import run_worker
 from mcp_server.github_client import GitHubClientError
-from mcp_server.sandbox import REPO_ROOT
 
 configure_logging(settings.log_level)
 logger = structlog.get_logger(__name__)
-
-WEB_DIR = REPO_ROOT / "web"
 
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins=[])
 
@@ -438,18 +433,8 @@ async def new_chat_session(
     return {"session_id": session_id}
 
 
-# --- Static UI (no build step: React 18 + htm from CDN) -----------------------
-
-if WEB_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
-
-
-@app.get("/")
-async def index() -> FileResponse:
-    return FileResponse(str(WEB_DIR / "index.html"))
-
-
 # --- Socket.io: authenticated real-time chat + notifications ------------------
+# The API is JSON/Socket.io only (no web UI) -- see healer/cli for the client.
 
 
 def _cookie_from_environ(environ: dict[str, Any]) -> str | None:

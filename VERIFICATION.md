@@ -1,5 +1,12 @@
 # Verification
 
+> **Note:** the entries below predate the terminal-only v1.0 pass, which
+> removed the web UI entirely (see CLAUDE.md's "Terminal-only v1.0" log
+> entry). Any "dashboard"/"chat UI"/browser screenshot below describes the
+> old design; a fresh `scripts/verify_all.py` run and a new verification
+> pass over the `selfheal` CLI will supersede this file (Step 7 of that log
+> entry).
+
 Run by `scripts/verify_all.py` against the live local system (4 pods running,
 real Postgres, real GitHub) plus the pytest suite (426 tests) and CI on `main` (green).
 No real AI heal runs were made: the healer was started with its CLI disabled so

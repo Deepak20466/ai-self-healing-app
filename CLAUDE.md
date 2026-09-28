@@ -2099,3 +2099,60 @@ huge and before the app so the prober can't enqueue extra (AI-spending) jobs.
 - The `key` verification rerun was refused by the per-fingerprint 24h breaker (it sums `attempt_count`; marking jobs failed does NOT reduce it). Rerun after the window. `zero`/`validation` not run today.
 - `reset_demo_bugs.py --local` rewrites bugs.py and the pinned tests in the working tree: restore with `git checkout HEAD -- <files>` and never commit it.
 - Benchmark prep: mark stale non-terminal jobs failed (keep history).
+
+### 2026-09-28 — Terminal-only v1.0 (Step 1 of 7: remove web frontend)
+
+Follow-up request: make the whole project terminal-only for v1.0, driven by
+a new `selfheal` CLI, no browser UI anywhere. Not in SPEC.md's original
+scope. This entry covers Step 1 only; Steps 2-7 (CLI, per-app auto-merge, AI
+fallback chains, privacy guard, PyPI release, final verify) are tracked as
+they land, each committed/pushed separately with full lint/mypy/pytest green
+in between.
+
+Removed: `web/` (React18+htm dashboard/chat/metrics pages), the
+`StaticFiles` mount and `GET /` route in `healer/app.py` (the JSON +
+Socket.io API itself is unchanged — the CLI in Step 2 talks to the same
+endpoints), `scripts/record_demo.py`/`scripts/build_demo.py` (Playwright-
+based demo video recorder), `docs/images/*.png`, `docs/demo.mp4`/
+`demo.gif`, and the `playwright` pip package + its downloaded browsers
+(uninstalled from `.venv`; was never a `pyproject.toml` dependency, just
+manually installed for the demo-recording scripts). `scripts/
+start_public_demo.ps1`/`stop_public_demo.ps1` (tunneled both the healer UI
+on 8000 and the sentinel webhook on 8002) are deleted outright rather than
+patched — `selfheal up --public` in Step 2 is their terminal-CLI
+replacement and will tunnel the sentinel webhook only.
+
+**All 4 pods already bound to `127.0.0.1` only** (`Procfile`, confirmed by
+reading it) — no code change needed there. `deploy/Caddyfile` (the real
+cloud-VM reverse proxy template) did still proxy healer-pod's port 8000 to
+the public internet; changed it to respond 404 for everything except
+`/webhooks/ci`/`/sentinel-healthz`, so a real cloud deploy following this
+template never exposes the healer API either, matching "only the sentinel
+webhook may be exposed."
+
+Docs: README's screenshots section, architecture diagram, and every
+"log into the dashboard"/"go to Chat" instruction rewritten to the
+upcoming `selfheal` CLI's command names (`selfheal up`/`login`/`chat`/
+`watch`/`connect`/`scan`/`fix`/`apps set --auto-merge`) — these commands
+don't exist yet as of this commit (Step 2 builds them next) but this keeps
+README internally consistent rather than describing a UI that's already
+gone. SPEC.md and VERIFICATION.md each got a short banner note instead of
+a full rewrite (SPEC.md is "the original target" per its own existing
+banner; VERIFICATION.md's UI-era entries are a historical run log) —
+pointing at this CLAUDE.md entry for what actually changed.
+
+Test changes: deleted `tests/test_healer_app.py::
+test_index_declares_a_favicon_so_browsers_dont_request_a_404` (the route it
+tested no longer exists). No other test touched the removed UI surface
+directly (`test_healer_app.py`'s other tests all hit `/api/*` JSON routes,
+unaffected).
+
+Verified: `ruff check .`/`ruff format --check .` clean, `mypy core sentinel
+mcp_server healer` (strict) clean, `pytest` 446 passed / 1 skipped (the
+pre-existing environment-only Windows flake, not hit this run).
+
+**Not yet done** (Steps 2-7, tracked as separate log entries as they land):
+the `selfheal` CLI itself (Step 2), per-app auto-merge (3), AI fallback
+chains for fixes/chat via `gemini_api`/`groq_api` (4), the free-AI privacy
+guard + secret scrubber (5), PyPI packaging + v1.0 tag/release (6), and a
+final terminal-only `verify_all.py`/`VERIFICATION.md` pass (7).

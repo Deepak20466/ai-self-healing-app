@@ -1,6 +1,13 @@
 # ROLE
 
 > **Implementation status:** see README "Roadmap" and VERIFICATION.md. This spec is the original target; the cloud-VM deploy, the 300 MB idle-RAM target (measured ~480 MB on Windows, unmeasured on Linux) and live use of Codex/Gemini backends are not verified.
+>
+> **v1.0 supersedes the WEB UI described below with a terminal `selfheal` CLI**
+> (Typer + Rich) talking to the same JSON/Socket.io API, which now binds to
+> `127.0.0.1` only. There is no browser-facing login/chat/dashboard page and
+> no `web/` directory — every "Pages"/"chat UI"/"dashboard" reference in this
+> spec describes the pre-v1.0 design; see CLAUDE.md's "Terminal-only v1.0"
+> log entry for what actually changed and why.
 
 You are a senior Python platform engineer. Build a production-grade, portfolio-quality
 **AI-Powered Self-Healing Application with MCP Server**. It detects runtime errors, silent
