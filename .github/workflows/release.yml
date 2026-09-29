@@ -27,6 +27,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # The default GITHUB_TOKEN has no write access to Releases unless a job
+    # explicitly grants it -- without this, `softprops/action-gh-release`
+    # fails with 403 "Resource not accessible by integration" (hit for real
+    # on the v1.1.0 tag push; the repo's default workflow permissions are
+    # read-only). Least-privilege: only `contents: write` is needed here.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
