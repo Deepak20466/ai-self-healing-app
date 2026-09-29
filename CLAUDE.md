@@ -3433,3 +3433,95 @@ sentinel mcp_server healer cli` (strict) clean. Full `pytest` run --
 result and any v1.1.0 tag/release status recorded in this same session's
 follow-up (see git log / GitHub releases for the final outcome, since this
 paragraph was written before that run completed).
+
+### 2026-09-29 — real-world bug hunt on connected repos: two real bugs found and fixed in THIS project; the target CVE fix did not converge
+
+Follow-up: connected two real external repos (`multi-agent-workspace`,
+heavy ML/RAG deps; `ShopCart`, a React storefront) were already connected
+from an earlier session. Task: scan both for a genuine bug (not planted),
+fix it via `selfheal fix`, and for the heavy-dependency app specifically
+exercise the (until now never-run-live) remote-verification path.
+
+**Real bug #1, found and fixed in this project's own scanner
+(`core/scanner.py`)**: `_run()` unconditionally merged a subprocess's
+stderr into stdout. `pip-audit --format json`/`npm audit --json` both
+routinely write a human-readable line to stderr even on success (pip-audit's
+own "Found N known vulnerabilities" summary, or a Windows venv-relocation
+warning) -- folding that into stdout corrupted the JSON, `json.loads` raised
+inside `parse_pip_audit_json`, and the parser silently returned zero
+findings. Confirmed live: `multi-agent-workspace`'s `requirements.txt` has
+16 real CVEs across 5 packages (cryptography, PyPDF2, chromadb, ragas,
+diskcache -- pip-audit's own stderr said so), but every scan run before this
+fix recorded zero dependency findings for it. Fixed with a `merge_stderr`
+parameter, `False` for every JSON-parsed tool call; 2 new regression tests.
+Commit `ecba78b`.
+
+**The real target bug** (Finding 329, after the fix above surfaced it):
+PyPDF2 3.0.1 (a direct `requirements.txt` pin) has a real DoS
+(`PYSEC-2026-1835`): a crafted PDF causes `__parse_content_stream` to loop
+forever. Fix is a one-line pin bump (`PyPDF2>=3.9.0`). Requested via the
+real `POST /api/findings/329/fix` (same as `selfheal fix`), which routed
+through `run_heal_job_remote_verify` since this app's heavy ML deps are
+never installed locally -- the first real, live run of that path since it
+was built.
+
+**Real bug #2, found via that live run**: the real Claude Code CLI ran for
+real (job 373: 31 turns, $2.92 of real subscription usage, `is_error=True`
+-- hit its turn cap without producing a working diff for this large,
+unfamiliar codebase) and, on the "no diff produced" fallback, tried to open
+a low-confidence GitHub issue -- which 403'd (`GITHUB_TOKEN` lacks
+`Issues: write` on `multi-agent-workspace` specifically; a real,
+pre-existing token-permission gap, not something to route around).
+`run_heal_job_remote_verify`/`run_heal_job_suggest` were dispatched
+OUTSIDE `_process_next_job`'s normal `try/except Exception: mark FAILED`
+block, so that unhandled 403 propagated all the way out of `run_worker()`'s
+`while True` loop -- silently killing the ENTIRE worker (no crash, no
+restart, just stopped claiming any future job) while job 373 sat at
+`running` forever. Root-caused from `healer.log`'s real timeline (the 403,
+then total silence) and confirmed by reading the code, not guessed. Fixed:
+both bypass branches now share the same catch-and-mark-FAILED handling, plus
+a defense-in-depth `try/except` around `_process_next_job` itself in the
+loop. 1 new regression test (`test_remote_verify_dispatch_exception_marks_
+job_failed_and_does_not_propagate`, a fake that raises inside the dispatch
+and asserts the job ends FAILED, not stuck). Verified LIVE, not just by the
+test: retried the same fix request as job 374 against the real, still-403ing
+GitHub call -- this time the job failed cleanly (`unhandled worker
+exception -- see healer log`) and the worker kept processing (confirmed via
+`healer.log`: an MCP reconnect and further `/healthz` traffic after the
+failure, not silence). Commit `c402003`.
+
+**Outcome, stated plainly**: no PR was opened against `multi-agent-workspace`.
+The real CVE (PyPDF2) is real, the remote-verify routing and the worker
+itself both now behave correctly end to end (route -> real CLI call -> real
+GitHub call -> clean failure, no crash), but the AI itself did not produce a
+working diff within its turn budget for this large repo, and this
+project's own GitHub PAT lacks `Issues: write` on that specific external
+repo (an operator-side token-permission fix, not something this session
+routed around or has the standing to change). Per this session's own
+"never fabricate a bug or a PR" instruction, README's Proof section was
+NOT updated with a claimed external fix -- the two real, verified fixes
+from this session are both in THIS project's own code (scanner.py,
+worker.py), documented here and in the commits above instead.
+
+**A second real, unfixed bug found by manual code review, not scanned
+automatically (no test suite exists for ShopCart to catch it, and it's a
+logic error, not a lint/type/dependency issue)**: ShopCart's
+`shop/Pagination.jsx` "previous page" arrow button copy-pastes the "next"
+button's guard condition (`if (activePage < pageNumbers.length)`) instead of
+the correct `activePage > 1`. Concretely: clicking "previous" on page 1
+calls `paginate(0)`, and `Shop.jsx`'s `products.slice(indexOfFirstProduct,
+indexOfLastProduct)` becomes `slice(-12, 0)` -- an empty product list: the
+whole shop page appears to break. Clicking "previous" on the LAST page does
+nothing at all (the guard is never true there either). Confirmed
+pre-existing (`git log` on that file shows only the original "Add files via
+upload" commit) and confirmed against `Shop.jsx`'s real `paginate`/slicing
+logic, not just read in isolation. Not fixed this session -- ShopCart has
+no CI and no test command configured, so `selfheal fix` cannot verify a fix
+locally or via remote CI the way it can for a tested app; fixing it would
+need `--suggest` (an explicitly UNVERIFIED PR for human review), which
+`selfheal fix` only accepts for an existing `Finding` row, and this bug
+isn't one any current scanner category (test/lint/type_check/dependency)
+would ever produce. Left as a documented, real, verified finding for a
+human (or a future session with time to add a finding category for
+"manually-reviewed logic bug") rather than force-fit it into a category
+that would mislabel it.
