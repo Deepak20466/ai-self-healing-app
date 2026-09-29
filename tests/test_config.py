@@ -29,3 +29,19 @@ def test_env_overrides_are_applied(monkeypatch) -> None:
     assert s.auto_merge is True
     assert s.daily_budget_usd == Decimal("5.50")
     assert s.anthropic_model == "claude-opus-5"
+
+
+def test_ai_chain_list_dedupes_keeping_first_occurrence_order(monkeypatch) -> None:
+    monkeypatch.setenv("AI_CHAIN", "claude_cli,groq_api,claude_cli,groq_api,openrouter_api")
+
+    s = Settings(_env_file=None)
+
+    assert s.ai_chain_list == ["claude_cli", "groq_api", "openrouter_api"]
+
+
+def test_chat_chain_list_dedupes_keeping_first_occurrence_order(monkeypatch) -> None:
+    monkeypatch.setenv("CHAT_CHAIN", "groq_api,groq_api,groq_api")
+
+    s = Settings(_env_file=None)
+
+    assert s.chat_chain_list == ["groq_api"]

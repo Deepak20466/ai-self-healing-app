@@ -7,6 +7,7 @@ from this module. Values come from the process environment / a `.env` file
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -22,6 +23,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # silently resolve to nothing there and fall back to this class's defaults
 # (e.g. the default DATABASE_URL), not the real configured one.
 _ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+
+
+def _dedupe_preserve_order(items: Iterable[str]) -> list[str]:
+    """Drop repeated entries, keeping the first occurrence's position."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
 
 
 class Settings(BaseSettings):
@@ -265,17 +277,24 @@ class Settings(BaseSettings):
     def ai_chain_list(self) -> list[str]:
         """The fix backend chain, in order. `AI_CHAIN` unset -> a single-item
         chain from `ai_backend`, so existing single-backend setups are
-        unaffected."""
+        unaffected. Deduped, keeping first-occurrence order -- a repeated
+        name in `AI_CHAIN` (e.g. a copy-paste mistake) would otherwise show
+        up as a separate row per occurrence in `selfheal status`/
+        `/api/backends`, and `backend_chain.next_eligible_after` would waste
+        a retry re-trying a backend already tried under an earlier name in
+        the same chain."""
         if self.ai_chain:
-            return [b.strip() for b in self.ai_chain.split(",") if b.strip()]
+            return _dedupe_preserve_order(b.strip() for b in self.ai_chain.split(",") if b.strip())
         return [self.ai_backend]
 
     @property
     def chat_chain_list(self) -> list[str]:
         """The chat backend chain. `CHAT_CHAIN` unset -> a single-item chain
-        from `chat_backend`, or `ai_backend` if that's unset too."""
+        from `chat_backend`, or `ai_backend` if that's unset too. Deduped,
+        keeping first-occurrence order -- see `ai_chain_list`."""
         if self.chat_chain:
-            return [b.strip() for b in self.chat_chain.split(",") if b.strip()]
+            parts = (b.strip() for b in self.chat_chain.split(",") if b.strip())
+            return _dedupe_preserve_order(parts)
         return [self.chat_backend or self.ai_backend]
 
 
