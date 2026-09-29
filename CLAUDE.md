@@ -3145,3 +3145,211 @@ backend's own tests already established, GitHub itself mocked via `respx`.
 `ruff check .`/`ruff format --check .` clean repo-wide. `mypy core sentinel
 mcp_server healer cli` (strict) clean. `pytest` (full suite, see below for
 confirmation it stays green).
+
+### 2026-09-29 — credential scrubbing globalized; connect-a-repo onboarding no longer gets stuck on a push failure
+
+Two real bugs found while retrying a ShopCart onboarding-prepare PR (see the
+monorepo-support entry above): the fix produced a real diff and committed
+it, but `git push` failed with a real 403 (the `GITHUB_TOKEN` at the time
+had metadata-read access — enough for `core/repo_connect.py:
+check_repo_access`'s `permissions.push` read to report `true` — but not
+actual push rights; since fixed by the user rotating/re-scoping the token).
+That real failure exposed two latent bugs, independent of the token issue
+itself:
+
+- **A credentialed git remote URL reached `healer.log` verbatim.**
+  `healer/onboarding_prepare.py` builds a connected app's push remote as
+  `https://x-access-token:<GITHUB_TOKEN>@github.com/<repo>.git` (needed
+  since a worktree's `.git` config has no stored credential for a repo it
+  only just cloned). `healer/worktree.py:_run_git`'s failure path put the
+  full `' '.join(args)` — including that URL — straight into a
+  `WorktreeError` message, and since nothing caught that exception, it
+  propagated out of the FastAPI handler and got logged via an unhandled
+  traceback. Fixed: `_run_git`/`_run_git_best_effort` now scrub the
+  constructed message through `sentinel.scrubber.scrub_text` before raising
+  (the existing `_CONN_STRING_CREDENTIALS_PATTERN` already matches this
+  exact `scheme://user:pass@host` shape — no new regex needed). Added a
+  **second, defense-in-depth layer**: `core/logging.py:_scrub_event_dict`,
+  a new structlog processor appended to `shared_processors` (used by both
+  direct structlog calls and `foreign_pre_chain` for stdlib/uvicorn
+  records, so it covers unhandled-exception tracebacks logged by uvicorn
+  itself too), scrubbing every log record's fields globally across all 4
+  pods. Belt-and-suspenders on purpose: the first fix stops the leak at its
+  one known source; the second catches any future one that isn't yet
+  scrubbed at its own call site, the same layered-defense pattern
+  `mcp_server/audit.py`'s result-scrubbing (terminal-only v1.0 Step 5)
+  already established for tool-call payloads. The already-leaked token was
+  scrubbed out of the existing `healer.log` in place (a one-off script run,
+  not a code change — confirmed via `[REDACTED]` count that every instance
+  was caught).
+- **The heal_job was left stuck in `running` forever.**
+  `run_onboarding_prepare` had no exception handling around
+  `commit_and_push` — a real push failure propagated unhandled, so the job
+  was never marked `failed`, meaning it could never be retried or reported
+  on (the same "orphaned non-terminal job" class of bug the CI-healing
+  Phase 5 log already documents for a *killed process*; this time it's a
+  genuine unhandled exception in still-running code, not a process kill).
+  Fixed: the push is now in its own `try`/`except WorktreeError`, marking
+  the job `failed` with the (already-scrubbed) error message on failure.
+  Two jobs already stuck this way in the dev/test-pattern DB (including the
+  one that surfaced this) were manually reset to `failed` via a one-off
+  script — not a schema/migration concern, just cleanup.
+
+Tests: `tests/test_healer_worktree.py::
+test_run_git_failure_scrubs_a_credentialed_remote_url_from_the_error` (a
+real, unmocked `_run_git` failure against a genuinely credentialed URL —
+not a stand-in for `_run_git`, so it actually exercises the scrub),
+`tests/test_core_logging.py` (new file — the global processor redacts a
+credentialed URL and a bare `ghp_...`-shaped token from both `event` and a
+rendered `exception` field).
+
+`ruff check .`/`ruff format --check .` clean, `mypy core sentinel
+mcp_server healer cli` (strict) clean, full `pytest`: 571 passed / 1
+skipped (the same pre-existing Windows ProactorEventLoop flake documented
+throughout this file).
+
+### 2026-09-29 — Docker images + Kubernetes-tested (kind + Helm) in GitHub Actions
+
+Follow-up request, not in SPEC.md: containerize the 4 pods and prove they
+run correctly under Kubernetes, entirely inside GitHub Actions — Docker/
+kind/kubectl/Helm are explicitly never installed or run on the local dev
+machine per this session's own standing constraint; every container/k8s
+operation happens only on GitHub-hosted runners, validated by watching real
+`gh run` output, never assumed.
+
+Built:
+- `deploy/docker/Dockerfile.{app,sentinel,mcp,healer}`: slim multi-stage
+  (`python:3.11-slim` builder + runtime stages), non-root `app` user, each
+  `COPY`s only what that pod needs (including `scripts/` for the healer's
+  migration/seed step — see the real bug below). `deploy/docker/
+  http_healthcheck.py`/`mcp_healthcheck.py` (mcp-pod has no real `/healthz`,
+  same documented Phase 7 gap — probes `/mcp` for bare reachability
+  instead) and `kill_process.py` (see the liveness-test bug below). A root
+  `.dockerignore` keeps `.venv/`, `.git/`, `worktrees/`, `connected_apps/`,
+  and `.env` out of every image.
+- `deploy/helm/selfheal/`: a Deployment+Service per pod, a post-install
+  `Job` running `alembic upgrade head && python scripts/seed_demo.py`
+  (gated on a `wait-for-postgres` init container), liveness/readiness
+  probes (`httpGet /healthz` for app/sentinel/healer, `tcpSocket :8003` for
+  mcp-pod). Postgres is a **plain `postgres:16-alpine` Deployment** (own
+  template, own 1Gi PVC, own dedicated credentials Secret;
+  `postgres.enabled`/`postgres.image`/`postgres.storage` in `values.yaml`
+  make it toggleable) — not a Helm subchart, see the real bug below for why.
+  `apps/target_app/routes.py`'s `/healthz` does a real `SELECT 1`, so the
+  readiness probe genuinely waits on DB availability, not just process-up.
+- `.github/workflows/k8s-ci.yml`: builds all 4 images on the runner,
+  creates an ephemeral `kind` cluster, loads the images in, `helm lint` +
+  `helm template` (dry-run render) before `helm install --wait --timeout
+  10m`, waits for the migration Job + all pods Ready, then: a smoke test
+  (`POST /trigger/zero` against app-pod, confirms sentinel-pod captured it
+  via a real `psql` query — `ANTHROPIC_API_KEY=invalid`/
+  `ANTHROPIC_BASE_URL=http://127.0.0.1:9`, so any accidentally-triggered
+  heal job fails closed, no AI spend anywhere in this workflow), a pod-kill
+  recovery test (delete app-pod, confirm Kubernetes recreates it Ready), a
+  liveness/restart test (kill sentinel-pod's real uvicorn process, confirm
+  `restartCount` increments and it becomes Ready again). On failure, dumps
+  `kubectl get pods -A`, `kubectl describe pods`, per-pod logs, `kubectl get
+  events --sort-by=.lastTimestamp`, and `helm status`. Tears the cluster
+  down with `if: always()`.
+- Small, backward-compatible app-code changes so pods reach each other over
+  real Kubernetes Service DNS instead of the native/systemd deployment's
+  loopback assumption: `core/config.py` gained `settings.mcp_host` (default
+  `127.0.0.1`, used by `mcp_server/server.py:run_http`) and `settings.
+  mcp_client_url` (optional override, used by `healer/worker.py`/`healer/
+  app.py` instead of a hardcoded `http://127.0.0.1:{mcp_port}/mcp`). Both
+  default to the exact previous behavior — unused/unchanged for the
+  existing native/systemd deployment.
+- README.md: a k8s-ci status badge, a new "Two layers of self-healing"
+  section (Kubernetes restarts crashed services — infra-level healing; the
+  AI fixes the actual code bug behind the crash — code-level healing; these
+  are complementary, not redundant), a new "Containers / Kubernetes"
+  section (explicitly `postgres:16-alpine`, not a Bitnami subchart, and
+  why), every stale "no Docker / no Kubernetes / no containers" claim
+  removed/reworded. `docs/INTERVIEW_PREP.md` updated the same way. `SPEC.md`
+  got a one-line pointer banner at the top (left otherwise unchanged, it's
+  "the original target" per its own existing banner).
+
+**Real CI iteration — 6 runs, each fixing one genuine, previously-unknown
+root cause, confirmed from real `gh run view --log-failed` output every
+time, never guessed:**
+
+1. **Bitnami's pinned `postgresql` image tag 404'd on Docker Hub**
+   (`docker.io/bitnami/postgresql:17.6.0-debian-12-r4` — part of Bitnami's
+   move of older free tags behind a paid registry, unrelated to anything in
+   this repo). All 4 of this project's own pods came up Ready fine even
+   with Postgres down, which was a useful signal the rest of the chart was
+   healthy. Fixed by replacing the Bitnami subchart dependency entirely
+   (removed from `Chart.yaml`'s `dependencies:`, no `Chart.lock`/`charts/`
+   ever got far enough to generate) with the plain `postgres:16-alpine`
+   Deployment described above.
+2. **App-pod's sentinel-ingest URL defaulted to `localhost`** — a
+   same-host assumption baked into `core/config.py:sentinel_base_url`
+   that's correct for the native/systemd deployment (all 4 pods share one
+   host) but wrong the moment app-pod and sentinel-pod are separate Kubernetes
+   Pods. Fixed in the chart by setting the already-supported `SENTINEL_INGEST_URL`
+   override to sentinel-pod's real Service DNS name — no code change needed,
+   this setting already existed for exactly this kind of override.
+3. **The smoke test's captured error was `AssertionError`, not
+   `ZeroDivisionError`.** Sentinel's `/ingest/error` really did return `202`
+   (confirmed in the pod's own logs), but the DB query for the expected
+   exception type still found nothing. Root-caused by reading `apps/
+   target_app/bugs.py`: the migration Job only ran `alembic upgrade head`
+   (schema only), never `scripts/seed_demo.py`, so the seeded item/order
+   rows the bug functions expect didn't exist — `average_rating()`'s own
+   `assert item is not None` fired first, a *different*, earlier exception
+   than the one the smoke test was checking for. Fixed: the migration Job's
+   command became `alembic upgrade head && python scripts/seed_demo.py`,
+   and `COPY scripts ./scripts` was added to all 4 Dockerfiles (the script
+   wasn't in any image before this).
+4. **`kill -9 1` is a no-op against a container's PID 1.** The first
+   liveness-test attempt ran `kubectl exec sentinel-pod -- sh -c "kill -9
+   1"` and `restartCount` never moved — Linux exempts PID 1 of a PID
+   namespace from a signal's default action (including SIGKILL) unless it
+   installs a handler, a well-known container gotcha; the container's CMD
+   is `sh -c "uvicorn ..."`, so PID 1 is that `sh`, not uvicorn. Fixed with
+   `deploy/docker/kill_process.py` (baked into sentinel-pod's image),
+   which scans `/proc` for the real uvicorn process (explicitly skipping
+   PID 1) and signals it directly — PID 1's `sh -c` then exits once its
+   foregrounded child dies, still exercising the same `restartPolicy:
+   Always` recovery path a failed liveness probe would trigger.
+5. **The liveness-test step's own `kubectl exec` legitimately exits 137 on
+   success, and `set -euo pipefail` treated that as failure.** Killing
+   uvicorn kills the container's PID 1 (see above), which tears down
+   `kubectl exec`'s stream out from under it — so that command's own exit
+   code is *expected* to be 137 when the kill worked, not a sign the kill
+   failed. The workflow's `set -e` aborted the step right there, before the
+   actual `restartCount` before/after comparison ever ran — meaning runs 4
+   and 5 both had the smoke test AND pod-kill-recovery test genuinely
+   passing, with only this one script bug failing the job. Fixed with `||
+   true` on that one line, with an inline comment explaining exactly why a
+   137 there means success.
+6. **Run 6, commit `95af789`: all three checks green** — smoke test,
+   pod-kill recovery, and liveness/restart, confirmed via `gh run view
+   --log-failed` showing a clean pass, not assumed from "no error printed."
+
+PR: https://github.com/Deepak20466/ai-self-healing-app/pull/17 (branch
+`k8s-ci-dev`) — merged into `main` once every check (both `k8s-ci` runs plus
+the existing `test` workflow) was green on the real PR, per this session's
+own explicit "never merge a PR early, only once every check is green"
+instruction.
+
+Local verification before every push (this repo's own dev machine never
+ran Docker/kind/Helm/kubectl itself, only Python/YAML validation): `ruff
+check .`/`ruff format --check .` clean, `mypy core sentinel mcp_server
+healer cli` (strict) clean, full `pytest` 571 passed / 1 skipped (same
+pre-existing flake). `helm lint`/`helm template` could not be run locally
+in this session (a standalone Helm binary download was blocked by this
+environment's own sandbox classifier before it ever reached a network
+call) — covered instead by the workflow's own `helm lint`/`helm template`
+steps on the runner, which is the substantive validation anyway (this
+repo's own dev machine was never meant to have Helm installed per the
+no-local-Kubernetes-tooling rule).
+
+**Ambiguity resolved**: Postgres is a small in-chart Deployment, not the
+Bitnami subchart SPEC-extension intuition would first reach for — decided
+by a real failure, not upfront design taste. The subchart is still the more
+"standard" choice for a long-lived cluster wanting upgrades/backups/HA
+knobs for free, but this chart's only consumer is an ephemeral,
+torn-down-every-run `kind` cluster in CI, so a plain Deployment+PVC+Secret
+is simpler, has zero external chart-repo dependency (nothing to 404 on
+Docker Hub again), and is easier to read end-to-end in one file.
