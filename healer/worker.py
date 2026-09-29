@@ -377,7 +377,7 @@ async def _process_next_job(mcp: MCPToolClient, backend: _JobRunners | None = No
 async def run_worker() -> None:
     configure_logging(settings.log_level)
     logger.info("worker.ai_chain", chain=settings.ai_chain_list)
-    mcp_url = f"http://127.0.0.1:{settings.mcp_port}/mcp"
+    mcp_url = settings.mcp_client_url or f"http://127.0.0.1:{settings.mcp_port}/mcp"
 
     async with connect_http(mcp_url) as mcp, HealJobListener() as listener:
         logger.info("worker.started", mcp_url=mcp_url)

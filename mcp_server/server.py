@@ -23,7 +23,7 @@ def run_stdio() -> None:
 
 
 def run_http() -> None:
-    mcp.run(transport="streamable-http", host="127.0.0.1", port=settings.mcp_port)
+    mcp.run(transport="streamable-http", host=settings.mcp_host, port=settings.mcp_port)
 
 
 if __name__ == "__main__":

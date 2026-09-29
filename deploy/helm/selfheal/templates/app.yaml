@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: selfheal-app
+  labels: {app: selfheal-app}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: selfheal-app}
+  template:
+    metadata:
+      labels: {app: selfheal-app}
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: app
+          image: {{ include "selfheal.image" (dict "Values" .Values "pod" "app") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.app.port }}
+          env:
+            {{- include "selfheal.commonEnv" . | nindent 12 }}
+          resources:
+            requests: {{ toYaml .Values.resources.requests | nindent 14 }}
+            limits: {{ toYaml .Values.resources.limits | nindent 14 }}
+          readinessProbe:
+            httpGet: {path: /healthz, port: {{ .Values.app.port }}}
+            initialDelaySeconds: {{ .Values.probes.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.periodSeconds }}
+            failureThreshold: {{ .Values.probes.failureThreshold }}
+          livenessProbe:
+            httpGet: {path: /healthz, port: {{ .Values.app.port }}}
+            initialDelaySeconds: {{ .Values.probes.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.periodSeconds }}
+            failureThreshold: {{ .Values.probes.failureThreshold }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: selfheal-app
+spec:
+  selector: {app: selfheal-app}
+  ports:
+    - port: {{ .Values.app.port }}
+      targetPort: {{ .Values.app.port }}

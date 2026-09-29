@@ -1,0 +1,67 @@
+# Ephemeral/CI defaults. Dummy secrets are fine here -- see CLAUDE.md's
+# "Environment on this machine" convention: real secrets never belong in a
+# chart's own committed defaults, and this cluster is torn down every run.
+
+image:
+  registry: ""
+  tag: "ci"
+  pullPolicy: IfNotPresent
+  repository:
+    app: selfheal-app
+    sentinel: selfheal-sentinel
+    mcp: selfheal-mcp
+    healer: selfheal-healer
+
+postgresql:
+  enabled: true
+  auth:
+    username: selfheal
+    password: selfheal
+    database: selfheal
+  primary:
+    persistence:
+      enabled: false
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+
+env:
+  environment: development
+  logLevel: INFO
+  aiBackend: api
+  # Deliberately invalid/unreachable so any accidentally-triggered heal job
+  # fails closed instead of spending real AI budget -- the same pattern
+  # CLAUDE.md documents for running scripts/verify_all.py locally.
+  anthropicApiKey: "invalid"
+  anthropicBaseUrl: "http://127.0.0.1:9"
+  githubToken: "ci-dummy-token"
+  githubRepo: "owner/repo"
+  sessionSecret: "ci-only-session-secret-not-a-real-secret"
+  healerWebhookSecret: "ci-only-webhook-secret-not-a-real-secret"
+  sentinelIngestToken: "ci-only-ingest-token"
+  # argon2 hash of "ci-password" -- fine to commit, it's a throwaway
+  # cluster's own login and nothing else trusts it.
+  adminPasswordHash: "$argon2id$v=19$m=65536,t=3,p=4$c2VsZmhlYWxjaXNhbHQ$K3M0000000000000000000000000000000000000000"
+  autoMerge: "false"
+
+app:
+  port: 8001
+sentinel:
+  port: 8002
+mcp:
+  port: 8003
+healer:
+  port: 8000
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 300Mi
+
+probes:
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  failureThreshold: 6

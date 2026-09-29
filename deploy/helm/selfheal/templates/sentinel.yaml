@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: selfheal-sentinel
+  labels: {app: selfheal-sentinel}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: selfheal-sentinel}
+  template:
+    metadata:
+      labels: {app: selfheal-sentinel}
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: sentinel
+          image: {{ include "selfheal.image" (dict "Values" .Values "pod" "sentinel") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.sentinel.port }}
+          env:
+            {{- include "selfheal.commonEnv" . | nindent 12 }}
+            # sentinel/app.py's prober loop currently hardcodes
+            # `http://localhost:{app_port}` (a single-host-deployment
+            # assumption predating this Helm chart) -- it will not reach
+            # app-pod's real Service in Kubernetes. Harmless for this
+            # chart's own smoke test (which posts to /trigger/* directly
+            # and reads sentinel's ingest, not the prober loop), but a real
+            # gap worth fixing in sentinel/app.py itself in a future change,
+            # not routed around here.
+          resources:
+            requests: {{ toYaml .Values.resources.requests | nindent 14 }}
+            limits: {{ toYaml .Values.resources.limits | nindent 14 }}
+          readinessProbe:
+            httpGet: {path: /healthz, port: {{ .Values.sentinel.port }}}
+            initialDelaySeconds: {{ .Values.probes.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.periodSeconds }}
+            failureThreshold: {{ .Values.probes.failureThreshold }}
+          livenessProbe:
+            httpGet: {path: /healthz, port: {{ .Values.sentinel.port }}}
+            initialDelaySeconds: {{ .Values.probes.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.periodSeconds }}
+            failureThreshold: {{ .Values.probes.failureThreshold }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: selfheal-sentinel
+spec:
+  selector: {app: selfheal-sentinel}
+  ports:
+    - port: {{ .Values.sentinel.port }}
+      targetPort: {{ .Values.sentinel.port }}

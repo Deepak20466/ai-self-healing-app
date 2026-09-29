@@ -1,0 +1,51 @@
+# Runs `alembic upgrade head` once, against the Postgres subchart's own
+# service, before the app pods are expected to actually work.
+#
+# This is a post-install/post-upgrade hook, not pre-install: a pre-install
+# hook runs before ANY of the release's own resources exist, including the
+# postgresql subchart's own StatefulSet -- there would be nothing to
+# connect to yet. Running post-install instead means the pod Deployments
+# below are created in the same `helm install` and may crash-loop a few
+# times waiting for tables that don't exist until this Job finishes; their
+# own `restartPolicy: Always` (the Kubernetes default, set explicitly per
+# the task) is exactly the mechanism that makes them recover once it does --
+# a real, small demonstration of "Kubernetes restarts crashed pods" in its
+# own right, not just noise to route around.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: selfheal-migrate
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ include "selfheal.image" (dict "Values" .Values "pod" "app") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - python
+            - -c
+            - |
+              import socket, time
+              host, port = "{{ include "selfheal.postgresHost" . }}", 5432
+              for _ in range(60):
+                  try:
+                      socket.create_connection((host, port), timeout=2).close()
+                      break
+                  except OSError:
+                      time.sleep(2)
+              else:
+                  raise SystemExit("postgres never became reachable")
+      containers:
+        - name: migrate
+          image: {{ include "selfheal.image" (dict "Values" .Values "pod" "app") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "alembic", "upgrade", "head"]
+          env:
+            {{- include "selfheal.commonEnv" . | nindent 12 }}

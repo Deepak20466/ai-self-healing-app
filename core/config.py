@@ -65,6 +65,20 @@ class Settings(BaseSettings):
     sentinel_port: int = 8002
     mcp_port: int = 8003
     healer_port: int = 8000
+    # mcp-pod is the one pod whose bind host isn't set via a Procfile/uvicorn
+    # CLI flag (mcp_server/server.py:run_http calls mcp.run(...) directly) --
+    # defaults to loopback-only, matching every other pod's production
+    # posture. Only a containerized deployment (a Kubernetes Service must
+    # reach the pod's real interface, not just its own loopback) needs this
+    # widened to "0.0.0.0"; see deploy/docker/Dockerfile.mcp.
+    mcp_host: str = "127.0.0.1"
+    # What healer-pod's own MCP client (worker.py, app.py's dashboard/chat
+    # client) connects to. Defaults to loopback, matching the native/
+    # systemd deployment where every pod shares one host. A containerized
+    # deployment (mcp-pod is a separate Pod, reachable only via its own
+    # Kubernetes Service DNS name) sets this to that Service's URL, e.g.
+    # "http://selfheal-mcp:8003/mcp".
+    mcp_client_url: str | None = None
 
     # --- AI backend selection ------------------------------------------------
     # `ai_backend` picks which of four backends healer/worker.py's

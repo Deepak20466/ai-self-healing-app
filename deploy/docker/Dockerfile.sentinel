@@ -1,0 +1,35 @@
+# sentinel-pod: error/metric ingest + CI webhook + contract prober.
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY pyproject.toml README.md LICENSE ./
+COPY core ./core
+COPY apps ./apps
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
+COPY sentinel ./sentinel
+COPY mcp_server ./mcp_server
+COPY healer ./healer
+COPY cli ./cli
+RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir .
+
+FROM python:3.11-slim AS runtime
+
+RUN groupadd --system app && useradd --system --gid app --create-home --home-dir /home/app app
+COPY --from=builder /opt/venv /opt/venv
+WORKDIR /app
+COPY --from=builder /build /app
+COPY deploy/docker/http_healthcheck.py /app/http_healthcheck.py
+RUN chown -R app:app /app /home/app
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1
+
+USER app
+EXPOSE 8002
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
+    CMD python /app/http_healthcheck.py SENTINEL_PORT 8002
+
+CMD ["sh", "-c", "uvicorn sentinel.app:app --host 0.0.0.0 --port ${SENTINEL_PORT:-8002}"]

@@ -1,5 +1,7 @@
 # AI-Powered Self-Healing Application
 
+[![k8s-ci](https://github.com/Deepak20466/ai-self-healing-app/actions/workflows/k8s-ci.yml/badge.svg)](https://github.com/Deepak20466/ai-self-healing-app/actions/workflows/k8s-ci.yml)
+
 ![selfheal terminal demo: up, login, status, apps, scan, errors, chat, prs](docs/demo-terminal.gif)
 
 *Real, unscripted `selfheal` CLI session against the actually-running pods — every line above is genuine captured output (see [docs/demo-terminal.mp4](docs/demo-terminal.mp4) for the full-quality video).*
@@ -44,8 +46,12 @@ deliberately broken demo PR, closed after the AI's fix turned its CI green):
 
 ## Architecture
 
-Four native processes ("pods" — no Docker, no Kubernetes, per SPEC.md's hard
-constraints), one shared PostgreSQL database, and GitHub for CI/CD and PRs:
+Four native processes ("pods" — per SPEC.md's original hard constraints,
+runs as lightweight native processes locally for low RAM), one shared
+PostgreSQL database, and GitHub for CI/CD and PRs. The same 4 pods are also
+containerized with Docker and Kubernetes-tested (`kind` + Helm) in GitHub
+Actions on every push — see [Two layers of self-healing](#two-layers-of-self-healing)
+and [Containers / Kubernetes](#containers--kubernetes) below.
 
 ```mermaid
 flowchart TB
@@ -54,7 +60,7 @@ flowchart TB
         Repo["Repo: PRs, issues,<br/>workflow runs"]
     end
 
-    subgraph Pods["4 pods (native processes, one Postgres, no containers)"]
+    subgraph Pods["4 pods (native processes locally; containerized + kind/Helm-tested in CI)"]
         App["app-pod<br/>apps/target_app<br/>7 seeded bugs"]
         Sentinel["sentinel-pod<br/>capture, prober,<br/>anomaly, CI webhook"]
         MCP["mcp-pod<br/>MCP server #quot;selfheal#quot;<br/>20 tools, 3 resources"]
@@ -87,6 +93,73 @@ job may only write inside `apps/target_app/`, so the healer can never break
 itself. `sentinel-pod` and `mcp-pod` never talk to each other directly;
 `healer-pod` is the only pod holding an MCP client, so it's the single place
 that turns "detected" into "fixed, verified, deployed."
+
+## Two layers of self-healing
+
+This project deliberately has two independent healing layers that don't
+overlap, because they fix different kinds of failure:
+
+- **Infra-level healing (Kubernetes).** If a pod's process crashes, hangs,
+  or fails its liveness probe, `kubectl`/the kubelet restarts the container
+  automatically (`restartPolicy: Always` in `deploy/helm/selfheal`) or
+  Kubernetes recreates the Pod entirely if it's deleted out from under its
+  Deployment. This is dumb in the best way: it doesn't understand *why* the
+  process died, it just gets it running again. See "Containers /
+  Kubernetes" below for the real, CI-verified proof of this.
+- **Code-level healing (the AI healer).** Restarting a crashed process does
+  nothing for a bug that's *always* going to crash on the same input —
+  Kubernetes will happily restart `app-pod` in an infinite loop against a
+  seeded `ZeroDivisionError`. That's this project's actual subject: sentinel
+  captures the error, the healer's AI backend writes and verifies a real
+  fix, and opens a PR (see "Proof: a real end-to-end free-mode PR" below).
+
+Neither layer is a substitute for the other. A production deployment wants
+both: Kubernetes buys you the seconds-to-minutes it takes for the AI loop to
+actually produce and merge a fix, without the app staying down the whole
+time.
+
+## Containers / Kubernetes
+
+The 4 pods also run as regular containers, verified end-to-end in CI on
+every push (`.github/workflows/k8s-ci.yml`, badge above) — never on a
+developer's own machine (this repo's own safety convention: Docker/kind/
+Helm/kubectl are never installed or run locally here, only inside GitHub
+Actions).
+
+- `deploy/docker/Dockerfile.{app,sentinel,mcp,healer}` — slim
+  (`python:3.11-slim`), multi-stage (a build stage installs this project
+  into a venv; the runtime stage copies only that venv + source, non-root
+  `app` user), one Dockerfile per pod.
+- `deploy/helm/selfheal/` — a Helm chart: a Deployment + Service per pod,
+  a Postgres dependency (the Bitnami `postgresql` subchart, no persistence —
+  this is for an ephemeral CI cluster, not production HA), a pre-flight
+  migration Job, and liveness/readiness probes on every pod's `/healthz`
+  where one exists. mcp-pod has no `/healthz` (the same gap CLAUDE.md's
+  Phase 7 log documents for the native deployment — it speaks MCP's
+  streamable-HTTP protocol at `/mcp`, not a plain REST route), so its probes
+  are a TCP socket check instead.
+- The CI workflow builds all 4 images, spins up an ephemeral `kind`
+  cluster, `helm install`s the chart, waits for every pod Ready, then runs
+  three real checks against the live cluster:
+  1. **Smoke test** — triggers the seeded `ZeroDivisionError` bug
+     (`GET /trigger/zero` on app-pod) and confirms sentinel-pod actually
+     captured it, by querying the real Postgres row count — no AI call
+     anywhere in this workflow (`ANTHROPIC_API_KEY=invalid` +
+     `ANTHROPIC_BASE_URL=http://127.0.0.1:9`, the same fail-closed pattern
+     `scripts/verify_all.py` uses).
+  2. **Pod-kill recovery** — deletes app-pod outright and confirms
+     Kubernetes recreates a new one that becomes Ready.
+  3. **Liveness/restart** — kills sentinel-pod's own process from inside
+     its container and confirms `restartCount` increases and the pod comes
+     back Ready (the same recovery path a failed liveness probe triggers,
+     via the same `restartPolicy: Always`).
+  The cluster is torn down (`kind delete cluster`) at the end of the job
+  unconditionally, including on failure.
+
+This containerized path and the native-process path (`selfheal up`,
+`Procfile`, `deploy/systemd/*`) are two separate, independently-verified
+deployment targets for the same application code — pick whichever fits
+where you're actually running it.
 
 ## Setup
 
@@ -286,8 +359,10 @@ Every list/detail command supports `--json`. `selfheal up --public` also
 opens a Cloudflare quick tunnel for the sentinel CI webhook only (never the
 healer API) and prints the URL to set as `HEALER_WEBHOOK_URL`.
 
-Each pod is still a native process (no Docker — see SPEC.md's hard
-constraints); `selfheal up` is the one-command way to start all 4.
+Each pod runs as a native process for this local CLI workflow (see
+[Containers / Kubernetes](#containers--kubernetes) for the separate,
+CI-only containerized path); `selfheal up` is the one-command way to start
+all 4.
 `.venv\Scripts\honcho start` (reads `Procfile`) also works and is what
 `selfheal up` does under the hood. `healer.app` (not `healer.worker`/
 `healer.main`) is the pod entrypoint: it runs the Phase 4/5 worker loop as a
