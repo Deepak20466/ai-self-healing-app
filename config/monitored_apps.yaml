@@ -28,7 +28,7 @@ apps:
   - name: target_app
     language: python
     local_repo_path: apps/target_app
-    github_repo: Deepak20466/ai-self-healing-app
+    github_repo: Deepak20466/selfheal-mcp-agent
     allowed_write_paths:
       - apps/target_app/
     test_command: >-
@@ -42,7 +42,7 @@ apps:
   - name: node_app
     language: javascript
     local_repo_path: examples/node_app
-    github_repo: Deepak20466/ai-self-healing-app
+    github_repo: Deepak20466/selfheal-mcp-agent
     allowed_write_paths:
       - examples/node_app/
     test_command: cd examples/node_app && npm test
@@ -52,7 +52,7 @@ apps:
   - name: go_app
     language: go
     local_repo_path: examples/go_app
-    github_repo: Deepak20466/ai-self-healing-app
+    github_repo: Deepak20466/selfheal-mcp-agent
     allowed_write_paths:
       - examples/go_app/
     test_command: cd examples/go_app && go test ./...

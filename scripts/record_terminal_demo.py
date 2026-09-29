@@ -60,7 +60,7 @@ async def _insert():
                 name={name!r},
                 language="go",
                 local_repo_path="connected_apps/{name}",
-                github_repo="Deepak20466/ai-self-healing-app",
+                github_repo="Deepak20466/selfheal-mcp-agent",
                 allowed_write_paths=["connected_apps/{name}/"],
                 test_command="go test ./...",
                 ingest_token=f"demo-{name}-{{time.time_ns()}}",
@@ -497,7 +497,7 @@ def render_frames(recordings: list[Recording], frames_dir: Path) -> None:
     renderer.title_frame(
         [
             ("Real fixes, opened for real:", FG, False),
-            ("github.com/Deepak20466/ai-self-healing-app", DIM, False),
+            ("github.com/Deepak20466/selfheal-mcp-agent", DIM, False),
             ("PR #10 · PR #15", TITLE_COLOR, True),
         ],
         hold_s=3.0,

@@ -1,8 +1,8 @@
-# selfheal: an MCP-powered AI agent that detects bugs, security vulnerabilities (CVEs) and CI failures, and opens verified fix PRs
+# selfheal: an MCP-powered AI agent that detects bugs, CVEs and CI failures, and opens verified fix PRs
 
 Python · FastAPI · PostgreSQL · MCP · Docker · Kubernetes-tested CI · GitHub Actions
 
-[![k8s-ci](https://github.com/Deepak20466/ai-self-healing-app/actions/workflows/k8s-ci.yml/badge.svg)](https://github.com/Deepak20466/ai-self-healing-app/actions/workflows/k8s-ci.yml)
+[![k8s-ci](https://github.com/Deepak20466/selfheal-mcp-agent/actions/workflows/k8s-ci.yml/badge.svg)](https://github.com/Deepak20466/selfheal-mcp-agent/actions/workflows/k8s-ci.yml)
 
 ## Highlights
 
@@ -46,16 +46,16 @@ Real proof this system works end to end, from the AI itself, not staged
 screenshots (three real AI fixes: PR #10 and PR #15 merged; PR #14 was a
 deliberately broken demo PR, closed after the AI's fix turned its CI green):
 
-- [**PR #10**](https://github.com/Deepak20466/ai-self-healing-app/pull/10) —
+- [**PR #10**](https://github.com/Deepak20466/selfheal-mcp-agent/pull/10) —
   a real runtime bug (a silent timezone contract violation) diagnosed and
   fixed by the healer running in free mode (local Claude Code CLI, no
   Anthropic API key), with a regression test proving it failed before and
   passed after.
-- [**PR #14**](https://github.com/Deepak20466/ai-self-healing-app/pull/14) —
+- [**PR #14**](https://github.com/Deepak20466/selfheal-mcp-agent/pull/14) —
   a real broken CI run, classified as a genuine failure (not flaky) and
   fixed forward on the PR's own branch by the healer's CI-fix agent, with
   CI going green automatically on the fix commit.
-- [**PR #15**](https://github.com/Deepak20466/ai-self-healing-app/pull/15) —
+- [**PR #15**](https://github.com/Deepak20466/selfheal-mcp-agent/pull/15) —
   a third real AI fix, merged: a runtime `AttributeError` (a missing item looked up
   without a guard, the demo's `/trigger/none_lookup` bug) diagnosed and fixed
   by the healer in free mode, with a regression test and a handled 404 instead
@@ -508,7 +508,7 @@ entries).
 
 ## Proof: a real end-to-end free-mode PR
 
-[**PR #10**](https://github.com/Deepak20466/ai-self-healing-app/pull/10) —
+[**PR #10**](https://github.com/Deepak20466/selfheal-mcp-agent/pull/10) —
 opened by the healer running in free mode (local Claude Code CLI, no
 Anthropic API key, no per-token billing), against this repo's own seeded
 timezone contract-violation bug. One attempt, 28 CLI turns, ~$2.15 of Claude
@@ -521,14 +521,14 @@ a new regression test that fails before and passes after — see CLAUDE.md's
 Windows-specific bugs this run uncovered and fixed in `healer/agent_free.py`
 and `.mcp.json`.
 
-[**PR #14**](https://github.com/Deepak20466/ai-self-healing-app/pull/14) —
+[**PR #14**](https://github.com/Deepak20466/selfheal-mcp-agent/pull/14) —
 the CI self-healing loop, run for real end to end: `scripts/break_ci_demo.py`
 deliberately broke a test's assertion, `ci.yml` failed, `ci-failure.yml`
 notified the healer over a public Cloudflare tunnel, and the healer's
 free-mode CI-fix agent classified the failure as real (not flaky), pushed a
-[fix commit](https://github.com/Deepak20466/ai-self-healing-app/commit/5142307175294aa32cc0cd8bbce157b4fd188dd8)
+[fix commit](https://github.com/Deepak20466/selfheal-mcp-agent/commit/5142307175294aa32cc0cd8bbce157b4fd188dd8)
 restoring the correct assertion, and posted a
-[PR comment](https://github.com/Deepak20466/ai-self-healing-app/pull/14#issuecomment-5839147186)
+[PR comment](https://github.com/Deepak20466/selfheal-mcp-agent/pull/14#issuecomment-5839147186)
 with its root-cause analysis and test evidence — no test deleted or
 weakened. CI went green automatically on the fix commit. This run also
 surfaced and fixed two real, previously-latent infrastructure bugs (see
@@ -772,7 +772,7 @@ than silently refuse to fix these, three tools make the gap explicit and
 
 Each of the 7 seeded bugs in `apps/target_app/bugs.py` only reproduces once:
 if the healer actually opens a PR that fixes one (like
-[PR #10](https://github.com/Deepak20466/ai-self-healing-app/pull/10),
+[PR #10](https://github.com/Deepak20466/selfheal-mcp-agent/pull/10),
 fixing bug #5) and that PR gets merged, `main` loses that bug, and every
 future `/trigger/*` call for it — and the sentinel prober test that catches
 it — stops demonstrating anything.

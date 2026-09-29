@@ -1130,7 +1130,7 @@ machine).
 ### Post-Phase-8 — real end-to-end free-mode PR: DONE
 
 **Real PR opened by the healer, in free mode, no paid API**:
-[PR #10](https://github.com/Deepak20466/ai-self-healing-app/pull/10) —
+[PR #10](https://github.com/Deepak20466/selfheal-mcp-agent/pull/10) —
 `healer/agent_free.py`'s `run_heal_job_free` correctly diagnosed and fixed
 Phase 2's seeded timezone contract violation (`/orders/102/delivery-
 estimate`): `bugs.py:estimate_delivery_date` read `order.created_at.date()`
@@ -1253,7 +1253,7 @@ byte-for-byte body — a heredoc's trailing newline silently broke the
 signature during testing, worth remembering if a manual webhook test ever
 mysteriously 401s) returns 200 and is recorded; an unsigned or
 tampered-signature request returns 401. `GITHUB_REPO`'s `.env` value is
-`Deepak20466/ai-self-healing-app`; `sentinel/schemas.py:CIWebhookPayload`
+`Deepak20466/selfheal-mcp-agent`; `sentinel/schemas.py:CIWebhookPayload`
 requires `run_id`/`workflow`/`branch`/`sha`/`status` (not a raw GitHub
 Actions webhook shape) — use that shape for any future manual webhook test
 against this endpoint.
@@ -1311,13 +1311,13 @@ stable and directly names the exact function in `bugs.py` that raised it.
 
 ### Post-Phase-8 — live CI self-healing, run for real end to end: DONE
 
-**[PR #14](https://github.com/Deepak20466/ai-self-healing-app/pull/14)** —
+**[PR #14](https://github.com/Deepak20466/selfheal-mcp-agent/pull/14)** —
 `scripts/break_ci_demo.py` broke a real test assertion, pushed to a new
 branch/PR, `ci.yml` failed for real, `ci-failure.yml` notified the healer
 over the public Cloudflare tunnel from the earlier "public demo" session,
 and the healer's free-mode CI-fix agent (`run_ci_heal_job_free`) correctly
 classified the failure as real (not flaky), pushed a
-[fix commit](https://github.com/Deepak20466/ai-self-healing-app/commit/5142307175294aa32cc0cd8bbce157b4fd188dd8)
+[fix commit](https://github.com/Deepak20466/selfheal-mcp-agent/commit/5142307175294aa32cc0cd8bbce157b4fd188dd8)
 restoring the broken assertion, and posted a PR comment with its root-cause
 analysis and test evidence. CI went green automatically on the fix commit.
 One real Claude Code CLI attempt, no mocking anywhere in the loop.
@@ -2743,7 +2743,7 @@ guessing at a platform issue with no error message to go on, shipped the
 actual v1.0.0 deliverable directly: built the wheel/sdist locally (already
 verified working in Step 6) and created the real GitHub Release via `gh
 release create v1.0.0 dist/*.whl dist/*.tar.gz --generate-notes` --
-https://github.com/Deepak20466/ai-self-healing-app/releases/tag/v1.0.0 is
+https://github.com/Deepak20466/selfheal-mcp-agent/releases/tag/v1.0.0 is
 live with both artifacts attached. `release.yml` stays in the repo as the
 intended automation for the *next* tag; if it still fails with the same
 symptom next time, that confirms the platform-quirk theory over a content
@@ -3327,7 +3327,7 @@ time, never guessed:**
    pod-kill recovery, and liveness/restart, confirmed via `gh run view
    --log-failed` showing a clean pass, not assumed from "no error printed."
 
-PR: https://github.com/Deepak20466/ai-self-healing-app/pull/17 (branch
+PR: https://github.com/Deepak20466/selfheal-mcp-agent/pull/17 (branch
 `k8s-ci-dev`) — merged into `main` once every check (both `k8s-ci` runs plus
 the existing `test` workflow) was green on the real PR, per this session's
 own explicit "never merge a PR early, only once every check is green"
