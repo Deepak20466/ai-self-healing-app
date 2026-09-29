@@ -18,6 +18,7 @@ from mcp_server.github_client import GitHubClient
 AUTO_FIX_LABEL = "auto-fix"
 NEEDS_REVIEW_LABEL = "needs-human-review"
 REMOTE_VERIFY_LABEL = "verified-by-ci-not-locally"
+SUGGESTION_LABEL = "unverified-suggestion"
 
 
 @dataclass(frozen=True)
@@ -169,6 +170,38 @@ async def open_remote_verify_pull_request(
         base=base,
     )
     await client.add_labels(pr["number"], [AUTO_FIX_LABEL, REMOTE_VERIFY_LABEL])
+    return pr
+
+
+def _suggestion_pr_body(evidence: RemoteVerifyEvidence) -> str:
+    return (
+        "> ⚠️ **UNVERIFIED suggestion: review carefully.** No verification "
+        "was possible for this fix -- no tests exist (even after `selfheal "
+        "prepare`), or this project type isn't supported for local/CI "
+        "verification. This diff has NOT been proven correct by any test "
+        "run. **This PR will never auto-merge.**\n\n"
+        f"## Proposed change\n{evidence.root_cause}\n\n"
+        f"## Diff summary\n```\n{evidence.diff_stat}\n```\n\n"
+        f"## Source\nheal_job #{evidence.heal_job_id} "
+        f"(fingerprint `{evidence.fingerprint}`): {evidence.error_summary}\n\n"
+        "_Opened automatically by the AI self-healing system in suggestion mode "
+        "(`selfheal fix ... --suggest`)._"
+    )
+
+
+async def open_suggestion_pull_request(
+    client: GitHubClient, *, branch: str, base: str, evidence: RemoteVerifyEvidence
+) -> dict[str, Any]:
+    """Open a fix PR with NO verification at all (not even CI) -- see
+    `_suggestion_pr_body`'s warning banner. Labeled distinctly so it's
+    unmistakable in the repo's PR list."""
+    pr = await client.create_pull_request(
+        title=f"UNVERIFIED suggestion: {evidence.error_summary}",
+        body=_suggestion_pr_body(evidence),
+        head=branch,
+        base=base,
+    )
+    await client.add_labels(pr["number"], [SUGGESTION_LABEL])
     return pr
 
 

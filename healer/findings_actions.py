@@ -14,10 +14,16 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.models import Error, Finding, FindingStatus, HealJob, HealJobType, MonitoredApp
+from core.models import AuditLog, Error, Finding, FindingStatus, HealJob, HealJobType, MonitoredApp
 from core.queue import enqueue_heal_job
 
 _HIGH_SEVERITY = ("high", "critical")
+
+#: AuditLog.action marking a heal_job as suggest-mode -- no schema change
+#: needed (same "reuse audit_log as job metadata" pattern healer/worker.py's
+#: own "backend_attempt" rows already use). Checked by
+#: healer/worker.py:_process_next_job before the normal AI_CHAIN dispatch.
+SUGGEST_MODE_ACTION = "suggest_mode_requested"
 
 
 async def request_fix_for_finding(
@@ -26,6 +32,7 @@ async def request_fix_for_finding(
     app: MonitoredApp,
     *,
     auto_merge_override: bool | None = None,
+    suggest: bool = False,
 ) -> HealJob:
     """Create a runtime_error heal_job for `finding` and mark it fix_requested.
 
@@ -37,6 +44,12 @@ async def request_fix_for_finding(
 
     `auto_merge_override` is `selfheal fix --auto-merge`'s one-time
     per-fix decision -- see `healer/automerge.py:effective_auto_merge`.
+
+    `suggest=True` (`selfheal fix ... --suggest`) is for a fix that can't be
+    verified at all (no tests even after `selfheal prepare`, or an
+    unsupported project type) -- it's routed to `healer/suggest_mode.py`
+    instead of the normal AI_CHAIN dispatch, which opens the PR labeled
+    "UNVERIFIED suggestion: review carefully" and never auto-merges it.
     """
     error = Error(
         fingerprint=finding.fingerprint,
@@ -59,6 +72,10 @@ async def request_fix_for_finding(
         app_id=app.id,
         auto_merge_override=auto_merge_override,
     )
+    if suggest:
+        session.add(
+            AuditLog(action=SUGGEST_MODE_ACTION, actor="operator", heal_job_id=job.id, details={})
+        )
     finding.status = FindingStatus.FIX_REQUESTED
     finding.heal_job_id = job.id
     return job

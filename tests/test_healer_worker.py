@@ -429,3 +429,56 @@ async def test_a_heavy_dependency_connected_app_job_routes_to_remote_verify(
             row = await session.get(MonitoredApp, app_id)
             if row is not None:
                 await session.delete(row)
+
+
+async def test_a_suggest_mode_job_routes_to_suggest_mode_not_ai_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A heal_job with a SUGGEST_MODE_ACTION audit_log row must go through
+    run_heal_job_suggest, never the normal AI_CHAIN backend dispatch --
+    checked before the heavy-dependency remote-verify routing too (an
+    explicit --suggest request wins even for a heavy-dependency app)."""
+    from core.models import AuditLog
+    from healer.findings_actions import SUGGEST_MODE_ACTION
+
+    async with session_scope() as session:
+        while True:
+            stale = await dequeue_heal_job(
+                session,
+                types=(
+                    HealJobType.RUNTIME_ERROR,
+                    HealJobType.CONTRACT_VIOLATION,
+                    HealJobType.CI_FAILURE,
+                ),
+            )
+            if stale is None:
+                break
+            stale.status = HealJobStatus.FAILED
+
+    fingerprint = f"test-suggest-route-{uuid.uuid4().hex}"
+    async with session_scope() as session:
+        job = await enqueue_heal_job(
+            session, type=HealJobType.RUNTIME_ERROR, fingerprint=fingerprint
+        )
+        job_id = job.id
+        session.add(AuditLog(action=SUGGEST_MODE_ACTION, actor="operator", heal_job_id=job_id))
+
+    suggest_calls: list[int] = []
+
+    async def _fake_suggest(job_id: int, *, mcp: Any, github: Any) -> None:
+        suggest_calls.append(job_id)
+
+    async def _cap_never_open(session: object, *, max_per_hour: int) -> bool:
+        return False
+
+    async def _never_call(job_id: int, *, mcp: Any, github: Any) -> None:
+        raise AssertionError("must not dispatch through the normal AI_CHAIN backend")
+
+    monkeypatch.setattr(worker_module, "run_heal_job_suggest", _fake_suggest)
+    monkeypatch.setattr(worker_module, "global_hourly_circuit_open", _cap_never_open)
+
+    backend = worker_module._JobRunners(runtime_or_contract=_never_call, ci_failure=_never_call)
+    claimed = await worker_module._process_next_job(mcp=None, backend=backend)  # type: ignore[arg-type]
+
+    assert claimed is True
+    assert suggest_calls == [job_id]

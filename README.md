@@ -541,6 +541,46 @@ auto-merges**, regardless of the app's or the operator's own auto-merge
 setting — `heal_jobs.auto_merge_override` is forced `False` the moment the
 PR opens.
 
+### Making a repo fixable: `selfheal prepare`, onboarding, and suggestion mode
+
+Not every repo is fixable out of the box — most real repos have no tests,
+no CI, or use a database/queue that a fix can't be verified against. Rather
+than silently refuse to fix these, three tools make the gap explicit and
+(optionally) close it:
+
+- **`selfheal prepare <app> [--path <subdir>]`** — a static, read-only
+  checklist (`core/repo_health_check.py`, never runs the app's own code):
+  does it have test files (by filename convention), a GitHub Actions
+  workflow that actually runs tests, external-service dependencies
+  (Postgres/MySQL/Redis/MongoDB) with no visible test config, and heavy/ML
+  dependencies. Prints exactly what's missing.
+- **`selfheal prepare <app> --onboard`** — after showing an AI-cost estimate
+  and asking for confirmation, opens **one** onboarding PR adding only
+  what's missing: AI-written starter *characterization* tests (clearly
+  marked "starter tests: review before relying on them," capturing current
+  behavior — not fixing bugs), a GitHub Actions workflow (with service
+  containers for any detected external dependency), and a `.env.test` file
+  of FAKE placeholder credentials. A light-dependency app's new tests are
+  run locally once before the PR opens — if they don't pass on the current
+  code, no PR is opened at all. A heavy-dependency app's onboarding PR is
+  opened unverified-locally too, using the exact same "verified by CI, not
+  locally" labeling as a normal remote-verified fix. Onboarding PRs never
+  auto-merge. See `healer/onboarding_prepare.py`.
+- **`selfheal fix <app> <finding> --suggest`** — when a fix can't be
+  verified at all (no tests even after `prepare`, or an unsupported project
+  type), opens a PR anyway with **zero** verification, clearly labeled
+  "⚠️ UNVERIFIED suggestion: review carefully" (`healer/suggest_mode.py`).
+  This is the weakest confidence tier in the system — below remote-verify's
+  "CI will prove it" — and, like every reduced-confidence path here, never
+  auto-merges.
+- **`selfheal audit [--limit N]`** — a verdict per sub-project across every
+  (non-archived) repo your `gh` CLI can see, using GitHub's API (a file-tree
+  listing + at most one manifest-content fetch per candidate) rather than
+  cloning anything, so it scales to "all my repos": `fixable_locally` /
+  `fixable_via_ci` / `needs_prepare` / `not_supported`, with a one-line
+  reason for each. Requires `gh` installed and authenticated
+  (`gh auth status`). See `core/repo_audit.py`.
+
 ## Re-running the demo
 
 Each of the 7 seeded bugs in `apps/target_app/bugs.py` only reproduces once:

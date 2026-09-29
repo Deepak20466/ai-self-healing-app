@@ -271,6 +271,51 @@ the app's own local checkout into a fresh worktree instead of using `git
 worktree add` against this repo's `.git`, and the PR gets opened against
 that repo's own real default branch with its own GitHub token.
 
+### 6b. Monorepos, heavy dependencies, and "make repo fixable"
+
+Real repos the operator connects are rarely a single clean package: they're
+monorepos (`backend/`, `frontend/`, `mobile/`), they depend on heavy ML
+packages this project will never install, or they simply have no tests at
+all. Three follow-up features handle this without ever weakening the
+system's guardrails:
+
+- **Monorepo support** (`core/repo_connect.py:find_subprojects`): walks up
+  to 2 levels below the repo root looking for a manifest, reusing the
+  existing `detect_stack` function per candidate directory rather than
+  duplicating the manifest list. If the root has no manifest but nested
+  sub-projects exist, `connect` refuses with a message listing them —
+  `--path <subdir>` picks one. Because write-scope enforcement in this
+  project was already "whatever `MonitoredApp.local_repo_path` says," no
+  schema change or sandbox change was needed: a sub-project's own path
+  *becomes* the app's row.
+- **Heavy/ML dependencies, never installed anywhere**: a fixed denylist
+  (torch/tensorflow/transformers/chromadb/CUDA-class) routes a scan to
+  static-only mode and a fix to `healer/remote_verify.py`'s CI-verified
+  path (see section above). A real incident while building this: a
+  `timeout`-wrapped `pip install` of a genuinely heavy `requirements.txt`
+  got killed mid-write and corrupted the scanner's own venv badly enough
+  that even `pip uninstall` failed — the fix was deleting the venv, not
+  trying to repair it. That's exactly why the rule is "never attempt it,"
+  not "attempt it with a timeout."
+- **`selfheal prepare`/onboarding/suggestion mode**
+  (`core/repo_health_check.py`, `healer/onboarding_prepare.py`,
+  `healer/suggest_mode.py`): `prepare` is a static, read-only checklist of
+  what's missing (tests, CI, test config, heavy deps) that never executes
+  the app's own code. `--onboard` spends AI budget on ONE PR adding only
+  what's missing, verified locally when possible and never auto-merged.
+  `--suggest` is the system's weakest confidence tier: no verification at
+  all, clearly labeled, for a repo where nothing else applies. `selfheal
+  audit` gives a verdict across every repo `gh` can see, using GitHub's
+  tree/contents API rather than cloning, so it scales cheaply.
+
+A real bug this surfaced: `git diff --stat` (used everywhere else in this
+project to check "did the AI produce a diff") doesn't show a brand-new
+*untracked* file — exactly what onboarding almost always produces (new test
+files, a new CI workflow). Fixed by checking `git status --porcelain`
+instead (`healer/agent_free.py` already had this fix for a different
+reason — `_touched_paths` — reused here and backported into
+`healer/remote_verify.py` too once the same bug was caught there).
+
 ### 7. Pluggable AI backends
 
 The system supports four interchangeable backends, selected by an

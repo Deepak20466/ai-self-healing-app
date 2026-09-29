@@ -59,6 +59,7 @@ the tunnel-and-login-gated checks below are SKIPPED, not FAILED) —
 | Cloud VM deploy (`provision_vm.sh`, systemd, Caddy, `deploy.yml`) | No VM available; only the local equivalent ran |
 | Connected-repo "Fix" PR and onboarding PR | Only the enqueue step was run live in an earlier session; no real fix PR on an external repo |
 | Scheduled health-check workflow | Needs a public URL; skips cleanly without one |
+| `selfheal prepare`/`--onboard`/`--suggest`/`selfheal audit` (monorepo support, "make repo fixable") | Unit- and integration-tested (mocked AI/GitHub, real git worktrees/`git apply`/`run_tests` round trip) -- see the pending live demo run against a real connected repo for real-world confirmation |
 
 ## ❌ Not built
 

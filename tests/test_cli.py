@@ -306,6 +306,50 @@ def test_fix_yes_flag_skips_prompt(respx_mock: Any) -> None:
     assert result.exit_code == 0, result.output
 
 
+def test_fix_suggest_flag_sends_suggest_true(respx_mock: Any) -> None:
+    _log_in()
+    respx_mock.get(f"{BASE_URL}/api/apps").mock(
+        return_value=httpx.Response(200, json=[{"id": 5, "name": "node_app"}])
+    )
+    respx_mock.get(f"{BASE_URL}/api/apps/5").mock(
+        return_value=httpx.Response(
+            200, json={"id": 5, "findings": [{"id": 11, "severity": "critical"}]}
+        )
+    )
+    fix_route = respx_mock.post(f"{BASE_URL}/api/findings/11/fix").mock(
+        return_value=httpx.Response(200, json={"heal_job_id": 1, "finding_id": 11})
+    )
+    result = runner.invoke(app, ["fix", "node_app", "11", "--suggest", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert fix_route.called
+    import json as jsonlib
+
+    sent_body = jsonlib.loads(fix_route.calls.last.request.content)
+    assert sent_body == {"suggest": True}
+
+
+def test_audit_prints_verdict_table(respx_mock: Any) -> None:
+    _log_in()
+    respx_mock.get(f"{BASE_URL}/api/audit").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "repo": "acme/x",
+                    "sub_path": "",
+                    "language": "python",
+                    "verdict": "needs_prepare",
+                    "reason": "no test files found",
+                }
+            ],
+        )
+    )
+    result = runner.invoke(app, ["audit"])
+    assert result.exit_code == 0, result.output
+    assert "needs_prepare" in result.output
+    assert "no test files found" in result.output
+
+
 def test_connect_posts_repo_url(respx_mock: Any) -> None:
     _log_in()
     respx_mock.post(f"{BASE_URL}/api/apps").mock(

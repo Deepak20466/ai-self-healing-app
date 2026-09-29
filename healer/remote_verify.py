@@ -265,8 +265,16 @@ async def run_heal_job_remote_verify(
                 session, heal_job_id=job_id, cli_result=cli_result, error=None
             )
 
-        diff_stat = (await git_utils.diff_stat(cwd=worktree_path)).strip()
-        if not diff_stat or cli_result.is_error:
+        # `git diff --stat` alone misses a brand-new untracked file (`git
+        # apply` leaves one untracked, not staged) -- so "did anything
+        # change" is checked via `git status --porcelain` instead (same fix
+        # `healer/agent_free.py:_touched_paths` already needed, and
+        # `healer/onboarding_prepare.py` needed for the same reason).
+        touched_paths = await agent_free._touched_paths(worktree_path)
+        diff_stat = (await git_utils.diff_stat(cwd=worktree_path)).strip() or "\n".join(
+            touched_paths
+        )
+        if not touched_paths or cli_result.is_error:
             reason = cli_result.result_text or "(no diff produced / CLI reported an error)"
             evidence = RemoteVerifyEvidence(
                 heal_job_id=job_id,

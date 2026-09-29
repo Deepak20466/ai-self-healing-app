@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core import repo_audit
 from core.config import settings
 from core.db import dispose_engine, get_db, session_scope
 from core.logging import configure_logging
@@ -42,7 +43,7 @@ from core.repo_connect import (
 )
 from core.repo_health_check import PrepareReport, analyze_repo
 from core.scanner import run_scan
-from healer import notifier
+from healer import notifier, onboarding_prepare
 from healer.auth import (
     SESSION_COOKIE_NAME,
     SESSION_MAX_AGE_SECONDS,
@@ -59,7 +60,7 @@ from healer.job_progress import recent_job_progress, run_progress_broadcaster
 from healer.mcp_client import MCPToolClient, ReconnectingMCPToolClient, connect_http
 from healer.onboarding import open_onboarding_pull_request
 from healer.worker import run_worker
-from mcp_server.github_client import GitHubClientError
+from mcp_server.github_client import GitHubClient, GitHubClientError
 from mcp_server.sandbox import REPO_ROOT
 
 configure_logging(settings.log_level)
@@ -259,6 +260,26 @@ async def api_prs(
             "pr_opened_at": r.pr_opened_at.isoformat() if r.pr_opened_at else None,
         }
         for r in rows
+    ]
+
+
+@app.get("/api/audit")
+async def api_audit(limit: int = 50, username: str = Depends(require_auth)) -> list[dict[str, Any]]:
+    """`selfheal audit`: a verdict per sub-project across every repo `gh`
+    sees for the authenticated user. See core/repo_audit.py."""
+    try:
+        results = await repo_audit.audit_all_repos(limit=limit)
+    except repo_audit.RepoAuditError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return [
+        {
+            "repo": r.repo,
+            "sub_path": r.sub_path,
+            "language": r.language,
+            "verdict": r.verdict,
+            "reason": r.reason,
+        }
+        for r in results
     ]
 
 
@@ -553,6 +574,7 @@ async def capture_test(
 
 class FixFindingRequest(BaseModel):
     auto_merge: bool | None = None
+    suggest: bool = False
 
 
 @app.post("/api/findings/{finding_id}/fix")
@@ -569,8 +591,9 @@ async def fix_finding(
     if app_row is None:
         raise HTTPException(status_code=404, detail="No such app")
     auto_merge_override = body.auto_merge if body is not None else None
+    suggest = body.suggest if body is not None else False
     job = await request_fix_for_finding(
-        db, finding, app_row, auto_merge_override=auto_merge_override
+        db, finding, app_row, auto_merge_override=auto_merge_override, suggest=suggest
     )
     await db.commit()
     await notifier.notify(
@@ -591,6 +614,49 @@ async def onboard_app(
     except GitHubClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"pr_number": pr["number"], "pr_url": pr.get("html_url")}
+
+
+@app.get("/api/apps/{app_id}/onboard-prepare-estimate")
+async def onboard_prepare_estimate(
+    app_id: int, username: str = Depends(require_auth), db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    """The `selfheal prepare` confirmation prompt's data: what's missing and
+    a rough AI-cost estimate -- spends no AI budget itself."""
+    app_row = await db.get(MonitoredApp, app_id)
+    if app_row is None:
+        raise HTTPException(status_code=404, detail="No such app")
+    report = await onboarding_prepare.get_prepare_report(app_id)
+    if report is None:
+        raise HTTPException(
+            status_code=400, detail="not a connected external app, or its clone is missing"
+        )
+    return _prepare_report_dict(report) | {
+        "estimated_cost": onboarding_prepare.estimate_onboarding_cost(report)
+    }
+
+
+@app.post("/api/apps/{app_id}/onboard-prepare-pr")
+async def onboard_prepare_pr(
+    app_id: int,
+    username: str = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+    mcp: MCPToolClient = Depends(get_mcp_client),
+) -> dict[str, Any]:
+    """Actually run the onboarding fix (spends AI budget) -- the CLI is
+    expected to have shown the operator `onboard-prepare-estimate` and
+    gotten a "yes" first, same confirm-then-spend pattern as `selfheal
+    fix`."""
+    app_row = await db.get(MonitoredApp, app_id)
+    if app_row is None:
+        raise HTTPException(status_code=404, detail="No such app")
+    async with GitHubClient(repo=app_row.github_repo) as github:
+        result = await onboarding_prepare.run_onboarding_prepare(app_id, mcp=mcp, github=github)
+    return {
+        "status": result.status,
+        "detail": result.detail,
+        "pr_number": result.pr_number,
+        "pr_url": result.pr_url,
+    }
 
 
 @app.get("/api/chat/history")

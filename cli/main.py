@@ -386,17 +386,48 @@ def scan(
     _print_or_json(detail, json_out, render)
 
 
+def _render_prepare_checklist(data: dict[str, Any]) -> None:
+    console.print(f"[bold]{data.get('app_name')}[/bold] ({data.get('language')})")
+    table = Table(title="Prepare checklist")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_row("Tests found", f"{data.get('test_file_count')} file(s)")
+    table.add_row("CI workflow", "yes" if data.get("has_ci_workflow") else "no")
+    table.add_row("CI runs tests", "yes" if data.get("ci_runs_tests") else "no")
+    table.add_row("External services", ", ".join(data.get("external_services", [])) or "none")
+    table.add_row("Heavy dependencies", ", ".join(data.get("heavy_dependencies", [])) or "none")
+    console.print(table)
+    missing = data.get("missing", [])
+    if not missing:
+        console.print("[green]Already fixable -- nothing missing.[/green]")
+    else:
+        console.print("[yellow]Missing for self-healing:[/yellow]")
+        for item in missing:
+            console.print(f"  - {item}")
+
+
 @app.command()
 def prepare(
     app_name: str,
     path: Annotated[
         str | None, typer.Option("--path", help="Check a sub-project instead of the app root.")
     ] = None,
+    onboard: Annotated[
+        bool,
+        typer.Option(
+            "--onboard",
+            help="Offer ONE onboarding PR adding whatever's missing (tests/CI/test "
+            "config), after confirmation. Ignores --path -- onboards the app's "
+            "currently-connected sub-project; use `selfheal scan <app> --path <subdir>` "
+            "first to re-point it.",
+        ),
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the onboarding confirmation.")] = False,
     json_out: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Static, read-only checklist of what's missing for self-healing
     (tests, CI workflow, test config, heavy dependencies) -- never runs the
-    app's own code."""
+    app's own code. Pass --onboard to offer a PR filling the gaps."""
 
     async def _prepare() -> dict[str, Any]:
         async with HealerClient.from_saved_session() as client:
@@ -406,27 +437,39 @@ def prepare(
             return result
 
     report = _run(_prepare())
+    _print_or_json(report, json_out, _render_prepare_checklist)
 
-    def render(data: dict[str, Any]) -> None:
-        console.print(f"[bold]{data.get('app_name')}[/bold] ({data.get('language')})")
-        table = Table(title="Prepare checklist")
-        table.add_column("Check")
-        table.add_column("Status")
-        table.add_row("Tests found", f"{data.get('test_file_count')} file(s)")
-        table.add_row("CI workflow", "yes" if data.get("has_ci_workflow") else "no")
-        table.add_row("CI runs tests", "yes" if data.get("ci_runs_tests") else "no")
-        table.add_row("External services", ", ".join(data.get("external_services", [])) or "none")
-        table.add_row("Heavy dependencies", ", ".join(data.get("heavy_dependencies", [])) or "none")
-        console.print(table)
-        missing = data.get("missing", [])
-        if not missing:
-            console.print("[green]Already fixable -- nothing missing.[/green]")
-        else:
-            console.print("[yellow]Missing for self-healing:[/yellow]")
-            for item in missing:
-                console.print(f"  - {item}")
+    if not onboard:
+        return
+    if not report.get("missing"):
+        console.print("Nothing to onboard -- already fixable.")
+        return
 
-    _print_or_json(report, json_out, render)
+    async def _estimate() -> dict[str, Any]:
+        async with HealerClient.from_saved_session() as client:
+            app_id = await _resolve_app_id(client, app_name)
+            result: dict[str, Any] = await client.get(
+                f"/api/apps/{app_id}/onboard-prepare-estimate"
+            )
+            return result
+
+    estimate = _run(_estimate())
+    console.print(f"Estimated AI cost: [bold]{estimate.get('estimated_cost')}[/bold]")
+    if not yes and not typer.confirm("Open ONE onboarding PR adding the missing items?"):
+        raise typer.Exit(code=0)
+
+    async def _onboard() -> dict[str, Any]:
+        async with HealerClient.from_saved_session() as client:
+            app_id = await _resolve_app_id(client, app_name)
+            result: dict[str, Any] = await client.post(f"/api/apps/{app_id}/onboard-prepare-pr")
+            return result
+
+    result = _run(_onboard())
+    status = result.get("status")
+    if status == "pr_opened":
+        console.print(f"[green]PR opened:[/green] {result.get('pr_url')}")
+    else:
+        console.print(f"[yellow]{status}:[/yellow] {result.get('detail')}")
 
 
 @app.command()
@@ -436,6 +479,14 @@ def fix(
     high: Annotated[bool, typer.Option("--high", help="Fix every high-severity finding.")] = False,
     auto_merge: Annotated[
         bool, typer.Option("--auto-merge", help="Auto-merge this fix only, if CI+tests pass.")
+    ] = False,
+    suggest: Annotated[
+        bool,
+        typer.Option(
+            "--suggest",
+            help="No verification is possible (no tests, unsupported project type) -- open "
+            "an UNVERIFIED suggestion PR for human review instead of skipping the fix.",
+        ),
     ] = False,
     yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
 ) -> None:
@@ -460,17 +511,22 @@ def fix(
                 return []
             if not yes:
                 names = ", ".join(str(f.get("id")) for f in findings)
+                suffix = " with auto-merge enabled" if auto_merge else ""
+                if suggest:
+                    suffix += " as an UNVERIFIED suggestion (no tests will run at all)"
                 if not typer.confirm(
-                    f"This will spend AI budget fixing finding(s) {names}"
-                    + (" with auto-merge enabled" if auto_merge else "")
-                    + ". Continue?"
+                    f"This will spend AI budget fixing finding(s) {names}{suffix}. Continue?"
                 ):
                     raise typer.Exit(code=0)
             results = []
             for f in findings:
-                body = {"auto_merge": True} if auto_merge else None
+                body: dict[str, Any] = {}
+                if auto_merge:
+                    body["auto_merge"] = True
+                if suggest:
+                    body["suggest"] = True
                 result: dict[str, Any] = await client.post(
-                    f"/api/findings/{f['id']}/fix", json=body
+                    f"/api/findings/{f['id']}/fix", json=body or None
                 )
                 results.append(result)
             return results
@@ -574,6 +630,51 @@ def prs(json_out: Annotated[bool, typer.Option("--json")] = False) -> None:
                 str(row.get("pr_number")),
                 str(row.get("status")),
                 str(row.get("pr_opened_at")),
+            )
+        console.print(table)
+
+    _print_or_json(rows, json_out, render)
+
+
+@app.command()
+def audit(
+    limit: Annotated[int, typer.Option(help="Max GitHub repos to check.")] = 50,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """A verdict per sub-project across every repo `gh` sees for you:
+    fixable locally / fixable via CI / needs prepare / not supported.
+    Requires `gh` installed and authenticated (`gh auth status`)."""
+
+    async def _audit() -> list[dict[str, Any]]:
+        async with HealerClient.from_saved_session() as client:
+            result: list[dict[str, Any]] = await client.get("/api/audit", params={"limit": limit})
+            return result
+
+    rows = _run(_audit())
+
+    _VERDICT_STYLE = {
+        "fixable_locally": "green",
+        "fixable_via_ci": "cyan",
+        "needs_prepare": "yellow",
+        "not_supported": "red",
+    }
+
+    def render(data: list[dict[str, Any]]) -> None:
+        table = Table(title="Repo audit")
+        table.add_column("Repo")
+        table.add_column("Sub-project")
+        table.add_column("Language")
+        table.add_column("Verdict")
+        table.add_column("Reason")
+        for row in data:
+            verdict = str(row.get("verdict"))
+            style = _VERDICT_STYLE.get(verdict, "")
+            table.add_row(
+                str(row.get("repo")),
+                str(row.get("sub_path")) or ".",
+                str(row.get("language")),
+                f"[{style}]{verdict}[/{style}]" if style else verdict,
+                str(row.get("reason")),
             )
         console.print(table)
 

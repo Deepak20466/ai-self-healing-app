@@ -13,11 +13,13 @@ from typing import Any
 import httpx
 import pytest
 from argon2 import PasswordHasher
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings as core_settings
 from core.db import get_db
 from core.models import (
+    AuditLog,
     Finding,
     FindingCategory,
     FindingSeverity,
@@ -213,6 +215,43 @@ async def test_fix_finding_enqueues_a_heal_job(
     assert job.fingerprint == finding.fingerprint
     assert job.app_id == app_row.id
 
+
+async def test_fix_finding_with_suggest_marks_the_job_suggest_mode(
+    app_client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    from healer.findings_actions import SUGGEST_MODE_ACTION
+
+    app_row = await _make_app(db_session)
+    finding = Finding(
+        app_id=app_row.id,
+        fingerprint=uuid.uuid4().hex,
+        category=FindingCategory.DEPENDENCY,
+        severity=FindingSeverity.HIGH,
+        tool="pip-audit",
+        message="requests: known vulnerability",
+    )
+    db_session.add(finding)
+    await db_session.flush()
+
+    async with app_client as client:
+        await _login(client)
+        resp = await client.post(f"/api/findings/{finding.id}/fix", json={"suggest": True})
+    assert resp.status_code == 200
+    heal_job_id = resp.json()["heal_job_id"]
+
+    rows = (
+        (
+            await db_session.execute(
+                select(AuditLog).where(
+                    AuditLog.action == SUGGEST_MODE_ACTION, AuditLog.heal_job_id == heal_job_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+
     await db_session.refresh(finding)
     assert finding.status.value == "fix_requested"
     assert finding.heal_job_id == heal_job_id
@@ -264,6 +303,46 @@ async def test_api_prs_requires_auth(app_client: httpx.AsyncClient) -> None:
     async with app_client as client:
         resp = await client.get("/api/prs")
     assert resp.status_code == 401
+
+
+async def test_api_audit_requires_auth(app_client: httpx.AsyncClient) -> None:
+    async with app_client as client:
+        resp = await client.get("/api/audit")
+    assert resp.status_code == 401
+
+
+async def test_api_audit_returns_verdicts(
+    app_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from core.repo_audit import SubProjectAudit
+    from healer import app as healer_app_module
+
+    async def _fake_audit(*, limit: int) -> list[SubProjectAudit]:
+        return [
+            SubProjectAudit(
+                repo="acme/x",
+                sub_path="",
+                language="python",
+                verdict="fixable_locally",
+                reason="has tests",
+            )
+        ]
+
+    monkeypatch.setattr(healer_app_module.repo_audit, "audit_all_repos", _fake_audit)
+    async with app_client as client:
+        await _login(client)
+        resp = await client.get("/api/audit")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body == [
+        {
+            "repo": "acme/x",
+            "sub_path": "",
+            "language": "python",
+            "verdict": "fixable_locally",
+            "reason": "has tests",
+        }
+    ]
 
 
 async def test_capture_test_posts_a_synthetic_error_through_sentinel_ingest(
@@ -324,3 +403,71 @@ async def test_prepare_404_for_unknown_app(app_client: httpx.AsyncClient) -> Non
         await _login(client)
         resp = await client.get("/api/apps/999999/prepare")
     assert resp.status_code == 404
+
+
+async def test_onboard_prepare_estimate_returns_checklist_and_cost(
+    app_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`onboarding_prepare.get_prepare_report` opens its own `session_scope()`
+    (same "MCP tools have no dependency injection" reason documented in
+    CLAUDE.md for other session_scope()-using tools), so it can't see a row
+    only committed to the rollback-wrapped `db_session` fixture -- mocked
+    directly instead, same as the PR-opening test below."""
+    from core.repo_health_check import PrepareReport
+    from healer import app as healer_app_module
+
+    async def _fake_report(app_id: int) -> PrepareReport:
+        return PrepareReport(
+            app_name="testapp",
+            language="python",
+            has_tests=False,
+            test_file_count=0,
+            has_ci_workflow=False,
+            ci_runs_tests=False,
+            external_services=(),
+            heavy_dependencies=(),
+            missing=("No test files found.",),
+        )
+
+    monkeypatch.setattr(healer_app_module.onboarding_prepare, "get_prepare_report", _fake_report)
+    app_row = await _make_app(db_session)
+    async with app_client as client:
+        await _login(client)
+        resp = await client.get(f"/api/apps/{app_row.id}/onboard-prepare-estimate")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["already_fixable"] is False
+    assert "estimated_cost" in body
+
+
+async def test_onboard_prepare_pr_requires_auth(app_client: httpx.AsyncClient) -> None:
+    async with app_client as client:
+        resp = await client.post("/api/apps/1/onboard-prepare-pr")
+    assert resp.status_code == 401
+
+
+async def test_onboard_prepare_pr_returns_already_fixable(
+    app_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from healer import app as healer_app_module
+
+    async def _fake_run(app_id: int, *, mcp: Any, github: Any) -> Any:
+        from healer.onboarding_prepare import OnboardingResult
+
+        return OnboardingResult(status="already_fixable", detail="Nothing missing.")
+
+    monkeypatch.setattr(healer_app_module.onboarding_prepare, "run_onboarding_prepare", _fake_run)
+    healer_app_module.app.dependency_overrides[healer_app_module.get_mcp_client] = lambda: object()
+    app_row = await _make_app(db_session)
+    try:
+        async with app_client as client:
+            await _login(client)
+            resp = await client.post(f"/api/apps/{app_row.id}/onboard-prepare-pr")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "already_fixable"
+    finally:
+        del healer_app_module.app.dependency_overrides[healer_app_module.get_mcp_client]
