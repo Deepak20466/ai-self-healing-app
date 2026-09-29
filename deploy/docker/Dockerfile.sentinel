@@ -24,6 +24,7 @@ COPY --from=builder /opt/venv /opt/venv
 WORKDIR /app
 COPY --from=builder /build /app
 COPY deploy/docker/http_healthcheck.py /app/http_healthcheck.py
+COPY deploy/docker/kill_process.py /app/kill_process.py
 RUN chown -R app:app /app /home/app
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1

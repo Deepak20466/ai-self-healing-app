@@ -131,17 +131,14 @@ jobs:
       - name: Liveness/restart test -- sentinel-pod
         run: |
           set -euo pipefail
-          # Kill the pod's own PID-1 process from inside the container.
-          # restartPolicy: Always (set explicitly on every Deployment in
-          # this chart) means kubelet restarts the CONTAINER immediately on
-          # exit -- the same recovery path a failed liveness probe would
-          # trigger, and far more reliably automatable in CI than staging
-          # an actual liveness-probe failure without touching app health
-          # logic. Confirms via restartCount, not just "a pod exists".
+          # Kill the actual uvicorn process, not PID 1 -- see
+          # deploy/docker/kill_process.py's docstring for why `kill -9 1`
+          # doesn't work in a container (a real k8s-ci run tried it first
+          # and restartCount never moved).
           POD=$(kubectl get pod -l app=selfheal-sentinel -o jsonpath='{.items[0].metadata.name}')
           BEFORE=$(kubectl get pod "$POD" -o jsonpath='{.status.containerStatuses[0].restartCount}')
           echo "restartCount before: $BEFORE"
-          kubectl exec "$POD" -- sh -c "kill -9 1" || true
+          kubectl exec "$POD" -- python /app/kill_process.py uvicorn
           sleep 5
           kubectl wait --for=condition=Ready pod -l app=selfheal-sentinel --timeout=90s
           AFTER=$(kubectl get pod "$POD" -o jsonpath='{.status.containerStatuses[0].restartCount}')
