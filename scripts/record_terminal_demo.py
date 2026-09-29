@@ -258,6 +258,8 @@ def record_session() -> list[Recording]:
 
     recordings.append(run_cli(["status"]))
     recordings.append(run_cli(["apps"]))
+    recordings.append(run_cli(["prepare", "target_app"], timeout=60))
+    recordings.append(run_cli(["audit", "--limit", "5"], timeout=180))
 
     _prepare_go_scan_app()
     try:

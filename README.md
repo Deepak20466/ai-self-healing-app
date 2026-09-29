@@ -2,7 +2,7 @@
 
 [![k8s-ci](https://github.com/Deepak20466/ai-self-healing-app/actions/workflows/k8s-ci.yml/badge.svg)](https://github.com/Deepak20466/ai-self-healing-app/actions/workflows/k8s-ci.yml)
 
-![selfheal terminal demo: up, login, status, apps, scan, errors, chat, prs](docs/demo-terminal.gif)
+![selfheal terminal demo: up, login, status, apps, prepare, audit, scan, errors, chat, prs](docs/demo-terminal.gif)
 
 *Real, unscripted `selfheal` CLI session against the actually-running pods — every line above is genuine captured output (see [docs/demo-terminal.mp4](docs/demo-terminal.mp4) for the full-quality video).*
 
