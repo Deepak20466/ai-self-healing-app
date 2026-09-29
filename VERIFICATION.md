@@ -45,6 +45,7 @@ the tunnel-and-login-gated checks below are SKIPPED, not FAILED) —
 | **Go example**: seeded divide-by-zero panic captured over OpenTelemetry at `examples/go_app/calc.go:12`; scan flags the failing test, `govulncheck` reported as skipped (not installed) | same |
 | Per-language stack-trace parsers, scanner detection, patch-guard test-skip rejection, onboarding file per language | verify_all + pytest |
 | Privacy guard: MCP tool RESULTS are scrubbed before reaching any AI backend, not just logged args | Real (unmocked) test against the live `audited_tool` wrapper: `tests/test_mcp_audit.py::test_audited_tool_scrubs_the_returned_result_not_just_logged_args`; not re-proven by verify_all since no live tool call in this system naturally echoes a secret back to contrive a fresh live case (see CLAUDE.md Step 5) |
+| GitHub Copilot Chat (Agent mode, VS Code) against mcp-pod | Confirmed against a real Copilot Chat session: Agent mode discovered `.vscode/mcp.json` and successfully listed/called `selfheal`'s MCP tools |
 
 ## ⚠️ Built but not verified live
 
