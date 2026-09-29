@@ -16,6 +16,7 @@ from core.scanner import (
     FindingDraft,
     ScanError,
     _app_dir,
+    _run,
     compute_health_score,
     detect_heavy_dependencies,
     parse_mypy_json,
@@ -327,3 +328,36 @@ async def test_run_scan_isolates_a_real_python_app_in_its_own_venv(tmp_path, mon
             row = await session.get(MonitoredApp, app_id)
             if row is not None:
                 await session.delete(row)
+
+
+@pytest.mark.asyncio
+async def test_run_with_merge_stderr_false_keeps_stdout_json_parseable(tmp_path) -> None:
+    """Real regression test for a real bug: `_run`'s old, unconditional
+    `stderr=STDOUT` merge corrupted every JSON-parsed tool's output whenever
+    that tool wrote anything to stderr (pip-audit's own "Found N known
+    vulnerabilities" summary line, or its Windows venv-relocation warning,
+    both real and reproduced live against `connected_apps/multi-agent-
+    workspace/requirements.txt`) -- `json.loads` raised, and
+    `parse_pip_audit_json`/`parse_npm_audit_json`/etc. silently returned no
+    findings, hiding real, existing vulnerabilities. `merge_stderr=False`
+    must keep stdout clean of a script's stderr writes.
+    """
+
+    script = tmp_path / "emit.py"
+    script.write_text(
+        "import sys\nprint('{\"ok\": true}')\nprint('a warning on stderr', file=sys.stderr)\n"
+    )
+    outcome = await _run(f'"{sys.executable}" "{script}"', cwd=tmp_path, merge_stderr=False)
+    assert json.loads(outcome.output) == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_run_with_merge_stderr_true_folds_stderr_into_output(tmp_path) -> None:
+    """The default (`merge_stderr=True`) is unchanged: test/lint commands
+    still get stderr folded into the same tail a human or the AI reads."""
+
+    script = tmp_path / "emit.py"
+    script.write_text("import sys\nprint('stdout line')\nprint('stderr line', file=sys.stderr)\n")
+    outcome = await _run(f'"{sys.executable}" "{script}"', cwd=tmp_path)
+    assert "stdout line" in outcome.output
+    assert "stderr line" in outcome.output

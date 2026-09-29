@@ -212,13 +212,33 @@ def _app_dir(app: MonitoredApp) -> Path:
 
 
 async def _run(
-    command: str, *, cwd: Path, timeout: float = COMMAND_TIMEOUT_SECONDS
+    command: str,
+    *,
+    cwd: Path,
+    timeout: float = COMMAND_TIMEOUT_SECONDS,
+    merge_stderr: bool = True,
 ) -> CommandOutcome:
+    """Run `command`, capturing output for both display and, for some
+    callers, JSON parsing.
+
+    `merge_stderr=True` (the default, used for test/lint/install commands)
+    folds stderr into the same stream as stdout, since a failing test's
+    stderr is exactly what a human -- or the AI reading a Finding's message
+    -- needs to see next to its stdout. Tools whose *stdout* is meant to be
+    parsed as JSON (`pip-audit --format json`, `npm audit --json`) must use
+    `merge_stderr=False`: both routinely write a human-readable warning or
+    summary line to stderr even on success (e.g. pip-audit's own "Found N
+    known vulnerabilities" line, or a venv-relocation warning on Windows),
+    and folding that text into the same stream corrupts the JSON, making
+    `json.loads` raise and the parser silently return zero findings --
+    exactly the failure mode that let real vulnerabilities go undetected
+    before this was split out.
+    """
     process = await asyncio.create_subprocess_shell(
         command,
         cwd=str(cwd),
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+        stderr=asyncio.subprocess.STDOUT if merge_stderr else asyncio.subprocess.PIPE,
     )
     try:
         stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
@@ -514,7 +534,9 @@ async def run_scan(
         await notify("running linter", 55)
         if venv_python:
             lint_outcome = await _run(
-                f'"{venv_python}" -m ruff check --output-format=json .', cwd=app_dir
+                f'"{venv_python}" -m ruff check --output-format=json .',
+                cwd=app_dir,
+                merge_stderr=False,
             )
             drafts.extend(parse_ruff_json(lint_outcome.output))
         else:
@@ -523,7 +545,9 @@ async def run_scan(
     if venv_python:
         await notify("running type checker", 70)
         type_outcome = await _run(
-            f'"{venv_python}" -m mypy . --ignore-missing-imports --output json', cwd=app_dir
+            f'"{venv_python}" -m mypy . --ignore-missing-imports --output json',
+            cwd=app_dir,
+            merge_stderr=False,
         )
         drafts.extend(parse_mypy_json(type_outcome.output))
 
@@ -534,10 +558,13 @@ async def run_scan(
             f'"{venv_python}" -m pip_audit {audit_target} --format json',
             cwd=app_dir,
             timeout=INSTALL_TIMEOUT_SECONDS,
+            merge_stderr=False,
         )
         drafts.extend(parse_pip_audit_json(audit_outcome.output))
     elif app.language == "javascript" and (app_dir / "package.json").exists():
-        audit_outcome = await _run("npm audit --json", cwd=app_dir, timeout=INSTALL_TIMEOUT_SECONDS)
+        audit_outcome = await _run(
+            "npm audit --json", cwd=app_dir, timeout=INSTALL_TIMEOUT_SECONDS, merge_stderr=False
+        )
         drafts.extend(parse_npm_audit_json(audit_outcome.output))
 
     return await _finish_scan(session, app, drafts, tests_passed, skipped, notify)
@@ -587,7 +614,9 @@ async def _run_static_only_scan(
         await notify("running linter (static-only)", 40)
         venv_python = await _ensure_app_venv(app_dir)
         lint_outcome = await _run(
-            f'"{venv_python}" -m ruff check --output-format=json .', cwd=app_dir
+            f'"{venv_python}" -m ruff check --output-format=json .',
+            cwd=app_dir,
+            merge_stderr=False,
         )
         drafts.extend(parse_ruff_json(lint_outcome.output))
 
@@ -597,12 +626,15 @@ async def _run_static_only_scan(
             f'"{venv_python}" -m pip_audit {audit_target} --format json',
             cwd=app_dir,
             timeout=INSTALL_TIMEOUT_SECONDS,
+            merge_stderr=False,
         )
         drafts.extend(parse_pip_audit_json(audit_outcome.output))
     elif app.language == "javascript" and has_package_json:
         skipped.append("lint: skipped: static-only scan (lint may need installed node_modules)")
         await notify("checking dependencies for vulnerabilities (static-only)", 80)
-        audit_outcome = await _run("npm audit --json", cwd=app_dir, timeout=INSTALL_TIMEOUT_SECONDS)
+        audit_outcome = await _run(
+            "npm audit --json", cwd=app_dir, timeout=INSTALL_TIMEOUT_SECONDS, merge_stderr=False
+        )
         drafts.extend(parse_npm_audit_json(audit_outcome.output))
     else:
         skipped.append("lint: skipped: static-only scan, no supported manifest for this language")
