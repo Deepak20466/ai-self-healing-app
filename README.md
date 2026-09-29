@@ -314,6 +314,56 @@ separate job in that workflow, gated on a `PYPI_API_TOKEN` repo secret
 (skipped cleanly if unset — the same pattern `deploy.yml` already uses for
 `DEPLOY_HOST`).
 
+## Use with GitHub Copilot
+
+mcp-pod (port 8003) speaks the standard MCP streamable-HTTP protocol, so any
+MCP-aware client can use it — not just Claude Code. `.vscode/mcp.json`
+registers it for **GitHub Copilot Chat's Agent mode** in VS Code:
+
+```json
+{
+  "servers": {
+    "selfheal": {
+      "type": "http",
+      "url": "http://127.0.0.1:8003/mcp"
+    }
+  }
+}
+```
+
+Setup:
+
+1. `selfheal up` (or `python -m cli.main up`) to start the 4 pods — mcp-pod
+   must be listening on `127.0.0.1:8003` before Copilot Chat connects.
+2. Open this repo in VS Code with a recent GitHub Copilot Chat extension
+   (MCP support in Agent mode). VS Code should auto-discover
+   `.vscode/mcp.json`; if it doesn't, run **MCP: List Servers** from the
+   command palette and start `selfheal` manually.
+3. Switch Copilot Chat to **Agent mode** and ask it something that needs a
+   tool call.
+
+No secrets live in `.vscode/mcp.json` — mcp-pod has no auth of its own (see
+CLAUDE.md: it trusts being reachable only from the same host as the
+healer), and the same server-side guardrails apply regardless of which
+client is calling it: `propose_patch`'s write scope is still derived from
+the heal_job's own `app_id`/type in the DB, and `trigger_rollback`/
+`cancel_workflow` still require a confirmation token that only the chat
+layer can issue — a client typing "yes" into Copilot Chat does not, by
+itself, produce one.
+
+Example questions to try in Agent mode:
+
+- "What open errors does the self-healing system have right now?"
+- "Show me the metrics — MTTR, fix success rate, cost per fix."
+- "Why did CI fail on PR #N?"
+- "List recent workflow runs for this repo."
+
+**Not yet verified live against a real Copilot Chat session** — the config
+is written to the documented VS Code MCP schema and validated as JSON, but
+whether GitHub Copilot Chat actually lists and calls `selfheal`'s tools has
+not been confirmed in this session. Try it and report back; this note will
+be updated to "verified live" only once that's confirmed.
+
 ## Running the pods
 
 Equivalent to `selfheal up`, for reference or debugging a single pod:

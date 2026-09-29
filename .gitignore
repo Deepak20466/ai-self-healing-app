@@ -27,6 +27,7 @@ connected_apps/
 
 .vscode/*
 !.vscode/extensions.json
+!.vscode/mcp.json
 .idea/
 
 *.log
