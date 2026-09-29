@@ -1119,6 +1119,39 @@ async def check_any_language(report: Report) -> None:
         )
 
 
+def check_remote_ci_poll_wired(report: Report) -> None:
+    """Structural check only, never invokes the CLI or a real GitHub call --
+    `healer/remote_ci_poll.py` (the remote-verify PR CI polling/retry loop)
+    imports cleanly, exposes the functions the background loop and its
+    tests depend on, and is actually started in `healer/app.py`'s lifespan
+    (not just written and never wired in -- confirmed by reading the
+    lifespan source, not assumed). The real polling/retry behavior against
+    a live connected repo's real CI is unverified -- see VERIFICATION.md's
+    "Built but not verified live" table; this is mocked-tests-only
+    (`tests/test_healer_remote_ci_poll.py`), same as this project's own
+    Codex/Gemini CLI backends' honesty precedent."""
+    code = (
+        "from healer.remote_ci_poll import ("
+        "poll_remote_verify_prs_once, run_remote_ci_poll_loop, "
+        "MAX_REMOTE_VERIFY_CI_ATTEMPTS); print('ok', MAX_REMOTE_VERIFY_CI_ATTEMPTS)"
+    )
+    r = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True, timeout=30
+    )
+    report.add(
+        "healer/remote_ci_poll.py imports and exposes its public functions",
+        "PASS" if r.returncode == 0 and r.stdout.startswith("ok") else "FAIL",
+        r.stdout.strip() or r.stderr[-200:],
+    )
+    app_source = (REPO_ROOT / "healer" / "app.py").read_text()
+    wired = "run_remote_ci_poll_loop" in app_source and "remote_ci_poll_task" in app_source
+    report.add(
+        "remote CI-poll loop started in healer/app.py's lifespan",
+        "PASS" if wired else "FAIL",
+        "found in lifespan" if wired else "not referenced in healer/app.py",
+    )
+
+
 def check_ai_backend_switching(report: Report) -> None:
     """Each AI_BACKEND value selects the right runner pair in a fresh process
     (nothing is invoked -- no CLI or API call), and a bad value fails loudly."""
@@ -1307,24 +1340,51 @@ def check_packaging(report: Report) -> None:
     shutil.rmtree(REPO_ROOT / "build", ignore_errors=True)
 
 
-def check_no_docker(report: Report) -> None:
-    hits = []
-    for pattern in (
-        "Dockerfile",
-        "dockerfile",
-        "docker-compose.yml",
-        "docker-compose.yaml",
-        "compose.yml",
-    ):
-        for path in REPO_ROOT.rglob(pattern):
-            if ".venv" in path.parts or ".git" in path.parts or "local_deploy_root" in path.parts:
-                continue
-            hits.append(str(path.relative_to(REPO_ROOT)))
+def check_docker_and_k8s(report: Report) -> None:
+    """Docker/Kubernetes support was added deliberately (`deploy/docker/`,
+    `deploy/helm/selfheal/`, `.github/workflows/k8s-ci.yml` -- README's
+    "Containers / Kubernetes" section, CLAUDE.md's k8s-ci log entries) --
+    this used to be a "no Docker files anywhere" check from before that
+    work existed, which would now FAIL against the repo's own real,
+    intentional Dockerfiles/Helm chart. Fixed to check the expected files
+    are present instead. Per this project's own standing safety rule,
+    Docker/kind/Helm/kubectl are never installed or run locally here -- the
+    real build+deploy+liveness-recreate proof only ever runs inside
+    `k8s-ci.yml` in GitHub Actions (see `check_github`'s CI-on-main check
+    for whether the latest run there was green)."""
+    expected = [
+        "deploy/docker/Dockerfile.app",
+        "deploy/docker/Dockerfile.sentinel",
+        "deploy/docker/Dockerfile.mcp",
+        "deploy/docker/Dockerfile.healer",
+        "deploy/helm/selfheal",
+        ".github/workflows/k8s-ci.yml",
+    ]
+    missing = [p for p in expected if not (REPO_ROOT / p).exists()]
     report.add(
-        "no Docker files anywhere in repo",
-        "PASS" if not hits else "FAIL",
-        "none found" if not hits else f"found: {hits}",
+        "Docker images + Helm chart + k8s-ci workflow files present",
+        "PASS" if not missing else "FAIL",
+        "all present" if not missing else f"missing: {missing}",
     )
+    r = _gh(
+        "run", "list", "--workflow", "k8s-ci.yml", "--limit", "1", "--json", "conclusion,status"
+    )
+    if r.returncode == 0 and r.stdout.strip():
+        try:
+            runs = json.loads(r.stdout)
+        except json.JSONDecodeError:
+            runs = []
+        if runs:
+            conclusion = runs[0].get("conclusion") or runs[0].get("status")
+            report.add(
+                "latest k8s-ci run (kind + Helm, GitHub Actions only)",
+                "PASS" if conclusion == "success" else "FAIL",
+                f"conclusion: {conclusion}",
+            )
+        else:
+            report.add("latest k8s-ci run", "SKIPPED", "no runs found via gh")
+    else:
+        report.add("latest k8s-ci run", "SKIPPED", "gh not available/authenticated")
 
 
 async def main() -> int:
@@ -1368,8 +1428,9 @@ async def main() -> int:
     await check_any_language(report)
     await check_terminal_v1_features(report, public_url, args.admin_password)
     check_ai_backend_switching(report)
+    check_remote_ci_poll_wired(report)
     check_packaging(report)
-    check_no_docker(report)
+    check_docker_and_k8s(report)
 
     # Criteria satisfied by existing, already-real evidence rather than a
     # fresh (subscription-costing) live run -- see CLAUDE.md Post-Phase-8.

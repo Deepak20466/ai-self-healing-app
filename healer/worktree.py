@@ -186,6 +186,32 @@ async def create_worktree_for_connected_app(name: str, branch: str, *, source_di
     return path
 
 
+async def create_worktree_for_connected_app_branch(
+    name: str, branch: str, *, source_dir: Path, github_remote_url: str
+) -> Path:
+    """Clone a connect-a-repo app's local checkout (fast, no network -- same
+    starting point as `create_worktree_for_connected_app`), then fetch and
+    check out an EXISTING branch from the app's own real GitHub remote.
+
+    Used by `healer/remote_ci_poll.py`'s CI-fix retry: it must build on the
+    exact commit a prior remote-verify attempt already pushed (the PR's own
+    branch), not a fresh branch off HEAD the way
+    `create_worktree_for_connected_app` always creates -- that branch only
+    exists on GitHub, never in the local `connected_apps/<name>/` checkout
+    (which was cloned once at connect-time and never re-fetches PR branches
+    on its own). `github_remote_url` is fetched directly by URL (no named
+    remote added) so a fetch writes to `FETCH_HEAD`, exactly the same
+    URL-as-remote pattern `commit_and_push`'s own `remote` parameter already
+    relies on for pushing.
+    """
+    WORKTREES_ROOT.mkdir(exist_ok=True)
+    path = WORKTREES_ROOT / name
+    await _run_git(["clone", str(source_dir), str(path)], cwd=WORKTREES_ROOT)
+    await _run_git(["fetch", github_remote_url, branch], cwd=path)
+    await _run_git(["checkout", "-B", branch, "FETCH_HEAD"], cwd=path)
+    return path
+
+
 async def remove_plain_clone(name: str) -> None:
     """Best-effort cleanup for a `create_worktree_for_connected_app` clone --
     not a real git-worktree of this repo, so `git worktree remove` doesn't

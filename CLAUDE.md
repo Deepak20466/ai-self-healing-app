@@ -3353,3 +3353,83 @@ knobs for free, but this chart's only consumer is an ephemeral,
 torn-down-every-run `kind` cluster in CI, so a plain Deployment+PVC+Secret
 is simpler, has zero external chart-repo dependency (nothing to 404 on
 Docker Hub again), and is easier to read end-to-end in one file.
+
+### 2026-09-29 — remote-verify PR CI polling + retry; docs coverage; v1.1.0
+
+Follow-up to "monorepo support + remote-verification fix mode": until this
+session, nothing in this codebase ever checked back on how a remote-verify
+PR's real CI run turned out unless the connected repo happened to notify
+this system's `/webhooks/ci` itself (an opt-in wiring step). Built
+`healer/remote_ci_poll.py` -- a pull-based poller (same background-loop
+shape as `healer/automerge.py`'s merge poller, started alongside it in
+`healer/app.py`'s lifespan) that finds every heal_job at `PR_OPENED`
+opened via `run_heal_job_remote_verify` (identified via that function's
+own `pr_opened` audit_log row, `details.remote_verify: True` -- no schema
+change), polls the PR head commit's real check-run status
+(`GitHubClient.list_check_runs`, already existed for `automerge.py`), and
+on a real failure (not pending, not green) pushes ONE retry fix to the
+SAME PR branch. `healer/worktree.py` gained
+`create_worktree_for_connected_app_branch` (clone the app's local checkout,
+then fetch+checkout the existing branch from its real GitHub remote by URL
+-- the branch only exists on GitHub, never in the connect-time local
+clone) for this, since the existing `create_worktree_for_connected_app`
+always creates a brand-new branch off HEAD. Capped at 2 total attempts per
+PR via the job's own `attempt_count` (not
+`circuit_breaker.ci_fix_attempt_count_for_pr`, which is scoped to
+`HealJobType.CI_FAILURE` rows specifically and this retry reuses the job's
+original `runtime_error`/`contract_violation` row). Never auto-merges
+(inherits the `auto_merge_override = False` `run_heal_job_remote_verify`
+already set), write-scope/patch-anti-cheat guardrails unchanged (same
+`propose_patch`/`run_tests` MCP tools). 7 new tests
+(`tests/test_healer_remote_ci_poll.py`), same "fake CLI response applies a
+real `git apply`+push to a throwaway local bare repo, respx for GitHub"
+pattern `test_healer_remote_verify.py` established.
+
+**Honesty, stated plainly**: mocked-tests-only, never run against a real
+connected repo's real GitHub Actions failure -- same caveat this
+project's Codex/Gemini CLI backends carry. See `docs/INTERVIEW_PREP.md`
+section 6c and `VERIFICATION.md`'s "Built but not verified live" table.
+
+**Docs coverage pass** (`docs/INTERVIEW_PREP.md`, `VERIFICATION.md`,
+`scripts/verify_all.py`): monorepo support, remote-verification,
+`selfheal prepare`/`--onboard`/`--suggest`/`selfheal audit`, and this
+session's remote-CI-polling addition were already covered from the prior
+session's own docs pass -- added the new 6c subsection and a
+`VERIFICATION.md` row for the new module, plus a structural
+`check_remote_ci_poll_wired` in `verify_all.py` (imports the module,
+confirms it's actually referenced in `healer/app.py`'s lifespan -- never
+invokes the CLI or a real GitHub call, same "structural, not live" pattern
+`check_ai_backend_switching` already uses for backend selection).
+
+**Real, unrelated bug found and fixed while doing the docs pass**:
+`scripts/verify_all.py`'s `check_no_docker` still asserted "no Docker files
+anywhere in repo" -- a leftover from before this project added Docker/
+Kubernetes support (`deploy/docker/`, `deploy/helm/selfheal/`,
+`.github/workflows/k8s-ci.yml`, README's "Containers / Kubernetes"
+section) and would now FAIL against this repo's own real, intentional
+Dockerfiles. Replaced with `check_docker_and_k8s`: confirms the expected
+Docker/Helm/k8s-ci files are present, and (via `gh run list --workflow
+k8s-ci.yml`) that the latest real k8s-ci GitHub Actions run was green --
+still never installs/runs Docker/kind/Helm/kubectl locally, per this
+project's own standing convention.
+
+**`docs/demo-terminal.{gif,mp4}` update (blocked, not attempted)**:
+`scripts/record_terminal_demo.py`'s command list is `up, login, status,
+apps, scan, errors, chat, prs, down` -- `selfheal audit` and `selfheal
+prepare <app>` are not recorded. Re-recording needs a live, authenticated
+run (`DEMO_ADMIN_PASSWORD` + real pods), and this session was explicitly
+not given the admin password -- correctly not attempted. Left as a clearly
+flagged follow-up rather than guessed at.
+
+**CHANGELOG.md added** (new file) summarizing what's shipped since v1.0.0
+per this file's own phase log (monorepo support, remote-verification fix
+mode, `selfheal audit`/suggest mode/onboarding-prepare, GitHub Copilot MCP
+interop, AI-chain dedup fix, global credential scrubbing, Docker images +
+Kubernetes-tested CI, and this session's remote-CI-polling addition).
+`pyproject.toml` version bumped `1.0.0` -> `1.1.0`.
+
+`ruff check .`/`ruff format --check .` clean repo-wide. `mypy core
+sentinel mcp_server healer cli` (strict) clean. Full `pytest` run --
+result and any v1.1.0 tag/release status recorded in this same session's
+follow-up (see git log / GitHub releases for the final outcome, since this
+paragraph was written before that run completed).

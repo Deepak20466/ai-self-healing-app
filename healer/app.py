@@ -59,6 +59,7 @@ from healer.findings_actions import maybe_auto_fix_high_severity, request_fix_fo
 from healer.job_progress import recent_job_progress, run_progress_broadcaster
 from healer.mcp_client import MCPToolClient, ReconnectingMCPToolClient, connect_http
 from healer.onboarding import open_onboarding_pull_request
+from healer.remote_ci_poll import run_remote_ci_poll_loop
 from healer.worker import run_worker
 from mcp_server.github_client import GitHubClient, GitHubClientError
 from mcp_server.sandbox import REPO_ROOT
@@ -99,10 +100,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     worker_task = asyncio.create_task(run_worker())
     progress_task = asyncio.create_task(run_progress_broadcaster(_socket_broadcast))
     automerge_task = asyncio.create_task(run_auto_merge_loop())
+    remote_ci_poll_task = asyncio.create_task(run_remote_ci_poll_loop())
     logger.info("healer_pod_started", mcp_url=mcp_url)
     try:
         yield
     finally:
+        remote_ci_poll_task.cancel()
+        try:
+            await remote_ci_poll_task
+        except asyncio.CancelledError:
+            pass
         automerge_task.cancel()
         try:
             await automerge_task

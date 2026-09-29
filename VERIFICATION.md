@@ -60,6 +60,7 @@ the tunnel-and-login-gated checks below are SKIPPED, not FAILED) —
 | Connected-repo "Fix" PR and onboarding PR | Only the enqueue step was run live in an earlier session; no real fix PR on an external repo |
 | Scheduled health-check workflow | Needs a public URL; skips cleanly without one |
 | `selfheal prepare`/`--onboard`/`--suggest`/`selfheal audit` (monorepo support, "make repo fixable") | Unit- and integration-tested (mocked AI/GitHub, real git worktrees/`git apply`/`run_tests` round trip) -- see the pending live demo run against a real connected repo for real-world confirmation |
+| Remote-verify PR CI polling + retry (`healer/remote_ci_poll.py`) | Mocked-tests only (respx for GitHub, a scripted fake CLI response applying a real `git apply`+push to a throwaway local bare repo, same pattern as `test_healer_remote_verify.py`) -- never run against a real connected repo's real GitHub Actions failure; needs a real connected repo with heavy dependencies and a real CI failure on its PR to verify live |
 
 ## ❌ Not built
 

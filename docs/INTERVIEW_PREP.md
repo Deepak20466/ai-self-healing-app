@@ -320,6 +320,52 @@ instead (`healer/agent_free.py` already had this fix for a different
 reason — `_touched_paths` — reused here and backported into
 `healer/remote_verify.py` too once the same bug was caught there).
 
+### 6c. Remote-verify PR CI polling and one retry
+
+`healer/remote_verify.py` opens a PR without a local test run and leans on
+the connected repo's own GitHub Actions to prove the fix — but until this
+follow-up, nothing in this project ever checked back on how that CI run
+actually turned out unless the connected repo happened to notify this
+system's `/webhooks/ci` itself (an opt-in wiring step, same as
+`healer/onboarding.py`'s error-reporting snippet). `healer/remote_ci_poll.py`
+closes that gap with a pull-based poller instead: same background-loop
+shape as `healer/automerge.py`'s merge poller, it finds every heal_job
+sitting at `PR_OPENED` that was opened via `run_heal_job_remote_verify`
+(identified without a schema change, by that function's own `pr_opened`
+audit_log row carrying `details.remote_verify: True`), and calls the same
+`GET .../commits/{sha}/check-runs` GitHub API `automerge.py`'s poller
+already uses to read the PR head commit's real CI status.
+
+On a real failure (not pending, not green) it pushes exactly one retry fix
+to the *same* PR branch — `healer/worktree.py:
+create_worktree_for_connected_app_branch` clones the app's local checkout
+and then fetches+checks out the existing branch from the app's real GitHub
+remote (the branch only exists on GitHub, not in the connect-time local
+clone), and the retry is driven by the same Claude Code CLI runner
+(`agent_free.run_claude_cli`) remote-verify mode already uses, given the
+failing check run's own trimmed log (`mcp_server/log_trim.py`, reused) as
+context. Capped at 2 total attempts per PR — counted via the job's own
+`attempt_count` column (already at 1 the moment its first PR opened), not
+`healer/circuit_breaker.py`'s `ci_fix_attempt_count_for_pr` (that helper is
+scoped to `HealJobType.CI_FAILURE` rows specifically, and this retry
+reuses the job's original `runtime_error`/`contract_violation` row rather
+than creating a `ci_failure` one). Every existing guardrail still applies
+unchanged: write-scope stays limited to the app's own `local_repo_path`
+(via the same `propose_patch`/`run_tests` MCP tools), the patch anti-cheat
+checks still run, and `auto_merge_override` was already forced `False` the
+moment the first PR opened, so this retry path never needs to touch it —
+a remote-verify fix never auto-merges, CI-green retry or not. Exhausting
+the cap opens a needs-human-review issue and marks the job `failed`,
+mirroring the in-repo CI-fix loop's own exhausted-attempts behavior.
+
+**Honesty check**: this is implemented and covered by mocked/integration
+tests only (respx for GitHub, a scripted fake CLI response applying a real
+`git apply`+push to a throwaway local bare repo, following the exact
+pattern `tests/test_healer_remote_verify.py`/`tests/test_healer_ci_agent.py`
+already established) — it has never run against a real connected repo's
+real GitHub Actions failure. See `VERIFICATION.md`'s "Built but not
+verified live" table for the same caveat stated plainly.
+
 ### 7. Pluggable AI backends
 
 The system supports four interchangeable backends, selected by an
