@@ -1,0 +1,66 @@
+# A plain Postgres Deployment (official postgres:16-alpine image), not a
+# Helm subchart -- see values.yaml's comment on `postgresql:` for why.
+# No PersistentVolumeClaim: this is for an ephemeral, single-run CI
+# cluster torn down at the end of every workflow run, so ordinary
+# emptyDir-backed pod storage is fine.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: selfheal-postgres
+  labels: {app: selfheal-postgres}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: selfheal-postgres}
+  template:
+    metadata:
+      labels: {app: selfheal-postgres}
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: postgres
+          image: {{ .Values.postgresql.image | quote }}
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.username | quote }}
+            - name: POSTGRES_PASSWORD
+              value: {{ .Values.postgresql.password | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.database | quote }}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests: {{ toYaml .Values.postgresql.resources.requests | nindent 14 }}
+            limits: {{ toYaml .Values.postgresql.resources.limits | nindent 14 }}
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.postgresql.username | quote }}]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.postgresql.username | quote }}]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 12
+      volumes:
+        - name: pgdata
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: selfheal-postgres
+spec:
+  selector: {app: selfheal-postgres}
+  ports:
+    - port: 5432
+      targetPort: 5432

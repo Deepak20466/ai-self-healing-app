@@ -3,11 +3,11 @@ selfheal
 {{- end -}}
 
 {{- define "selfheal.postgresHost" -}}
-{{ .Release.Name }}-postgresql
+selfheal-postgres
 {{- end -}}
 
 {{- define "selfheal.databaseUrl" -}}
-postgresql+asyncpg://{{ .Values.postgresql.auth.username }}:{{ .Values.postgresql.auth.password }}@{{ include "selfheal.postgresHost" . }}:5432/{{ .Values.postgresql.auth.database }}
+postgresql+asyncpg://{{ .Values.postgresql.username }}:{{ .Values.postgresql.password }}@{{ include "selfheal.postgresHost" . }}:5432/{{ .Values.postgresql.database }}
 {{- end -}}
 
 {{- define "selfheal.image" -}}

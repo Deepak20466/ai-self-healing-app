@@ -12,19 +12,26 @@ image:
     mcp: selfheal-mcp
     healer: selfheal-healer
 
+# A plain Deployment using the official postgres:16-alpine image, not a
+# Helm subchart -- an earlier version of this chart depended on the Bitnami
+# `postgresql` subchart, but Bitnami removed the specific free-tier image
+# tag that chart version pinned (docker.io/bitnami/postgresql:17.6.0-
+# debian-12-r4 404s as of this session, part of Bitnami's move of older
+# free tags behind a paid "Secure Images" registry) -- confirmed live via a
+# real k8s-ci run, not assumed. `postgres:16-alpine` is small, official,
+# and has no such registry-migration risk; simplest robust option for an
+# ephemeral, no-persistence CI cluster.
 postgresql:
-  enabled: true
-  auth:
-    username: selfheal
-    password: selfheal
-    database: selfheal
-  primary:
-    persistence:
-      enabled: false
-    resources:
-      requests:
-        cpu: 100m
-        memory: 128Mi
+  image: "postgres:16-alpine"
+  username: selfheal
+  password: selfheal
+  database: selfheal
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
 
 env:
   environment: development

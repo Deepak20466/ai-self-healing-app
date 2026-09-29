@@ -52,15 +52,18 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@v4
 
-      - name: Helm dependency update
-        run: helm dependency update deploy/helm/selfheal
-
       - name: Helm install
         run: |
           set -euo pipefail
           helm install selfheal deploy/helm/selfheal \
             --wait --timeout 8m \
             --set image.tag=ci
+
+      - name: Wait for the migration Job to complete
+        run: |
+          set -euo pipefail
+          kubectl wait --for=condition=complete job/selfheal-migrate --timeout=180s
+          kubectl logs job/selfheal-migrate --tail=100
 
       - name: Wait for all pods Ready
         run: |
@@ -86,7 +89,7 @@ jobs:
           sleep 2
 
           echo "--- confirming sentinel-pod captured the error, via the real DB ---"
-          PG_POD=$(kubectl get pod -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}')
+          PG_POD=$(kubectl get pod -l app=selfheal-postgres -o jsonpath='{.items[0].metadata.name}')
           for i in $(seq 1 15); do
             COUNT=$(kubectl exec "$PG_POD" -- env PGPASSWORD=selfheal psql -U selfheal -d selfheal -tA \
               -c "select count(*) from errors where exception_type='ZeroDivisionError';")
@@ -149,7 +152,7 @@ jobs:
           kubectl logs -l app=selfheal-sentinel --tail=200 || true
           kubectl logs -l app=selfheal-mcp --tail=200 || true
           kubectl logs -l app=selfheal-healer --tail=200 || true
-          kubectl logs -l app.kubernetes.io/name=postgresql --tail=200 || true
+          kubectl logs -l app=selfheal-postgres --tail=200 || true
 
       - name: Delete kind cluster
         if: always()
