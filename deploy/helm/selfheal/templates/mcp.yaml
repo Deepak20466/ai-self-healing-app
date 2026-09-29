@@ -1,0 +1,51 @@
+# mcp-pod has no /healthz (see Dockerfile.mcp's comment) -- probes use a
+# plain TCP socket check on its port instead of an httpGet, since even a
+# 4xx httpGet still requires kubelet to correctly parse an HTTP response
+# for a protocol (MCP streamable-HTTP) it has no business understanding;
+# tcpSocket only needs the port to accept the connection, which is exactly
+# "the process is up and listening" -- the actual thing being verified.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: selfheal-mcp
+  labels: {app: selfheal-mcp}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: selfheal-mcp}
+  template:
+    metadata:
+      labels: {app: selfheal-mcp}
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: mcp
+          image: {{ include "selfheal.image" (dict "Values" .Values "pod" "mcp") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.mcp.port }}
+          env:
+            {{- include "selfheal.commonEnv" . | nindent 12 }}
+          resources:
+            requests: {{ toYaml .Values.resources.requests | nindent 14 }}
+            limits: {{ toYaml .Values.resources.limits | nindent 14 }}
+          readinessProbe:
+            tcpSocket: {port: {{ .Values.mcp.port }}}
+            initialDelaySeconds: {{ .Values.probes.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.periodSeconds }}
+            failureThreshold: {{ .Values.probes.failureThreshold }}
+          livenessProbe:
+            tcpSocket: {port: {{ .Values.mcp.port }}}
+            initialDelaySeconds: {{ .Values.probes.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.periodSeconds }}
+            failureThreshold: {{ .Values.probes.failureThreshold }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: selfheal-mcp
+spec:
+  selector: {app: selfheal-mcp}
+  ports:
+    - port: {{ .Values.mcp.port }}
+      targetPort: {{ .Values.mcp.port }}

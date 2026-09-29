@@ -1,0 +1,60 @@
+# Runs `alembic upgrade head` once, against the in-chart Postgres
+# Deployment's own Service (deploy/helm/selfheal/templates/postgres.yaml),
+# before the app pods are expected to actually work.
+#
+# This is a post-install/post-upgrade hook, not pre-install: a pre-install
+# hook runs before ANY of the release's own resources exist, including the
+# Postgres Deployment itself -- there would be nothing to
+# connect to yet. Running post-install instead means the pod Deployments
+# below are created in the same `helm install` and may crash-loop a few
+# times waiting for tables that don't exist until this Job finishes; their
+# own `restartPolicy: Always` (the Kubernetes default, set explicitly per
+# the task) is exactly the mechanism that makes them recover once it does --
+# a real, small demonstration of "Kubernetes restarts crashed pods" in its
+# own right, not just noise to route around.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: selfheal-migrate
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ include "selfheal.image" (dict "Values" .Values "pod" "app") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - python
+            - -c
+            - |
+              import socket, time
+              host, port = "{{ include "selfheal.postgresHost" . }}", 5432
+              for _ in range(60):
+                  try:
+                      socket.create_connection((host, port), timeout=2).close()
+                      break
+                  except OSError:
+                      time.sleep(2)
+              else:
+                  raise SystemExit("postgres never became reachable")
+      containers:
+        - name: migrate
+          image: {{ include "selfheal.image" (dict "Values" .Values "pod" "app") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Migrate the schema, then seed the deterministic demo dataset
+          # (apps/target_app/seed_data.py via scripts/seed_demo.py) --
+          # without it, /trigger/zero hits `assert item is not None` (no
+          # seeded item) instead of the actual seeded ZeroDivisionError bug,
+          # which is exactly the bug this chart's own smoke test found on a
+          # real run: sentinel captured a real AssertionError, but the smoke
+          # test was querying for ZeroDivisionError specifically and never
+          # found it. Idempotent (safe to rerun on `helm upgrade`).
+          command: ["sh", "-c", "python -m alembic upgrade head && python scripts/seed_demo.py"]
+          env:
+            {{- include "selfheal.commonEnv" . | nindent 12 }}

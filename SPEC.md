@@ -2,6 +2,11 @@
 
 > **Implementation status:** see README "Roadmap" and VERIFICATION.md. This spec is the original target; the cloud-VM deploy, the 300 MB idle-RAM target (measured ~480 MB on Windows, unmeasured on Linux) and live use of Codex/Gemini backends are not verified.
 >
+> **The system is also containerized (Docker) and Kubernetes-tested (`kind` +
+> Helm) in CI on every push**, on top of — not instead of — the native-process
+> deployment this spec describes; see README.md's "Containers / Kubernetes"
+> section and CLAUDE.md's k8s-ci log entry.
+>
 > **v1.0 supersedes the WEB UI described below with a terminal `selfheal` CLI**
 > (Typer + Rich) talking to the same JSON/Socket.io API, which now binds to
 > `127.0.0.1` only. There is no browser-facing login/chat/dashboard page and

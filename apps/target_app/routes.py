@@ -13,6 +13,8 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.target_app import bugs, repository, seed_data
@@ -31,8 +33,19 @@ router = APIRouter()
 
 
 @router.get("/healthz")
-async def healthz() -> dict[str, str]:
-    return {"status": "ok", "pod": "app"}
+async def healthz(session: AsyncSession = Depends(get_db)) -> JSONResponse:
+    # A real, cheap DB round trip, not just "the process is up" -- app-pod
+    # is useless without its database, and a Kubernetes readiness probe
+    # that only checks the process would mark a pod Ready before it can
+    # actually serve traffic (e.g. while Postgres itself is still starting).
+    # See deploy/helm/selfheal for why this matters there specifically.
+    try:
+        await session.execute(text("SELECT 1"))
+    except Exception:
+        return JSONResponse(
+            status_code=503, content={"status": "unavailable", "pod": "app", "reason": "database"}
+        )
+    return JSONResponse(status_code=200, content={"status": "ok", "pod": "app"})
 
 
 # --- Resource routes (normal traffic + contract checks) -----------------------

@@ -1,0 +1,51 @@
+# mcp-pod: the MCP tool server (streamable-HTTP transport at /mcp).
+#
+# No `/healthz` route exists on this pod (CLAUDE.md's Phase 7 log documents
+# this gap at length: mcp.run(transport="streamable-http", ...) doesn't
+# expose a way to bolt on an extra REST route). The HEALTHCHECK below (and
+# the Helm chart's probes) instead treat *any* HTTP response from `/mcp`,
+# even a 4xx, as "the process is up and listening" -- the same standard
+# scripts/smoke_test.py already uses.
+#
+# MCP_HOST=0.0.0.0 is required in this image specifically: mcp_server/
+# server.py's default (127.0.0.1) only accepts connections from inside the
+# same network namespace, which is fine for the native/systemd deployment
+# (every pod runs on the same host) but would make this pod unreachable
+# from a Kubernetes Service, which always connects to the Pod's real
+# interface, never loopback.
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY pyproject.toml README.md LICENSE ./
+COPY core ./core
+COPY apps ./apps
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
+COPY sentinel ./sentinel
+COPY mcp_server ./mcp_server
+COPY healer ./healer
+COPY cli ./cli
+COPY scripts ./scripts
+RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir .
+
+FROM python:3.11-slim AS runtime
+
+RUN groupadd --system app && useradd --system --gid app --create-home --home-dir /home/app app
+COPY --from=builder /opt/venv /opt/venv
+WORKDIR /app
+COPY --from=builder /build /app
+COPY deploy/docker/mcp_healthcheck.py /app/mcp_healthcheck.py
+RUN chown -R app:app /app /home/app
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    MCP_HOST=0.0.0.0
+
+USER app
+EXPOSE 8003
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
+    CMD python /app/mcp_healthcheck.py
+
+CMD ["python", "-m", "mcp_server.http_main"]

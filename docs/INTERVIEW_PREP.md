@@ -121,11 +121,15 @@ main working directory), and every tool call is logged to `audit_log`
 
 ### 3. The Postgres-based job queue, and why no Redis
 
-SPEC.md's hard constraint is: no Docker, no Redis, no Celery, no Kafka —
+SPEC.md's original hard constraint was: no Redis, no Celery, no Kafka —
 Postgres is the only infrastructure dependency, and the whole system (minus
-Postgres) has to idle under 300MB. Given that, adding Redis just to get a
-job queue would mean running a whole second piece of infrastructure to do
-something Postgres can already do natively.
+Postgres) has to idle under 300MB running natively. Given that, adding Redis
+just to get a job queue would mean running a whole second piece of
+infrastructure to do something Postgres can already do natively. (The
+project is also, separately, containerized and Kubernetes-tested in CI —
+see README.md's "Containers / Kubernetes" section — but that's an additional
+deployment target, not a change to this low-RAM, minimal-infrastructure
+design.)
 
 The queue is `core/queue.py`. Enqueuing is a normal `INSERT` into
 `heal_jobs` plus `SELECT pg_notify(channel, payload)` (parameterized, so the

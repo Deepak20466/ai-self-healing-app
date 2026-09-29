@@ -1,0 +1,182 @@
+# Builds all 4 pods as Docker images, stands up an ephemeral `kind` cluster,
+# deploys the Helm chart (deploy/helm/selfheal), and runs smoke + resilience
+# tests -- entirely on the GitHub-hosted runner. No Docker/Kubernetes tooling
+# is ever installed or run on a developer's own machine for this project;
+# see CLAUDE.md's "Two layers of self-healing" note in README.md.
+#
+# Rule learned the hard way in this repo's own release.yml (see CLAUDE.md's
+# 2026-09-29 log entry): never put `secrets.*` directly inside an `if:`
+# condition anywhere in a workflow -- it isn't a valid named-value there and
+# can make the ENTIRE workflow file fail to register (0 jobs scheduled, no
+# logs). This workflow has no secrets-gated steps, but keep that rule in
+# mind if one is ever added.
+name: k8s-ci
+
+on:
+  push:
+    branches: ["main", "k8s-ci-dev"]
+  pull_request:
+    branches: ["main"]
+
+concurrency:
+  group: k8s-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  k8s:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build pod images
+        run: |
+          set -euo pipefail
+          docker build -f deploy/docker/Dockerfile.app -t selfheal-app:ci .
+          docker build -f deploy/docker/Dockerfile.sentinel -t selfheal-sentinel:ci .
+          docker build -f deploy/docker/Dockerfile.mcp -t selfheal-mcp:ci .
+          docker build -f deploy/docker/Dockerfile.healer -t selfheal-healer:ci .
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          install_only: false
+          wait: 120s
+          cluster_name: kind
+
+      - name: Load images into kind
+        run: |
+          set -euo pipefail
+          kind load docker-image selfheal-app:ci selfheal-sentinel:ci selfheal-mcp:ci selfheal-healer:ci
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Helm lint
+        run: helm lint deploy/helm/selfheal
+
+      - name: Helm template (dry-run render, catches templating errors before install)
+        run: helm template selfheal deploy/helm/selfheal --set image.tag=ci > /tmp/rendered.yaml
+
+      - name: Helm install
+        run: |
+          set -euo pipefail
+          helm install selfheal deploy/helm/selfheal \
+            --wait --timeout 10m \
+            --set image.tag=ci
+
+      - name: Wait for the migration Job to complete
+        run: |
+          set -euo pipefail
+          kubectl wait --for=condition=complete job/selfheal-migrate --timeout=180s
+          kubectl logs job/selfheal-migrate --tail=100
+
+      - name: Wait for all pods Ready
+        run: |
+          set -euo pipefail
+          kubectl wait --for=condition=Ready pod -l app=selfheal-app --timeout=180s
+          kubectl wait --for=condition=Ready pod -l app=selfheal-sentinel --timeout=180s
+          kubectl wait --for=condition=Ready pod -l app=selfheal-mcp --timeout=180s
+          kubectl wait --for=condition=Ready pod -l app=selfheal-healer --timeout=180s
+          kubectl get pods -o wide
+
+      - name: Smoke test -- trigger a seeded bug and confirm sentinel captured it
+        run: |
+          set -euo pipefail
+          kubectl port-forward svc/selfheal-app 8001:8001 >/tmp/pf-app.log 2>&1 &
+          APP_PF_PID=$!
+          sleep 3
+          echo "--- GET /healthz ---"
+          curl -sf http://127.0.0.1:8001/healthz
+          echo
+          echo "--- GET /trigger/zero (expected to 500 -- it's the seeded bug) ---"
+          curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8001/trigger/zero || true
+          kill $APP_PF_PID || true
+          sleep 2
+
+          echo "--- confirming sentinel-pod captured the error, via the real DB ---"
+          PG_POD=$(kubectl get pod -l app=selfheal-postgres -o jsonpath='{.items[0].metadata.name}')
+          for i in $(seq 1 15); do
+            COUNT=$(kubectl exec "$PG_POD" -- env PGPASSWORD=selfheal psql -U selfheal -d selfheal -tA \
+              -c "select count(*) from errors where exception_type='ZeroDivisionError';")
+            echo "attempt $i: captured ZeroDivisionError rows = $COUNT"
+            if [ "$COUNT" -ge "1" ]; then
+              echo "SMOKE TEST PASSED: sentinel captured the seeded bug"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "SMOKE TEST FAILED: sentinel never recorded the triggered error"
+          echo "--- errors table, by exception_type (diagnostic) ---"
+          kubectl exec "$PG_POD" -- env PGPASSWORD=selfheal psql -U selfheal -d selfheal -c \
+            "select exception_type, count(*) from errors group by exception_type;" || true
+          kubectl logs -l app=selfheal-sentinel --tail=200
+          exit 1
+
+      - name: Pod-kill recovery test -- app-pod
+        run: |
+          set -euo pipefail
+          OLD_POD=$(kubectl get pod -l app=selfheal-app -o jsonpath='{.items[0].metadata.name}')
+          echo "deleting $OLD_POD"
+          kubectl delete pod "$OLD_POD"
+          kubectl wait --for=condition=Ready pod -l app=selfheal-app --timeout=90s
+          NEW_POD=$(kubectl get pod -l app=selfheal-app -o jsonpath='{.items[0].metadata.name}')
+          echo "recreated as $NEW_POD"
+          if [ "$OLD_POD" = "$NEW_POD" ]; then
+            echo "POD-KILL TEST FAILED: same pod name still present"
+            exit 1
+          fi
+          echo "POD-KILL RECOVERY TEST PASSED"
+
+      - name: Liveness/restart test -- sentinel-pod
+        run: |
+          set -euo pipefail
+          # Kill the actual uvicorn process, not PID 1 -- see
+          # deploy/docker/kill_process.py's docstring for why `kill -9 1`
+          # doesn't work in a container (a real k8s-ci run tried it first
+          # and restartCount never moved).
+          POD=$(kubectl get pod -l app=selfheal-sentinel -o jsonpath='{.items[0].metadata.name}')
+          BEFORE=$(kubectl get pod "$POD" -o jsonpath='{.status.containerStatuses[0].restartCount}')
+          echo "restartCount before: $BEFORE"
+          # Killing uvicorn necessarily kills the container's PID 1 (the
+          # `sh -c` wrapper exits once its foregrounded child dies), which
+          # tears down the exec stream out from under `kubectl exec` itself
+          # -- so this command legitimately exits non-zero (137) on success,
+          # not on failure. `|| true` so `set -e` doesn't abort the step
+          # before the actual pass/fail check below (the restartCount
+          # comparison) ever runs.
+          kubectl exec "$POD" -- python /app/kill_process.py uvicorn || true
+          sleep 5
+          kubectl wait --for=condition=Ready pod -l app=selfheal-sentinel --timeout=90s
+          AFTER=$(kubectl get pod "$POD" -o jsonpath='{.status.containerStatuses[0].restartCount}')
+          echo "restartCount after: $AFTER"
+          if [ "$AFTER" -le "$BEFORE" ]; then
+            echo "LIVENESS/RESTART TEST FAILED: restartCount did not increase"
+            exit 1
+          fi
+          echo "LIVENESS/RESTART TEST PASSED"
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          echo "::group::kubectl get pods -A"
+          kubectl get pods -A -o wide || true
+          echo "::endgroup::"
+          echo "::group::kubectl get events (sorted)"
+          kubectl get events --sort-by=.lastTimestamp -A || true
+          echo "::endgroup::"
+          echo "::group::kubectl describe pods"
+          kubectl describe pods || true
+          echo "::endgroup::"
+          for app in selfheal-app selfheal-sentinel selfheal-mcp selfheal-healer selfheal-postgres; do
+            echo "::group::kubectl logs -l app=$app"
+            kubectl logs -l app="$app" --tail=500 --all-containers || true
+            echo "::endgroup::"
+          done
+          echo "::group::helm status"
+          helm status selfheal || true
+          echo "::endgroup::"
+
+      - name: Delete kind cluster
+        if: always()
+        run: kind delete cluster

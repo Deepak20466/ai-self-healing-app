@@ -1,0 +1,13 @@
+apiVersion: v2
+name: selfheal
+description: >-
+  Helm chart for the selfheal AI self-healing system's 4 pods
+  (app/sentinel/mcp/healer) + Postgres, built for ephemeral, CI-only
+  (kind) verification -- not tuned for production HA. See
+  .github/workflows/k8s-ci.yml for how it's exercised, and CLAUDE.md's
+  "Two layers of self-healing" note in README.md for why this exists
+  alongside the systemd/Caddy deploy/ layout (Kubernetes restarts crashed
+  pods; the AI healer still fixes the underlying code bug).
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

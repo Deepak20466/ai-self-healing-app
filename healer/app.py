@@ -88,7 +88,7 @@ async def _socket_broadcast(event: str, payload: dict[str, Any]) -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     global _mcp_client
     notifier.set_socket_broadcaster(_socket_broadcast)
-    mcp_url = f"http://127.0.0.1:{settings.mcp_port}/mcp"
+    mcp_url = settings.mcp_client_url or f"http://127.0.0.1:{settings.mcp_port}/mcp"
     worker_task: asyncio.Task[None] | None = None
     mcp = ReconnectingMCPToolClient(lambda: connect_http(mcp_url))
     try:
