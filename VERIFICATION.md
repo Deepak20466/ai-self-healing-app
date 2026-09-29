@@ -36,6 +36,8 @@ the tunnel-and-login-gated checks below are SKIPPED, not FAILED) —
 | CI green on `main` | latest `ci.yml` run: success |
 | One real AI-produced fix PR (runtime/silent bug) | PR #10 (free mode, Claude Code CLI) |
 | One real AI CI-fix on a PR, end to end | PR #14 |
+| Remote-verification mode (`run_heal_job_remote_verify`), run live for the first time, against a real connected heavy-dependency repo | Ran twice (job 373, job 374) against `multi-agent-workspace`: routing, the real Claude CLI call, and the real GitHub call all worked; the AI itself didn't converge on a working diff within its turn budget, and surfaced a real crash bug in `healer/worker.py` (fixed — see CLAUDE.md 2026-09-29) confirmed fixed by the second live run failing the job cleanly instead of killing the worker |
+| Real-world bug fix (not planted) on a connected external repo | [multi-agent-workspace PR #1](https://github.com/Deepak20466/multi-agent-workspace/pull/1) — `cryptography>=49.0.0`, 3 real CVEs; target repo's own CI failed at an unrelated pre-existing step (`ModuleNotFoundError: No module named 'psycopg'`), not this diff — see README's "Proof: a real-world bug fix" section |
 | No Docker files in the repo | scan |
 | Packaging: `python -m build` produces a valid wheel + sdist (v1.0.0) | `ai_self_healing-1.0.0-{py3-none-any.whl,tar.gz}`; wheel installs and runs standalone in a throwaway venv (see CLAUDE.md Step 6) |
 | OTLP ingest: token required (401 without), JSON and gzipped protobuf accepted, error stored against the right app | verify_all |

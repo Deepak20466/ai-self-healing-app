@@ -3525,3 +3525,48 @@ would ever produce. Left as a documented, real, verified finding for a
 human (or a future session with time to add a finding category for
 "manually-reviewed logic bug") rather than force-fit it into a category
 that would mislabel it.
+
+### 2026-09-29 (cont'd) — real PR opened on multi-agent-workspace after token permissions were fixed
+
+Follow-up to the entry directly above. The user re-scoped the `GITHUB_TOKEN`
+fine-grained PAT to grant `multi-agent-workspace` real write access
+(Contents/Pull requests/Issues/Actions/Workflows: read/write). Verified
+this for real before touching anything: `GET /repos/.../multi-agent-workspace`
+now reports `permissions: {admin: true, maintain: true, push: true, ...}`
+(previously `push: false`), and a harmless create-then-delete-branch round
+trip via the Git Data API succeeded end to end.
+
+Given each failed AI attempt costs real money (~$3, confirmed: job 373 spent
+$2.92 real Claude subscription usage without producing a working diff) and
+per the user's explicit cost-control instruction, did **not** retry the
+PyPDF2 migration a third time. Instead made the simpler, already-identified
+real fix directly (no AI call): pinned `cryptography>=49.0.0` in
+`requirements.txt` (3 real CVEs -- PYSEC-2026-3552/3553/3554, including
+CVE-2026-69248, a real X.509 name-constraint bypass -- all found by the
+real, fixed `pip-audit` scan). Pushed via the now-working token and opened
+[**PR #1**](https://github.com/Deepak20466/multi-agent-workspace/pull/1)
+via the real GitHub API (`create_branch`/`create_pull_request` -- no local
+clone push needed for the branch creation, a plain `git push` was used
+instead since the file edit was more naturally done in the existing local
+clone).
+
+**Real CI result, watched live via `gh pr checks`/`gh run view --log-failed`,
+not assumed**: `ragas_eval.yml` **failed**, but at `Seed SQL eval database`
+-- `ModuleNotFoundError: No module named 'psycopg'` -- a step with zero
+relation to this PR's one-line dependency-floor change. Confirmed this is
+pre-existing repo/environment drift, not something this PR caused: the
+repo's `requirements.txt` pins almost nothing to an exact version, so a
+fresh `pip install -r requirements.txt` today resolves an entirely
+different dependency graph than it did at the *last time CI actually
+passed on `master`* (`gh run list --branch master`: the most recent
+green run was 2026-08-09, 7 weeks before this PR; several runs on master
+in between were already failing). `ragas_eval.yml`'s later steps also need
+`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` repo secrets for the RAGAS eval itself
+-- unrelated to this fix either way, and never reached this run since it
+failed earlier. **Never merged** (this project never merges PRs on repos it
+doesn't own, and CI is red regardless of the reason).
+
+README's "Proof" section and VERIFICATION.md were updated to reflect this
+real, honestly-reported outcome: a real vulnerability, a real minimal fix,
+a real PR, and real (if unrelated) CI failure -- not silently omitted, not
+overclaimed as "CI passed."

@@ -510,6 +510,32 @@ silently discarding a workflow's attempt to override its own reserved
 `GITHUB_*` env vars, and a worker busy-spin/starvation bug when the global
 hourly heal-job cap is open.
 
+## Proof: a real-world bug fix (not planted), on a repo this project doesn't own
+
+[**multi-agent-workspace PR #1**](https://github.com/Deepak20466/multi-agent-workspace/pull/1)
+— found by connecting a real, external, heavy-ML-dependency repo
+(`selfheal connect` / `POST /api/apps`) and scanning it for real. That
+scan surfaced a real bug in *this project's own scanner* first
+(`core/scanner.py` was silently swallowing every `pip-audit`/`npm audit`
+finding whenever the tool wrote anything to stderr — fixed, see CLAUDE.md's
+2026-09-29 log entry), which then correctly surfaced 16 real CVEs across 5
+packages in the connected repo's `requirements.txt`. The AI fix attempt for
+the most direct one (a PyPDF2 DoS) didn't converge within its turn budget
+on this large codebase and surfaced a second real bug in this project (an
+unhandled-exception crash in the worker's remote-verification dispatch path
+— also fixed, same log entry) — so the actual PR that shipped is a small,
+manually-verified dependency floor-pin instead: `cryptography>=49.0.0`,
+fixing three real advisories (PYSEC-2026-3552/3553/3554, including
+CVE-2026-69248, an X.509 name-constraint bypass). **Honest status**: the
+target repo's own CI failed on this PR, but at a step (`Seed SQL eval
+database`, `ModuleNotFoundError: No module named 'psycopg'`) that has
+nothing to do with this diff — the repo's unpinned `requirements.txt`
+means a fresh `pip install` today resolves differently than it did at that
+repo's last successful CI run (2026-08-09); that CI also needs
+`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` secrets for its later RAGAS-eval
+steps, unrelated to this fix either way. Never merged (this project never
+merges PRs on repos it doesn't own).
+
 ## Verification
 
 [**VERIFICATION.md**](VERIFICATION.md) — an automated verifier
