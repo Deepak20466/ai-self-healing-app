@@ -47,6 +47,14 @@ spec:
         - name: migrate
           image: {{ include "selfheal.image" (dict "Values" .Values "pod" "app") }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["python", "-m", "alembic", "upgrade", "head"]
+          # Migrate the schema, then seed the deterministic demo dataset
+          # (apps/target_app/seed_data.py via scripts/seed_demo.py) --
+          # without it, /trigger/zero hits `assert item is not None` (no
+          # seeded item) instead of the actual seeded ZeroDivisionError bug,
+          # which is exactly the bug this chart's own smoke test found on a
+          # real run: sentinel captured a real AssertionError, but the smoke
+          # test was querying for ZeroDivisionError specifically and never
+          # found it. Idempotent (safe to rerun on `helm upgrade`).
+          command: ["sh", "-c", "python -m alembic upgrade head && python scripts/seed_demo.py"]
           env:
             {{- include "selfheal.commonEnv" . | nindent 12 }}

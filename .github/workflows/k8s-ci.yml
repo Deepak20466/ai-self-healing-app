@@ -107,6 +107,9 @@ jobs:
             sleep 3
           done
           echo "SMOKE TEST FAILED: sentinel never recorded the triggered error"
+          echo "--- errors table, by exception_type (diagnostic) ---"
+          kubectl exec "$PG_POD" -- env PGPASSWORD=selfheal psql -U selfheal -d selfheal -c \
+            "select exception_type, count(*) from errors group by exception_type;" || true
           kubectl logs -l app=selfheal-sentinel --tail=200
           exit 1
 

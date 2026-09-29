@@ -14,6 +14,7 @@ COPY sentinel ./sentinel
 COPY mcp_server ./mcp_server
 COPY healer ./healer
 COPY cli ./cli
+COPY scripts ./scripts
 RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir .
 
 FROM python:3.11-slim AS runtime
