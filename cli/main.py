@@ -387,6 +387,49 @@ def scan(
 
 
 @app.command()
+def prepare(
+    app_name: str,
+    path: Annotated[
+        str | None, typer.Option("--path", help="Check a sub-project instead of the app root.")
+    ] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Static, read-only checklist of what's missing for self-healing
+    (tests, CI workflow, test config, heavy dependencies) -- never runs the
+    app's own code."""
+
+    async def _prepare() -> dict[str, Any]:
+        async with HealerClient.from_saved_session() as client:
+            app_id = await _resolve_app_id(client, app_name)
+            params = {"path": path} if path else None
+            result: dict[str, Any] = await client.get(f"/api/apps/{app_id}/prepare", params=params)
+            return result
+
+    report = _run(_prepare())
+
+    def render(data: dict[str, Any]) -> None:
+        console.print(f"[bold]{data.get('app_name')}[/bold] ({data.get('language')})")
+        table = Table(title="Prepare checklist")
+        table.add_column("Check")
+        table.add_column("Status")
+        table.add_row("Tests found", f"{data.get('test_file_count')} file(s)")
+        table.add_row("CI workflow", "yes" if data.get("has_ci_workflow") else "no")
+        table.add_row("CI runs tests", "yes" if data.get("ci_runs_tests") else "no")
+        table.add_row("External services", ", ".join(data.get("external_services", [])) or "none")
+        table.add_row("Heavy dependencies", ", ".join(data.get("heavy_dependencies", [])) or "none")
+        console.print(table)
+        missing = data.get("missing", [])
+        if not missing:
+            console.print("[green]Already fixable -- nothing missing.[/green]")
+        else:
+            console.print("[yellow]Missing for self-healing:[/yellow]")
+            for item in missing:
+                console.print(f"  - {item}")
+
+    _print_or_json(report, json_out, render)
+
+
+@app.command()
 def fix(
     app_name: str,
     finding_id: Annotated[int | None, typer.Argument()] = None,

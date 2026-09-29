@@ -32,7 +32,15 @@ from core.db import dispose_engine, get_db, session_scope
 from core.logging import configure_logging
 from core.models import ChatMessage, ChatSession, Finding, FindingStatus, HealJob, MonitoredApp
 from core.ratelimit import check_and_consume
-from core.repo_connect import RepoConnectError, connect_repo, select_subproject
+from core.repo_connect import (
+    CONNECTED_APPS_ROOT,
+    RepoConnectError,
+    _resolve_sub_path,
+    connect_repo,
+    detect_stack,
+    select_subproject,
+)
+from core.repo_health_check import PrepareReport, analyze_repo
 from core.scanner import run_scan
 from healer import notifier
 from healer.auth import (
@@ -52,6 +60,7 @@ from healer.mcp_client import MCPToolClient, ReconnectingMCPToolClient, connect_
 from healer.onboarding import open_onboarding_pull_request
 from healer.worker import run_worker
 from mcp_server.github_client import GitHubClientError
+from mcp_server.sandbox import REPO_ROOT
 
 configure_logging(settings.log_level)
 logger = structlog.get_logger(__name__)
@@ -431,6 +440,53 @@ async def rescan_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     asyncio.create_task(_run_scan_and_notify(app_id))
     return {"status": "scanning"}
+
+
+def _prepare_report_dict(report: PrepareReport) -> dict[str, Any]:
+    return {
+        "app_name": report.app_name,
+        "language": report.language,
+        "has_tests": report.has_tests,
+        "test_file_count": report.test_file_count,
+        "has_ci_workflow": report.has_ci_workflow,
+        "ci_runs_tests": report.ci_runs_tests,
+        "external_services": list(report.external_services),
+        "heavy_dependencies": list(report.heavy_dependencies),
+        "missing": list(report.missing),
+        "already_fixable": report.already_fixable,
+    }
+
+
+@app.get("/api/apps/{app_id}/prepare")
+async def prepare_app(
+    app_id: int,
+    path: str | None = None,
+    username: str = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Static, read-only checklist of what's missing for self-healing --
+    never runs the app's own code. See core/repo_health_check.py."""
+    app_row = await db.get(MonitoredApp, app_id)
+    if app_row is None:
+        raise HTTPException(status_code=404, detail="No such app")
+    if path is not None:
+        if app_row.repo_url is None:
+            raise HTTPException(
+                status_code=400, detail="--path only applies to a connected external repo"
+            )
+        clone_root = CONNECTED_APPS_ROOT / app_row.name
+        try:
+            app_dir = _resolve_sub_path(clone_root, path)
+        except RepoConnectError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        language = detect_stack(app_dir).language
+    else:
+        app_dir = REPO_ROOT / app_row.local_repo_path
+        language = app_row.language
+        if not app_dir.is_dir():
+            raise HTTPException(status_code=404, detail=f"App directory {app_dir} does not exist")
+    report = analyze_repo(app_dir, app_name=app_row.name, language=language)
+    return _prepare_report_dict(report)
 
 
 class UpdateAppRequest(BaseModel):

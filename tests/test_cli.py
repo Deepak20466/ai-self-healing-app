@@ -235,6 +235,33 @@ def test_scan_resolves_app_name_and_polls_until_scanned(respx_mock: Any) -> None
     assert "sql injection" in result.output
 
 
+def test_prepare_prints_the_missing_checklist(respx_mock: Any) -> None:
+    _log_in()
+    respx_mock.get(f"{BASE_URL}/api/apps").mock(
+        return_value=httpx.Response(200, json=[{"id": 5, "name": "node_app"}])
+    )
+    respx_mock.get(f"{BASE_URL}/api/apps/5/prepare").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "app_name": "node_app",
+                "language": "javascript",
+                "has_tests": False,
+                "test_file_count": 0,
+                "has_ci_workflow": False,
+                "ci_runs_tests": False,
+                "external_services": [],
+                "heavy_dependencies": [],
+                "missing": ["No test files found."],
+                "already_fixable": False,
+            },
+        )
+    )
+    result = runner.invoke(app, ["prepare", "node_app"])
+    assert result.exit_code == 0, result.output
+    assert "No test files found." in result.output
+
+
 def test_fix_confirms_before_spending_ai_budget(respx_mock: Any) -> None:
     _log_in()
     respx_mock.get(f"{BASE_URL}/api/apps").mock(

@@ -290,3 +290,37 @@ async def test_capture_test_404_for_unknown_app(app_client: httpx.AsyncClient) -
         await _login(client)
         resp = await client.post("/api/apps/999999/capture-test")
     assert resp.status_code == 404
+
+
+async def test_prepare_reports_a_missing_checklist(
+    app_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from healer import app as healer_app_module
+
+    app_dir = tmp_path / "prep-app"
+    app_dir.mkdir()
+    (app_dir / "requirements.txt").write_text("fastapi\n")
+
+    monkeypatch.setattr(healer_app_module, "REPO_ROOT", tmp_path)
+
+    app_row = await _make_app(
+        db_session, local_repo_path="prep-app", allowed_write_paths=["prep-app/"]
+    )
+    async with app_client as client:
+        await _login(client)
+        resp = await client.get(f"/api/apps/{app_row.id}/prepare")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["has_tests"] is False
+    assert body["already_fixable"] is False
+    assert len(body["missing"]) >= 2
+
+
+async def test_prepare_404_for_unknown_app(app_client: httpx.AsyncClient) -> None:
+    async with app_client as client:
+        await _login(client)
+        resp = await client.get("/api/apps/999999/prepare")
+    assert resp.status_code == 404
