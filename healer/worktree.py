@@ -15,6 +15,7 @@ import shutil
 from pathlib import Path
 
 from mcp_server.sandbox import REPO_ROOT, WORKTREES_ROOT
+from sentinel.scrubber import scrub_text
 
 PUSH_TIMEOUT_SECONDS = 120.0
 GIT_TIMEOUT_SECONDS = 30.0
@@ -39,9 +40,16 @@ async def _run_git(args: list[str], *, cwd: Path, timeout_s: float | None = None
     except TimeoutError as exc:
         process.kill()
         await process.wait()
-        raise WorktreeError(f"git {' '.join(args)} timed out") from exc
+        raise WorktreeError(scrub_text(f"git {' '.join(args)} timed out")) from exc
     if process.returncode != 0:
-        raise WorktreeError(f"git {' '.join(args)} failed: {stderr.decode(errors='replace')}")
+        # `args` can embed a credentialed remote URL (a connected app's
+        # `https://x-access-token:<token>@github.com/...` push remote) --
+        # scrub before it ever becomes an exception message, since an
+        # unhandled WorktreeError's traceback gets logged verbatim (a real
+        # token leak this way, since fixed here and in core/logging.py's
+        # global scrub processor as a second layer).
+        message = f"git {' '.join(args)} failed: {stderr.decode(errors='replace')}"
+        raise WorktreeError(scrub_text(message))
 
 
 def branch_name_for(fingerprint: str, heal_job_id: int) -> str:

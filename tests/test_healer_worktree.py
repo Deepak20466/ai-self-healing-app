@@ -237,3 +237,24 @@ async def test_commit_and_push_gives_up_after_one_retry(
     monkeypatch.setattr(worktree, "_run_git", always_fail)
     with pytest.raises(worktree.WorktreeError):
         await worktree.commit_and_push(tmp_path, "autofix/x", message="m")
+
+
+async def test_run_git_failure_scrubs_a_credentialed_remote_url_from_the_error(
+    tmp_path: Path,
+) -> None:
+    """A real push failure against a nonexistent credentialed remote must
+    never leak the embedded token into the exception message -- reproduced
+    for real (a real `git push` failing for real reasons, not a mocked
+    stand-in for `_run_git`) after a token embedded in a push URL reached
+    `healer.log` verbatim via an unhandled `WorktreeError`."""
+    from healer.worktree import WorktreeError, _run_git
+
+    token = "ghp_totallyFakeTokenForThisTestOnly1234"
+    credentialed_remote = f"https://x-access-token:{token}@github.com/nonexistent/nowhere.git"
+
+    with pytest.raises(WorktreeError) as exc_info:
+        await _run_git(["push", "-u", credentialed_remote, "some-branch"], cwd=tmp_path)
+
+    message = str(exc_info.value)
+    assert token not in message
+    assert "[REDACTED]" in message

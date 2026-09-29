@@ -16,6 +16,27 @@ import structlog
 _CONFIGURED = False
 
 
+def _scrub_event_dict(
+    _logger: Any, _method_name: str, event_dict: dict[str, Any]
+) -> dict[str, Any]:
+    """Redact secrets from every log record globally, across all 4 pods.
+
+    Defense-in-depth on top of scrubbing at the point a secret would be
+    embedded (e.g. never putting a credentialed URL in an exception
+    message) -- a real credentialed-URL leak reached `healer.log` via an
+    *unhandled* exception's traceback (a git push failure whose message
+    embedded a token-bearing remote URL), which bypasses any scrubbing done
+    at a specific call site. Runs as the last processor before rendering, so
+    it sees the fully-formatted `event`/`exception` text (including
+    `format_exc_info`'s rendered traceback), not just structured kwargs.
+    Import is local to avoid `sentinel` importing `core` importing `sentinel`
+    at module-load time in pods that don't otherwise need sentinel code.
+    """
+    from sentinel.scrubber import scrub_value
+
+    return {key: scrub_value(value) for key, value in event_dict.items()}
+
+
 def configure_logging(level: str = "INFO") -> None:
     """Configure stdlib logging + structlog for JSON output. Idempotent."""
     global _CONFIGURED
@@ -37,6 +58,7 @@ def configure_logging(level: str = "INFO") -> None:
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
+        _scrub_event_dict,
     ]
 
     structlog.configure(

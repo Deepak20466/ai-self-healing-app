@@ -42,7 +42,12 @@ from core.untrusted import UNTRUSTED_DATA_SYSTEM_PROMPT_NOTE
 from healer import agent_free
 from healer.github_ops import AUTO_FIX_LABEL, REMOTE_VERIFY_LABEL
 from healer.mcp_client import MCPToolClient
-from healer.worktree import commit_and_push, create_worktree_for_connected_app, remove_plain_clone
+from healer.worktree import (
+    WorktreeError,
+    commit_and_push,
+    create_worktree_for_connected_app,
+    remove_plain_clone,
+)
 from mcp_server import git_utils
 from mcp_server.github_client import GitHubClient
 from mcp_server.sandbox import REPO_ROOT
@@ -333,7 +338,17 @@ async def run_onboarding_prepare(
         repo_info = await github.get_repo()
         base_branch = str(repo_info.get("default_branch") or "main")
         commit_msg = f"Onboarding: add starter tests/CI/test-config\n\nheal_job #{job_id}"
-        await commit_and_push(worktree_path, branch, message=commit_msg, remote=push_remote)
+        try:
+            await commit_and_push(worktree_path, branch, message=commit_msg, remote=push_remote)
+        except WorktreeError as exc:
+            # A real push failure (e.g. a token with insufficient repo
+            # permission) used to propagate unhandled out of this function,
+            # leaving the heal_job stuck in `running` forever -- never
+            # `failed`, so it could never be retried or reported on. `exc`'s
+            # message is already scrubbed of any credentialed URL by
+            # `healer/worktree.py`, so it's safe to store as-is.
+            await _finish_job(job_id, status=HealJobStatus.FAILED, error=str(exc))
+            return OnboardingResult(status="failed", detail=str(exc))
 
         pr = await _open_onboarding_pull_request(
             github,
