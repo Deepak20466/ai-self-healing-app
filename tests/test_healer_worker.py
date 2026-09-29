@@ -431,6 +431,93 @@ async def test_a_heavy_dependency_connected_app_job_routes_to_remote_verify(
                 await session.delete(row)
 
 
+async def test_remote_verify_dispatch_exception_marks_job_failed_and_does_not_propagate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real regression test for a real bug, found by running remote-verify
+    mode live for the first time: `run_heal_job_remote_verify` (and
+    `run_heal_job_suggest`) were dispatched OUTSIDE the normal path's
+    `try/except Exception: mark FAILED` block. A real, unhandled exception
+    there (a GitHub 403 opening the fallback issue, reproduced live) used to
+    propagate all the way out of `_process_next_job` -- and, in
+    `run_worker()`'s real `while True` loop, out of the loop entirely,
+    silently killing the whole worker (no crash, no restart, just stopped
+    claiming any future job) while leaving this one job stuck at `running`
+    forever. `_process_next_job` must now catch this itself and mark the
+    job FAILED instead of raising."""
+    import shutil
+
+    from mcp_server.sandbox import REPO_ROOT
+
+    async with session_scope() as session:
+        while True:
+            stale = await dequeue_heal_job(
+                session,
+                types=(
+                    HealJobType.RUNTIME_ERROR,
+                    HealJobType.CONTRACT_VIOLATION,
+                    HealJobType.CI_FAILURE,
+                ),
+            )
+            if stale is None:
+                break
+            stale.status = HealJobStatus.FAILED
+
+    app_name = f"conn-heavy-crash-{uuid.uuid4().hex[:10]}"
+    app_dir = REPO_ROOT / "connected_apps" / app_name
+    app_dir.mkdir(parents=True)
+    (app_dir / "requirements.txt").write_text("torch>=2.0\nfastapi\n")
+
+    try:
+        fingerprint = f"test-heavy-crash-{uuid.uuid4().hex}"
+        async with session_scope() as session:
+            app = MonitoredApp(
+                name=app_name,
+                language="python",
+                local_repo_path=f"connected_apps/{app_name}",
+                github_repo="acme/heavy",
+                allowed_write_paths=[f"connected_apps/{app_name}/"],
+                test_command="pytest",
+                ingest_token=uuid.uuid4().hex,
+                repo_url="https://github.com/acme/heavy",
+            )
+            session.add(app)
+            await session.flush()
+            app_id = app.id
+            job = await enqueue_heal_job(
+                session, type=HealJobType.RUNTIME_ERROR, fingerprint=fingerprint, app_id=app_id
+            )
+            job_id = job.id
+
+        async def _fake_remote_verify_raises(job_id: int, *, mcp: Any, github: Any) -> None:
+            raise RuntimeError("simulated GitHub 403 opening the fallback issue")
+
+        async def _cap_never_open(session: object, *, max_per_hour: int) -> bool:
+            return False
+
+        async def _never_call(job_id: int, *, mcp: Any, github: Any) -> None:
+            raise AssertionError("must not dispatch through the normal AI_CHAIN backend")
+
+        monkeypatch.setattr(worker_module, "run_heal_job_remote_verify", _fake_remote_verify_raises)
+        monkeypatch.setattr(worker_module, "global_hourly_circuit_open", _cap_never_open)
+
+        backend = worker_module._JobRunners(runtime_or_contract=_never_call, ci_failure=_never_call)
+        claimed = await worker_module._process_next_job(mcp=None, backend=backend)  # type: ignore[arg-type]
+
+        assert claimed is True
+
+        async with session_scope() as session:
+            refreshed = await session.get(HealJob, job_id)
+            assert refreshed is not None
+            assert refreshed.status == HealJobStatus.FAILED
+    finally:
+        shutil.rmtree(app_dir, ignore_errors=True)
+        async with session_scope() as session:
+            row = await session.get(MonitoredApp, app_id)
+            if row is not None:
+                await session.delete(row)
+
+
 async def test_a_suggest_mode_job_routes_to_suggest_mode_not_ai_chain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

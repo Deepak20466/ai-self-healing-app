@@ -51,6 +51,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -322,14 +323,32 @@ async def _process_next_job(mcp: MCPToolClient, backend: _JobRunners | None = No
                 )
             )
 
-    if is_suggest_job:
-        async with GitHubClient(repo=github_repo) as github:
-            await run_heal_job_suggest(job_id, mcp=mcp, github=github)
-        return True
-
-    if is_remote_verify_job:
-        async with GitHubClient(repo=github_repo) as github:
-            await run_heal_job_remote_verify(job_id, mcp=mcp, github=github)
+    if is_suggest_job or is_remote_verify_job:
+        # Same unhandled-failure safety net as the normal dispatch path
+        # below (e.g. a GitHub 403 from `open_low_confidence_issue` when the
+        # PAT lacks Issues:write on the connected repo -- reproduced live
+        # against a real connected repo the first time remote-verify mode
+        # ever ran end to end). Before this, an exception here propagated
+        # out of `_process_next_job` and out of `run_worker()`'s `while
+        # True` loop entirely -- the job was left stuck at `running`
+        # forever AND the whole worker silently stopped claiming any future
+        # job, since nothing awaits or retries the crashed background task.
+        try:
+            async with GitHubClient(repo=github_repo) as github:
+                if is_suggest_job:
+                    await run_heal_job_suggest(job_id, mcp=mcp, github=github)
+                else:
+                    await run_heal_job_remote_verify(job_id, mcp=mcp, github=github)
+        except Exception:
+            logger.exception("worker.job_failed_unexpectedly", heal_job_id=job_id)
+            async with session_scope() as session:
+                job = await session.get(HealJob, job_id)
+                if job is not None:
+                    job.status = HealJobStatus.FAILED
+                    if job.error_message is None:
+                        job.error_message = "unhandled worker exception -- see healer log"
+                    if job.finished_at is None:
+                        job.finished_at = datetime.now(UTC)
         return True
 
     runners = backend if backend is not None else _select_backend(chosen_backend_name)
@@ -384,7 +403,21 @@ async def run_worker() -> None:
         while True:
             # backend=None -> resolved per job from settings.ai_chain_list
             # (a single-item chain, the default, behaves exactly as before).
-            claimed = await _process_next_job(mcp)
+            # Defense in depth: `_process_next_job` itself already catches
+            # every dispatch path's own exceptions and marks the job
+            # FAILED -- this outer catch exists only so that a future,
+            # not-yet-caught exception there can never again silently kill
+            # this entire `while True` loop (an unawaited background task's
+            # exception is otherwise just dropped, and the worker would stop
+            # claiming ANY future job with no crash, no restart, no log
+            # short of a full traceback -- exactly what happened live the
+            # first time remote-verify mode ever ran, before that dispatch
+            # branch had its own try/except).
+            try:
+                claimed = await _process_next_job(mcp)
+            except Exception:
+                logger.exception("worker.process_next_job_crashed")
+                claimed = False
             if claimed:
                 continue
             try:
