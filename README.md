@@ -10,10 +10,11 @@
   including a pod-kill recovery test and a liveness/restart test (the
   k8s-ci badge above; workflow: [`.github/workflows/k8s-ci.yml`](.github/workflows/k8s-ci.yml),
   chart: [`deploy/helm/selfheal/`](deploy/helm/selfheal/)).
-- **GitHub Copilot** — verified live: works with GitHub Copilot Chat's
-  Agent mode via the MCP server
+- **GitHub Copilot** — supported (config included): works with GitHub
+  Copilot Chat's Agent mode via the MCP server
   ([`.vscode/mcp.json`](.vscode/mcp.json), see
-  ["Use with GitHub Copilot"](#use-with-github-copilot) below).
+  ["Use with GitHub Copilot"](#use-with-github-copilot) below). Not yet
+  verified live.
 
 The default local setup runs as 4 lightweight native processes for low RAM
 (SPEC.md's original constraint); Kubernetes is tested in CI on an ephemeral
@@ -466,9 +467,11 @@ Example questions to try in Agent mode:
 - "Why did CI fail on PR #N?"
 - "List recent workflow runs for this repo."
 
-**Verified live**: confirmed against a real GitHub Copilot Chat session in
-VS Code — Copilot Chat's Agent mode discovered `.vscode/mcp.json`, listed
-`selfheal`'s tools, and called them successfully.
+**Not yet verified live against a real Copilot Chat session** — the config
+is written to the documented VS Code MCP schema and validated as JSON, but
+whether GitHub Copilot Chat actually lists and calls `selfheal`'s tools has
+not been confirmed in this session. Try it and report back; this note will
+be updated to "verified live" only once that's confirmed.
 
 ## Running the pods
 

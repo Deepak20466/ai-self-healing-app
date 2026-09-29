@@ -45,12 +45,11 @@ the tunnel-and-login-gated checks below are SKIPPED, not FAILED) —
 | **Go example**: seeded divide-by-zero panic captured over OpenTelemetry at `examples/go_app/calc.go:12`; scan flags the failing test, `govulncheck` reported as skipped (not installed) | same |
 | Per-language stack-trace parsers, scanner detection, patch-guard test-skip rejection, onboarding file per language | verify_all + pytest |
 | Privacy guard: MCP tool RESULTS are scrubbed before reaching any AI backend, not just logged args | Real (unmocked) test against the live `audited_tool` wrapper: `tests/test_mcp_audit.py::test_audited_tool_scrubs_the_returned_result_not_just_logged_args`; not re-proven by verify_all since no live tool call in this system naturally echoes a secret back to contrive a fresh live case (see CLAUDE.md Step 5) |
-| GitHub Copilot Chat (Agent mode, VS Code) against mcp-pod | Confirmed against a real Copilot Chat session: Agent mode discovered `.vscode/mcp.json` and successfully listed/called `selfheal`'s MCP tools |
-
 ## ⚠️ Built but not verified live
 
 | What | Why |
 |---|---|
+| GitHub Copilot Chat (Agent mode, VS Code) against mcp-pod | `.vscode/mcp.json` is written to the documented VS Code MCP schema and validated as JSON, but a real Copilot Chat session has not yet been run against it |
 | Codex CLI and Gemini CLI backends: running a fix | Neither CLI is installed here; built from public docs, mocked tests only. Only backend *selection* was verified |
 | `api` (Anthropic SDK) backend: real PR | Mocked Anthropic client only; no API key/billing used |
 | `gemini_api` backend: running a fix, or even the tiny live probe — **now BLOCKED, not just unverified, and removed from this project's own default AI_CHAIN/CHAT_CHAIN** | First key tried was `AQ.`-format; `scripts/check_ai_backends.py` got `401 ACCESS_TOKEN_TYPE_UNSUPPORTED` even via the correct `x-goog-api-key` header — matches several reports on Google's own AI Developer Forum of the same failure for `AQ.`-format keys specifically. A follow-up `AIzaSy`-format key instead got `400 API_KEY_INVALID` on the plainest possible call (`GET /v1beta/models`) — a key-specific problem (wrong project / API not enabled / bad copy), not the `AQ.` bug. Neither key has worked yet; not a code bug in either case — see CLAUDE.md Step 5 and its 2026-09-29 follow-ups |
