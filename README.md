@@ -1,4 +1,6 @@
-# AI-Powered Self-Healing Application
+# selfheal: an MCP-powered AI agent that detects bugs, security vulnerabilities (CVEs) and CI failures, and opens verified fix PRs
+
+Python · FastAPI · PostgreSQL · MCP · Docker · Kubernetes-tested CI · GitHub Actions
 
 [![k8s-ci](https://github.com/Deepak20466/ai-self-healing-app/actions/workflows/k8s-ci.yml/badge.svg)](https://github.com/Deepak20466/ai-self-healing-app/actions/workflows/k8s-ci.yml)
 
