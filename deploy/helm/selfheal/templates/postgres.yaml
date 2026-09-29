@@ -1,8 +1,10 @@
 # A plain Postgres Deployment (official postgres:16-alpine image), not a
-# Helm subchart -- see values.yaml's comment on `postgresql:` for why.
-# No PersistentVolumeClaim: this is for an ephemeral, single-run CI
-# cluster torn down at the end of every workflow run, so ordinary
-# emptyDir-backed pod storage is fine.
+# Helm subchart -- see values.yaml's comment on `postgres:` for why.
+# Backed by a 1Gi PVC (not emptyDir): a kind cluster's default StorageClass
+# ("standard", host-path provisioner) can satisfy a PVC without any extra
+# setup, so this is no less CI-friendly than emptyDir while also being the
+# right default for anyone reusing this chart against a real cluster.
+{{- if .Values.postgres.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,39 +23,53 @@ spec:
       restartPolicy: Always
       containers:
         - name: postgres
-          image: {{ .Values.postgresql.image | quote }}
+          image: {{ .Values.postgres.image | quote }}
           ports:
             - containerPort: 5432
           env:
             - name: POSTGRES_USER
-              value: {{ .Values.postgresql.username | quote }}
+              valueFrom:
+                secretKeyRef: {name: selfheal-postgres-credentials, key: username}
             - name: POSTGRES_PASSWORD
-              value: {{ .Values.postgresql.password | quote }}
+              valueFrom:
+                secretKeyRef: {name: selfheal-postgres-credentials, key: password}
             - name: POSTGRES_DB
-              value: {{ .Values.postgresql.database | quote }}
+              valueFrom:
+                secretKeyRef: {name: selfheal-postgres-credentials, key: database}
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
           volumeMounts:
             - name: pgdata
               mountPath: /var/lib/postgresql/data
           resources:
-            requests: {{ toYaml .Values.postgresql.resources.requests | nindent 14 }}
-            limits: {{ toYaml .Values.postgresql.resources.limits | nindent 14 }}
+            requests: {{ toYaml .Values.postgres.resources.requests | nindent 14 }}
+            limits: {{ toYaml .Values.postgres.resources.limits | nindent 14 }}
           readinessProbe:
             exec:
-              command: ["pg_isready", "-U", {{ .Values.postgresql.username | quote }}]
+              command: ["pg_isready", "-U", {{ .Values.postgres.username | quote }}]
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 12
           livenessProbe:
             exec:
-              command: ["pg_isready", "-U", {{ .Values.postgresql.username | quote }}]
+              command: ["pg_isready", "-U", {{ .Values.postgres.username | quote }}]
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 12
       volumes:
         - name: pgdata
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: selfheal-postgres-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: selfheal-postgres-pvc
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.postgres.storage | quote }}
 ---
 apiVersion: v1
 kind: Service
@@ -64,3 +80,4 @@ spec:
   ports:
     - port: 5432
       targetPort: 5432
+{{- end }}

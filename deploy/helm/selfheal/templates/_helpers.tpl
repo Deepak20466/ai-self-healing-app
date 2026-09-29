@@ -7,7 +7,7 @@ selfheal-postgres
 {{- end -}}
 
 {{- define "selfheal.databaseUrl" -}}
-postgresql+asyncpg://{{ .Values.postgresql.username }}:{{ .Values.postgresql.password }}@{{ include "selfheal.postgresHost" . }}:5432/{{ .Values.postgresql.database }}
+postgresql+asyncpg://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ include "selfheal.postgresHost" . }}:5432/{{ .Values.postgres.database }}
 {{- end -}}
 
 {{- define "selfheal.image" -}}
@@ -38,6 +38,12 @@ postgresql+asyncpg://{{ .Values.postgresql.username }}:{{ .Values.postgresql.pas
   value: "0.0.0.0"
 - name: MCP_CLIENT_URL
   value: "http://selfheal-mcp:{{ .Values.mcp.port }}/mcp"
+- name: SENTINEL_INGEST_URL
+  # core/config.py:sentinel_base_url defaults to http://localhost:{port} --
+  # a same-host-deployment assumption. app-pod is a separate Pod here, so
+  # this override is required for the smoke test's /trigger/zero call to
+  # actually reach sentinel-pod's real /ingest/error endpoint.
+  value: "http://selfheal-sentinel:{{ .Values.sentinel.port }}"
 - name: SESSION_SECRET
   valueFrom:
     secretKeyRef:

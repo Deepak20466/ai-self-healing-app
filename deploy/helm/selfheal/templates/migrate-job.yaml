@@ -1,9 +1,10 @@
-# Runs `alembic upgrade head` once, against the Postgres subchart's own
-# service, before the app pods are expected to actually work.
+# Runs `alembic upgrade head` once, against the in-chart Postgres
+# Deployment's own Service (deploy/helm/selfheal/templates/postgres.yaml),
+# before the app pods are expected to actually work.
 #
 # This is a post-install/post-upgrade hook, not pre-install: a pre-install
 # hook runs before ANY of the release's own resources exist, including the
-# postgresql subchart's own StatefulSet -- there would be nothing to
+# Postgres Deployment itself -- there would be nothing to
 # connect to yet. Running post-install instead means the pod Deployments
 # below are created in the same `helm install` and may crash-loop a few
 # times waiting for tables that don't exist until this Job finishes; their

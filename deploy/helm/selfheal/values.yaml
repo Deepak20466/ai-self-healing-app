@@ -19,17 +19,20 @@ image:
 # debian-12-r4 404s as of this session, part of Bitnami's move of older
 # free tags behind a paid "Secure Images" registry) -- confirmed live via a
 # real k8s-ci run, not assumed. `postgres:16-alpine` is small, official,
-# and has no such registry-migration risk; simplest robust option for an
-# ephemeral, no-persistence CI cluster.
-postgresql:
+# and has no such registry-migration risk; simplest robust option. There is
+# no vendored `charts/` dir and no `Chart.lock` -- the Bitnami dependency
+# never got far enough (its own image never pulled) to generate either.
+postgres:
+  enabled: true
   image: "postgres:16-alpine"
   username: selfheal
   password: selfheal
   database: selfheal
+  storage: 1Gi
   resources:
     requests:
-      cpu: 100m
-      memory: 128Mi
+      cpu: 50m
+      memory: 64Mi
     limits:
       memory: 256Mi
 

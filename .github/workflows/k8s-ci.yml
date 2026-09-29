@@ -52,11 +52,17 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@v4
 
+      - name: Helm lint
+        run: helm lint deploy/helm/selfheal
+
+      - name: Helm template (dry-run render, catches templating errors before install)
+        run: helm template selfheal deploy/helm/selfheal --set image.tag=ci > /tmp/rendered.yaml
+
       - name: Helm install
         run: |
           set -euo pipefail
           helm install selfheal deploy/helm/selfheal \
-            --wait --timeout 8m \
+            --wait --timeout 10m \
             --set image.tag=ci
 
       - name: Wait for the migration Job to complete
@@ -146,13 +152,23 @@ jobs:
       - name: Dump diagnostics on failure
         if: failure()
         run: |
-          kubectl get pods -o wide || true
+          echo "::group::kubectl get pods -A"
+          kubectl get pods -A -o wide || true
+          echo "::endgroup::"
+          echo "::group::kubectl get events (sorted)"
+          kubectl get events --sort-by=.lastTimestamp -A || true
+          echo "::endgroup::"
+          echo "::group::kubectl describe pods"
           kubectl describe pods || true
-          kubectl logs -l app=selfheal-app --tail=200 || true
-          kubectl logs -l app=selfheal-sentinel --tail=200 || true
-          kubectl logs -l app=selfheal-mcp --tail=200 || true
-          kubectl logs -l app=selfheal-healer --tail=200 || true
-          kubectl logs -l app=selfheal-postgres --tail=200 || true
+          echo "::endgroup::"
+          for app in selfheal-app selfheal-sentinel selfheal-mcp selfheal-healer selfheal-postgres; do
+            echo "::group::kubectl logs -l app=$app"
+            kubectl logs -l app="$app" --tail=500 --all-containers || true
+            echo "::endgroup::"
+          done
+          echo "::group::helm status"
+          helm status selfheal || true
+          echo "::endgroup::"
 
       - name: Delete kind cluster
         if: always()

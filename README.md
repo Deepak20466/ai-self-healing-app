@@ -131,12 +131,21 @@ Actions).
   into a venv; the runtime stage copies only that venv + source, non-root
   `app` user), one Dockerfile per pod.
 - `deploy/helm/selfheal/` — a Helm chart: a Deployment + Service per pod,
-  a Postgres dependency (the Bitnami `postgresql` subchart, no persistence —
-  this is for an ephemeral CI cluster, not production HA), a pre-flight
-  migration Job, and liveness/readiness probes on every pod's `/healthz`
-  where one exists. mcp-pod has no `/healthz` (the same gap CLAUDE.md's
-  Phase 7 log documents for the native deployment — it speaks MCP's
-  streamable-HTTP protocol at `/mcp`, not a plain REST route), so its probes
+  and Postgres as a plain in-chart Deployment using the official
+  `postgres:16-alpine` image (toggleable via `postgres.enabled`, a 1Gi PVC,
+  credentials from a dedicated Secret, a `pg_isready` probe) — not a Helm
+  subchart. An earlier version of this chart used the Bitnami `postgresql`
+  subchart, but Bitnami removed the specific free-tier image tag it pinned
+  (confirmed live via a real k8s-ci run: `ImagePullBackOff`, part of
+  Bitnami's move of older free tags behind a paid registry), so it was
+  replaced outright rather than pinned to a moving target. The chart also
+  has a pre-flight migration Job, and liveness/readiness probes on every
+  pod's `/healthz` where one exists (app-pod's `/healthz` does a real
+  `SELECT 1`, so its readiness probe genuinely waits on database
+  availability, not just process-up). mcp-pod has no `/healthz` (the same
+  gap CLAUDE.md's Phase 7 log documents for the native deployment — it
+  speaks MCP's streamable-HTTP protocol at `/mcp`, not a plain REST route),
+  so its probes
   are a TCP socket check instead.
 - The CI workflow builds all 4 images, spins up an ephemeral `kind`
   cluster, `helm install`s the chart, waits for every pod Ready, then runs
