@@ -2,6 +2,24 @@
 
 [![k8s-ci](https://github.com/Deepak20466/ai-self-healing-app/actions/workflows/k8s-ci.yml/badge.svg)](https://github.com/Deepak20466/ai-self-healing-app/actions/workflows/k8s-ci.yml)
 
+## Highlights
+
+- **Docker** — containerized: multi-stage, non-root images for all 4 pods
+  ([`deploy/docker/`](deploy/docker/)).
+- **Kubernetes** — Kubernetes-tested in CI: `kind` + Helm on every push,
+  including a pod-kill recovery test and a liveness/restart test (the
+  k8s-ci badge above; workflow: [`.github/workflows/k8s-ci.yml`](.github/workflows/k8s-ci.yml),
+  chart: [`deploy/helm/selfheal/`](deploy/helm/selfheal/)).
+- **GitHub Copilot** — supported (config included): works with GitHub
+  Copilot Chat's Agent mode via the MCP server
+  ([`.vscode/mcp.json`](.vscode/mcp.json), see
+  ["Use with GitHub Copilot"](#use-with-github-copilot) below). Not yet
+  verified against a real Copilot Chat session.
+
+The default local setup runs as 4 lightweight native processes for low RAM
+(SPEC.md's original constraint); Kubernetes is tested in CI on an ephemeral
+`kind` cluster, not run as a production cluster.
+
 ![selfheal terminal demo: up, login, status, apps, prepare, audit, scan, errors, chat, prs](docs/demo-terminal.gif)
 
 *Real, unscripted `selfheal` CLI session against the actually-running pods — every line above is genuine captured output (see [docs/demo-terminal.mp4](docs/demo-terminal.mp4) for the full-quality video).*
@@ -43,6 +61,13 @@ deliberately broken demo PR, closed after the AI's fix turned its CI green):
   [docs/benchmark.md](docs/benchmark.md) for how the healer's pre-PR checks
   were tightened after this PR first failed CI on demo tests that pinned the
   bug).
+
+## Tech stack
+
+Python, FastAPI, PostgreSQL, MCP (Model Context Protocol) · Claude / Groq /
+OpenRouter as a pluggable AI fallback chain · GitHub Actions for CI/CD ·
+Docker, Kubernetes, Helm (containerized, Kubernetes-tested in CI) · GitHub
+Copilot via MCP · OpenTelemetry (any-language error capture).
 
 ## Architecture
 
