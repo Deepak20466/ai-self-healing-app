@@ -138,7 +138,14 @@ jobs:
           POD=$(kubectl get pod -l app=selfheal-sentinel -o jsonpath='{.items[0].metadata.name}')
           BEFORE=$(kubectl get pod "$POD" -o jsonpath='{.status.containerStatuses[0].restartCount}')
           echo "restartCount before: $BEFORE"
-          kubectl exec "$POD" -- python /app/kill_process.py uvicorn
+          # Killing uvicorn necessarily kills the container's PID 1 (the
+          # `sh -c` wrapper exits once its foregrounded child dies), which
+          # tears down the exec stream out from under `kubectl exec` itself
+          # -- so this command legitimately exits non-zero (137) on success,
+          # not on failure. `|| true` so `set -e` doesn't abort the step
+          # before the actual pass/fail check below (the restartCount
+          # comparison) ever runs.
+          kubectl exec "$POD" -- python /app/kill_process.py uvicorn || true
           sleep 5
           kubectl wait --for=condition=Ready pod -l app=selfheal-sentinel --timeout=90s
           AFTER=$(kubectl get pod "$POD" -o jsonpath='{.status.containerStatuses[0].restartCount}')
