@@ -17,6 +17,7 @@ from mcp_server.github_client import GitHubClient
 
 AUTO_FIX_LABEL = "auto-fix"
 NEEDS_REVIEW_LABEL = "needs-human-review"
+REMOTE_VERIFY_LABEL = "verified-by-ci-not-locally"
 
 
 @dataclass(frozen=True)
@@ -126,10 +127,60 @@ async def open_fix_pull_request(
     return pr
 
 
-async def open_low_confidence_issue(
-    client: GitHubClient, *, evidence: FixEvidence, attempts_summary: str
+@dataclass(frozen=True)
+class RemoteVerifyEvidence:
+    """Same shape as `FixEvidence`, minus `test_output` -- a remote-verify
+    fix has no local test evidence to include (see `healer/remote_verify.py`)."""
+
+    heal_job_id: int
+    fingerprint: str
+    root_cause: str
+    diff_stat: str
+    error_summary: str
+
+
+def _remote_verify_pr_body(evidence: RemoteVerifyEvidence) -> str:
+    return (
+        "> ⚠️ **Verified by CI, not locally.** This app's dependencies "
+        "(torch/tensorflow/transformers/chromadb/CUDA-class packages) are "
+        "never installed by the self-healing system, so this fix was never "
+        "run locally. The regression proof is your own GitHub Actions CI "
+        "run on this branch. **This PR will never auto-merge** — please "
+        "review it and merge manually once CI is green.\n\n"
+        f"## Root cause\n{evidence.root_cause}\n\n"
+        f"## Diff summary\n```\n{evidence.diff_stat}\n```\n\n"
+        f"## Source\nheal_job #{evidence.heal_job_id} "
+        f"(fingerprint `{evidence.fingerprint}`): {evidence.error_summary}\n\n"
+        "_Opened automatically by the AI self-healing system._"
+    )
+
+
+async def open_remote_verify_pull_request(
+    client: GitHubClient, *, branch: str, base: str, evidence: RemoteVerifyEvidence
 ) -> dict[str, Any]:
-    """Open an issue instead of a PR, per SPEC.md's low-confidence fallback."""
+    """Open a fix PR that was never run locally (see `RemoteVerifyEvidence`'s
+    docstring) -- labeled distinctly from a normal `open_fix_pull_request`
+    result so it's visually unmistakable in the repo's PR list, in addition
+    to the warning banner in the body."""
+    pr = await client.create_pull_request(
+        title=f"Auto-fix (CI-verified): {evidence.error_summary}",
+        body=_remote_verify_pr_body(evidence),
+        head=branch,
+        base=base,
+    )
+    await client.add_labels(pr["number"], [AUTO_FIX_LABEL, REMOTE_VERIFY_LABEL])
+    return pr
+
+
+async def open_low_confidence_issue(
+    client: GitHubClient, *, evidence: FixEvidence | RemoteVerifyEvidence, attempts_summary: str
+) -> dict[str, Any]:
+    """Open an issue instead of a PR, per SPEC.md's low-confidence fallback.
+
+    Accepts either evidence shape (only their shared `heal_job_id`/
+    `fingerprint`/`error_summary` fields are used) so
+    `healer/remote_verify.py`'s no-diff-produced case can reuse this
+    without constructing a `FixEvidence` it doesn't otherwise need."""
     body = (
         "Automated healing could not produce a verified fix.\n\n"
         f"## Source\nheal_job #{evidence.heal_job_id} "

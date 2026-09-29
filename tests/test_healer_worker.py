@@ -350,3 +350,82 @@ async def test_all_backends_exhausted_pauses_the_job(monkeypatch: pytest.MonkeyP
         refreshed = await session.get(HealJob, job_id)
         assert refreshed is not None
         assert refreshed.status == HealJobStatus.PAUSED_BUDGET
+
+
+async def test_a_heavy_dependency_connected_app_job_routes_to_remote_verify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runtime_error job for a connected app whose manifest names a heavy
+    dependency must go through `run_heal_job_remote_verify`, never through
+    the normal AI_CHAIN `_select_backend` dispatch -- confirmed here by
+    monkeypatching `run_heal_job_remote_verify` and asserting it (not the
+    passed-in `backend` runners) is what actually gets called."""
+    import shutil
+
+    from mcp_server.sandbox import REPO_ROOT
+
+    async with session_scope() as session:
+        while True:
+            stale = await dequeue_heal_job(
+                session,
+                types=(
+                    HealJobType.RUNTIME_ERROR,
+                    HealJobType.CONTRACT_VIOLATION,
+                    HealJobType.CI_FAILURE,
+                ),
+            )
+            if stale is None:
+                break
+            stale.status = HealJobStatus.FAILED
+
+    app_name = f"conn-heavy-{uuid.uuid4().hex[:10]}"
+    app_dir = REPO_ROOT / "connected_apps" / app_name
+    app_dir.mkdir(parents=True)
+    (app_dir / "requirements.txt").write_text("torch>=2.0\nfastapi\n")
+
+    try:
+        fingerprint = f"test-heavy-route-{uuid.uuid4().hex}"
+        async with session_scope() as session:
+            app = MonitoredApp(
+                name=app_name,
+                language="python",
+                local_repo_path=f"connected_apps/{app_name}",
+                github_repo="acme/heavy",
+                allowed_write_paths=[f"connected_apps/{app_name}/"],
+                test_command="pytest",
+                ingest_token=uuid.uuid4().hex,
+                repo_url="https://github.com/acme/heavy",
+            )
+            session.add(app)
+            await session.flush()
+            app_id = app.id
+            job = await enqueue_heal_job(
+                session, type=HealJobType.RUNTIME_ERROR, fingerprint=fingerprint, app_id=app_id
+            )
+            job_id = job.id
+
+        remote_verify_calls: list[int] = []
+
+        async def _fake_remote_verify(job_id: int, *, mcp: Any, github: Any) -> None:
+            remote_verify_calls.append(job_id)
+
+        async def _cap_never_open(session: object, *, max_per_hour: int) -> bool:
+            return False
+
+        async def _never_call(job_id: int, *, mcp: Any, github: Any) -> None:
+            raise AssertionError("must not dispatch through the normal AI_CHAIN backend")
+
+        monkeypatch.setattr(worker_module, "run_heal_job_remote_verify", _fake_remote_verify)
+        monkeypatch.setattr(worker_module, "global_hourly_circuit_open", _cap_never_open)
+
+        backend = worker_module._JobRunners(runtime_or_contract=_never_call, ci_failure=_never_call)
+        claimed = await worker_module._process_next_job(mcp=None, backend=backend)  # type: ignore[arg-type]
+
+        assert claimed is True
+        assert remote_verify_calls == [job_id]
+    finally:
+        shutil.rmtree(app_dir, ignore_errors=True)
+        async with session_scope() as session:
+            row = await session.get(MonitoredApp, app_id)
+            if row is not None:
+                await session.delete(row)

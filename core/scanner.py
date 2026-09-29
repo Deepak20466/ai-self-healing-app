@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import sys
 from collections.abc import Awaitable, Callable
@@ -95,6 +96,74 @@ class ScanSummary:
 
 VENV_DIR_NAME = ".selfheal_venv"
 _SCANNER_TOOLS = ("pytest", "ruff", "mypy", "pip-audit")
+
+#: known heavy/ML-framework package names this project will never install
+#: for a scan -- a fixed denylist rather than a live PyPI/npm size query
+#: (no network dependency, no extra latency), covering the exact packages a
+#: request to this project named (torch/tensorflow/transformers/chromadb/
+#: CUDA) plus their common close relatives. Matched as a substring of the
+#: manifest's own package name, case-insensitively, so "torch",
+#: "torchvision", "nvidia-cuda-runtime-cu12" etc. all match.
+_HEAVY_DEPENDENCY_NAMES = (
+    "torch",
+    "tensorflow",
+    "transformers",
+    "chromadb",
+    "cuda",
+    "sentence-transformers",
+    "onnxruntime",
+    "spacy",
+    "keras",
+    "jax",
+    "mxnet",
+    "deepspeed",
+    "vllm",
+)
+
+
+def _package_name(requirement_line: str) -> str:
+    """`"torch>=2.0.0  # comment"` -> `"torch"` (also strips extras like
+    `package[extra]` and environment markers)."""
+    line = requirement_line.split("#", 1)[0].strip()
+    return re.split(r"[<>=!~\[; ]", line, maxsplit=1)[0].strip().lower()
+
+
+def detect_heavy_dependencies(app_dir: Path) -> list[str]:
+    """Scan the app's own manifest files (never installing anything) for a
+    package name matching `_HEAVY_DEPENDENCY_NAMES`. Returns the matched
+    package names (sorted, deduped) -- empty if none found."""
+    found: set[str] = set()
+
+    requirements = app_dir / "requirements.txt"
+    if requirements.exists():
+        for line in requirements.read_text(encoding="utf-8", errors="ignore").splitlines():
+            pkg = _package_name(line)
+            if pkg and any(heavy in pkg for heavy in _HEAVY_DEPENDENCY_NAMES):
+                found.add(pkg)
+
+    pyproject = app_dir / "pyproject.toml"
+    if pyproject.exists():
+        text = pyproject.read_text(encoding="utf-8", errors="ignore").lower()
+        for heavy in _HEAVY_DEPENDENCY_NAMES:
+            if heavy in text:
+                found.add(heavy)
+
+    package_json = app_dir / "package.json"
+    if package_json.exists():
+        try:
+            data = json.loads(package_json.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            data = {}
+        deps: dict[str, object] = {}
+        if isinstance(data, dict):
+            deps |= data.get("dependencies") or {}
+            deps |= data.get("devDependencies") or {}
+        for name in deps:
+            lowered = name.lower()
+            if any(heavy in lowered for heavy in _HEAVY_DEPENDENCY_NAMES):
+                found.add(lowered)
+
+    return sorted(found)
 
 
 def _venv_python(app_dir: Path) -> Path:
@@ -395,6 +464,10 @@ async def run_scan(
     drafts: list[FindingDraft] = []
     tests_passed: bool | None = None
 
+    heavy_deps = detect_heavy_dependencies(app_dir)
+    if heavy_deps:
+        return await _run_static_only_scan(session, app, app_dir, heavy_deps, notify)
+
     skipped: list[str] = []
     profile = detect_profile(app_dir) if app.language not in ("python", "javascript") else None
     if profile is not None:
@@ -468,6 +541,74 @@ async def run_scan(
         drafts.extend(parse_npm_audit_json(audit_outcome.output))
 
     return await _finish_scan(session, app, drafts, tests_passed, skipped, notify)
+
+
+async def _run_static_only_scan(
+    session: AsyncSession,
+    app: MonitoredApp,
+    app_dir: Path,
+    heavy_deps: list[str],
+    notify: ProgressCallback,
+) -> ScanSummary:
+    """A scan for an app whose manifest names a heavy/ML dependency
+    (torch/tensorflow/transformers/chromadb/CUDA-class packages, see
+    `_HEAVY_DEPENDENCY_NAMES`): never installs the app's own dependencies
+    and never executes its tests. Lint and dependency-audit still run where
+    they don't require the app's deps to be installed -- `pip-audit -r
+    requirements.txt` and `npm audit` both resolve vulnerabilities from the
+    manifest/lockfile alone, and ruff is purely syntactic -- using the same
+    small scanner-tools venv every Python app already gets (pytest/ruff/
+    mypy/pip-audit themselves are not heavy; only the *app's own*
+    dependencies are ever skipped)."""
+    drafts: list[FindingDraft] = [
+        FindingDraft(
+            category=FindingCategory.DEPENDENCY,
+            severity=FindingSeverity.LOW,
+            tool="scanner",
+            message=(
+                f"Static-only scan: this app depends on {', '.join(heavy_deps)}, which this "
+                "project never installs (torch/tensorflow/transformers/chromadb/CUDA-class "
+                "packages are always skipped). Lint and dependency-audit ran where possible; "
+                "the test suite was not executed."
+            ),
+        )
+    ]
+    skipped = [
+        f"install: skipped: heavy dependency detected ({', '.join(heavy_deps)}) "
+        "-- static-only scan enforced",
+        "tests: skipped: static-only scan (heavy dependencies present, nothing installed)",
+    ]
+
+    has_requirements = (app_dir / "requirements.txt").exists()
+    has_pyproject = (app_dir / "pyproject.toml").exists()
+    has_package_json = (app_dir / "package.json").exists()
+
+    if app.language == "python" and (has_requirements or has_pyproject):
+        await notify("running linter (static-only)", 40)
+        venv_python = await _ensure_app_venv(app_dir)
+        lint_outcome = await _run(
+            f'"{venv_python}" -m ruff check --output-format=json .', cwd=app_dir
+        )
+        drafts.extend(parse_ruff_json(lint_outcome.output))
+
+        await notify("checking dependencies for vulnerabilities (static-only)", 80)
+        audit_target = "-r requirements.txt" if has_requirements else ""
+        audit_outcome = await _run(
+            f'"{venv_python}" -m pip_audit {audit_target} --format json',
+            cwd=app_dir,
+            timeout=INSTALL_TIMEOUT_SECONDS,
+        )
+        drafts.extend(parse_pip_audit_json(audit_outcome.output))
+    elif app.language == "javascript" and has_package_json:
+        skipped.append("lint: skipped: static-only scan (lint may need installed node_modules)")
+        await notify("checking dependencies for vulnerabilities (static-only)", 80)
+        audit_outcome = await _run("npm audit --json", cwd=app_dir, timeout=INSTALL_TIMEOUT_SECONDS)
+        drafts.extend(parse_npm_audit_json(audit_outcome.output))
+    else:
+        skipped.append("lint: skipped: static-only scan, no supported manifest for this language")
+        skipped.append("audit: skipped: static-only scan, no supported manifest for this language")
+
+    return await _finish_scan(session, app, drafts, None, skipped, notify)
 
 
 async def _finish_scan(

@@ -11,10 +11,13 @@ import pytest
 from core.config import settings as config_settings
 from core.repo_connect import (
     RepoConnectError,
+    SubprojectsFound,
     app_fingerprint,
     check_repo_access,
     detect_stack,
+    find_subprojects,
     parse_github_url,
+    select_subproject,
     slugify_app_name,
 )
 
@@ -90,6 +93,148 @@ def test_detect_stack_unknown_when_nothing_recognized(tmp_path) -> None:
     stack = detect_stack(tmp_path)
     assert stack.language == "unknown"
     assert stack.install_command is None
+
+
+def test_find_subprojects_finds_a_root_manifest(tmp_path) -> None:
+    (tmp_path / "package.json").write_text("{}")
+    subprojects = find_subprojects(tmp_path)
+    assert [sp.rel_path for sp in subprojects] == [""]
+    assert subprojects[0].stack.language == "javascript"
+
+
+def test_find_subprojects_finds_nested_manifests_up_to_two_levels(tmp_path) -> None:
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "backend" / "requirements.txt").write_text("fastapi\n")
+    (tmp_path / "frontend").mkdir()
+    (tmp_path / "frontend" / "package.json").write_text("{}")
+    (tmp_path / "mobile" / "app").mkdir(parents=True)
+    (tmp_path / "mobile" / "app" / "go.mod").write_text("module x\n")
+
+    subprojects = {sp.rel_path: sp.stack.language for sp in find_subprojects(tmp_path)}
+    assert subprojects == {
+        "backend": "python",
+        "frontend": "javascript",
+        "mobile/app": "go",
+    }
+
+
+def test_find_subprojects_skips_noise_directories(tmp_path) -> None:
+    (tmp_path / "node_modules" / "some-pkg").mkdir(parents=True)
+    (tmp_path / "node_modules" / "some-pkg" / "package.json").write_text("{}")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "package.json").write_text("{}")
+
+    assert find_subprojects(tmp_path) == []
+
+
+def test_find_subprojects_does_not_recurse_past_max_depth(tmp_path) -> None:
+    deep = tmp_path / "a" / "b" / "c"
+    deep.mkdir(parents=True)
+    (deep / "package.json").write_text("{}")
+    # "a/b/c" is 3 levels below root -- past the default 2-level limit.
+    assert find_subprojects(tmp_path, max_depth=2) == []
+    assert [sp.rel_path for sp in find_subprojects(tmp_path, max_depth=3)] == ["a/b/c"]
+
+
+async def test_connect_repo_raises_subprojects_found_for_a_root_less_monorepo(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, respx_mock
+) -> None:
+    import core.repo_connect as repo_connect_module
+
+    async def _fake_clone_repo(owner_repo: str, name: str, *, github_token: str):
+        dest = tmp_path / name
+        (dest / "backend").mkdir(parents=True)
+        (dest / "backend" / "requirements.txt").write_text("fastapi\n")
+        (dest / "frontend").mkdir()
+        (dest / "frontend" / "package.json").write_text("{}")
+        return dest
+
+    monkeypatch.setattr(repo_connect_module, "clone_repo", _fake_clone_repo)
+    respx_mock.get("https://api.github.com/repos/acme/mono").mock(
+        return_value=httpx.Response(200, json={"permissions": {"push": True}})
+    )
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    session = AsyncMock()
+    no_existing_app = MagicMock()
+    no_existing_app.scalar_one_or_none.return_value = None
+    session.execute = AsyncMock(return_value=no_existing_app)
+
+    with pytest.raises(SubprojectsFound) as exc_info:
+        await repo_connect_module.connect_repo(
+            session,
+            repo_url="https://github.com/acme/mono",
+            name="mono",
+            github_token="fake-token",
+        )
+    rel_paths = {sp.rel_path for sp in exc_info.value.subprojects}
+    assert rel_paths == {"backend", "frontend"}
+    assert "backend" in str(exc_info.value)
+    assert "frontend" in str(exc_info.value)
+
+
+def test_select_subproject_repoints_an_apps_write_scope() -> None:
+    """Uses the real CONNECTED_APPS_ROOT (not a monkeypatched tmp_path)
+    because `select_subproject` calls `mcp_server.sandbox.to_repo_relative`,
+    which resolves against the real `REPO_ROOT` -- patching only
+    `core.repo_connect`'s own `REPO_ROOT` reference wouldn't reach it."""
+    import shutil
+    import uuid
+
+    from core.models import MonitoredApp
+    from core.repo_connect import CONNECTED_APPS_ROOT
+
+    app_name = f"mono-{uuid.uuid4().hex[:12]}"
+    clone_root = CONNECTED_APPS_ROOT / app_name
+    (clone_root / "backend").mkdir(parents=True)
+    (clone_root / "backend" / "requirements.txt").write_text("fastapi\n")
+
+    try:
+        app = MonitoredApp(
+            name=app_name,
+            language="unknown",
+            local_repo_path=f"connected_apps/{app_name}",
+            github_repo="acme/mono",
+            allowed_write_paths=[f"connected_apps/{app_name}/"],
+            test_command="pytest",
+            ingest_token="fake-token",
+            repo_url="https://github.com/acme/mono",
+        )
+
+        select_subproject(app, "backend")
+
+        assert app.language == "python"
+        assert app.local_repo_path == f"connected_apps/{app_name}/backend"
+        assert app.allowed_write_paths == [f"connected_apps/{app_name}/backend/"]
+        assert app.test_command == "pytest"
+    finally:
+        shutil.rmtree(clone_root, ignore_errors=True)
+
+
+def test_select_subproject_rejects_a_path_outside_the_clone(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import core.repo_connect as repo_connect_module
+    from core.models import MonitoredApp
+
+    monkeypatch.setattr(repo_connect_module, "CONNECTED_APPS_ROOT", tmp_path)
+    monkeypatch.setattr(repo_connect_module, "REPO_ROOT", tmp_path.parent)
+    (tmp_path / "mono").mkdir()
+
+    app = MonitoredApp(
+        name="mono",
+        language="unknown",
+        local_repo_path=f"{tmp_path.name}/mono",
+        github_repo="acme/mono",
+        allowed_write_paths=[f"{tmp_path.name}/mono/"],
+        test_command="pytest",
+        ingest_token="fake-token",
+        repo_url="https://github.com/acme/mono",
+    )
+
+    with pytest.raises(RepoConnectError, match="escapes the repo"):
+        select_subproject(app, "../../etc")
 
 
 def test_app_fingerprint_is_stable_and_distinguishes_message() -> None:

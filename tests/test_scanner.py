@@ -17,6 +17,7 @@ from core.scanner import (
     ScanError,
     _app_dir,
     compute_health_score,
+    detect_heavy_dependencies,
     parse_mypy_json,
     parse_npm_audit_json,
     parse_pip_audit_json,
@@ -176,6 +177,91 @@ def test_compute_health_score_penalizes_by_severity_and_failing_tests() -> None:
 def test_compute_health_score_never_goes_below_zero() -> None:
     drafts = [FindingDraft(FindingCategory.DEPENDENCY, FindingSeverity.CRITICAL, "x", "m")] * 20
     assert compute_health_score(drafts, tests_passed=False) == 0
+
+
+def test_detect_heavy_dependencies_from_requirements_txt(tmp_path) -> None:
+    (tmp_path / "requirements.txt").write_text("fastapi==0.115.0\ntorch>=2.0.0\nchromadb\n")
+    assert detect_heavy_dependencies(tmp_path) == ["chromadb", "torch"]
+
+
+def test_detect_heavy_dependencies_from_package_json(tmp_path) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"dependencies": {"express": "^4.0.0"}, '
+        '"devDependencies": {"@tensorflow/tfjs-node": "^4.0.0"}}'
+    )
+    assert detect_heavy_dependencies(tmp_path) == ["@tensorflow/tfjs-node"]
+
+
+def test_detect_heavy_dependencies_from_pyproject_toml(tmp_path) -> None:
+    (tmp_path / "pyproject.toml").write_text('[project]\ndependencies = ["transformers>=4.0"]\n')
+    assert detect_heavy_dependencies(tmp_path) == ["transformers"]
+
+
+def test_detect_heavy_dependencies_empty_for_light_deps(tmp_path) -> None:
+    (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\nsqlalchemy\n")
+    assert detect_heavy_dependencies(tmp_path) == []
+
+
+async def test_run_scan_skips_install_and_tests_for_a_heavy_dependency(
+    tmp_path, monkeypatch
+) -> None:
+    """A requirements.txt naming torch must never trigger a real install or
+    test execution -- confirmed here by checking the resulting scanner venv
+    (which IS still created, for ruff/pip-audit) never has torch importable,
+    since the app's own requirements.txt was never installed into it."""
+    import uuid
+
+    from core.db import session_scope
+    from core.scanner import run_scan
+
+    unique = uuid.uuid4().hex[:12]
+    app_name = f"heavy-app-{unique}"
+    app_dir = tmp_path / app_name
+    app_dir.mkdir()
+    (app_dir / "requirements.txt").write_text("torch>=2.0.0\nfastapi\n")
+
+    monkeypatch.setattr("core.scanner.CONNECTED_APPS_ROOT", tmp_path)
+    monkeypatch.setattr("core.scanner.REPO_ROOT", tmp_path.parent)
+
+    async with session_scope() as session:
+        app = MonitoredApp(
+            name=app_name,
+            language="python",
+            local_repo_path=f"{tmp_path.name}/{app_name}",
+            github_repo=f"local/{app_name}",
+            allowed_write_paths=[f"{tmp_path.name}/{app_name}/"],
+            test_command="pytest",
+            ingest_token=uuid.uuid4().hex,
+        )
+        session.add(app)
+        await session.flush()
+        summary = await run_scan(session, app)
+        app_id = app.id
+
+    try:
+        assert summary.tests_passed is None
+        assert any("heavy dependency" in s for s in summary.skipped_checks)
+        venv_python = (
+            app_dir / ".selfheal_venv" / "Scripts" / "python.exe"
+            if sys.platform == "win32"
+            else app_dir / ".selfheal_venv" / "bin" / "python"
+        )
+        import asyncio
+
+        process = await asyncio.create_subprocess_exec(
+            str(venv_python),
+            "-m",
+            "pip",
+            "list",
+            stdout=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await process.communicate()
+        assert "torch" not in stdout.decode().lower()
+    finally:
+        async with session_scope() as session:
+            row = await session.get(MonitoredApp, app_id)
+            if row is not None:
+                await session.delete(row)
 
 
 async def test_run_scan_isolates_a_real_python_app_in_its_own_venv(tmp_path, monkeypatch) -> None:

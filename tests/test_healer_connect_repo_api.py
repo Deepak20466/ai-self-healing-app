@@ -76,7 +76,12 @@ async def test_connect_app_success(
     from healer import app as healer_app_module
 
     async def _fake_connect_repo(
-        session: AsyncSession, *, repo_url: str, name: str | None, github_token: str
+        session: AsyncSession,
+        *,
+        repo_url: str,
+        name: str | None,
+        github_token: str,
+        sub_path: str | None = None,
     ) -> MonitoredApp:
         app_row = MonitoredApp(
             name=name or "some-app",

@@ -61,10 +61,13 @@ from core.db import dispose_engine, session_scope
 from core.logging import configure_logging
 from core.models import AuditLog, HealJob, HealJobStatus, HealJobType, MonitoredApp
 from core.queue import HealJobListener, dequeue_heal_job
+from core.scanner import detect_heavy_dependencies
 from healer import backend_chain
 from healer.circuit_breaker import global_hourly_circuit_open
 from healer.mcp_client import MCPToolClient, connect_http
+from healer.remote_verify import run_heal_job_remote_verify
 from mcp_server.github_client import GitHubClient, GitHubClientError
+from mcp_server.sandbox import REPO_ROOT
 
 logger = structlog.get_logger(__name__)
 
@@ -233,12 +236,35 @@ async def _process_next_job(mcp: MCPToolClient, backend: _JobRunners | None = No
         job_id = job.id
         job_type = job.type
         github_repo: str | None = None
+        is_remote_verify_job = False
         if job.app_id is not None:
             app = await session.get(MonitoredApp, job.app_id)
             if app is not None:
                 github_repo = app.github_repo
+                # A connected app whose manifest names a heavy/ML dependency
+                # (torch/tensorflow/chromadb/...) never gets its deps
+                # installed locally (standing project rule) -- route
+                # runtime/contract-violation fixes through the CI-verified
+                # path instead of the normal AI_CHAIN dispatch below. A
+                # ci_failure job needs no such routing: it's already a
+                # response to the connected repo's OWN CI, so there's
+                # nothing to install here either way.
+                if (
+                    job_type != HealJobType.CI_FAILURE
+                    and app.repo_url is not None
+                    and detect_heavy_dependencies(REPO_ROOT / app.local_repo_path)
+                ):
+                    is_remote_verify_job = True
 
-        if await global_hourly_circuit_open(
+        if is_remote_verify_job:
+            # No DB write here -- exit the session_scope() block first and
+            # dispatch after it closes, same principle as the nested-
+            # session_scope() deadlock documented in CLAUDE.md's Phase 5 log
+            # (an awaited external call must never run inside an already-open
+            # transaction that a callee will open its OWN session_scope()
+            # against).
+            pass
+        elif await global_hourly_circuit_open(
             session, max_per_hour=settings.max_heal_jobs_per_hour_global
         ):
             # Global throughput cap, not "this bug is unfixable" — put it
@@ -256,7 +282,7 @@ async def _process_next_job(mcp: MCPToolClient, backend: _JobRunners | None = No
             logger.warning("worker.global_hourly_cap_hit", heal_job_id=job_id)
             return False
 
-        if backend is None:
+        if not is_remote_verify_job and backend is None:
             chain = settings.ai_chain_list
             tried = await _tried_backends_for_job(session, job_id)
             chosen_backend_name = (
@@ -285,6 +311,11 @@ async def _process_next_job(mcp: MCPToolClient, backend: _JobRunners | None = No
                     details={"backend": chosen_backend_name},
                 )
             )
+
+    if is_remote_verify_job:
+        async with GitHubClient(repo=github_repo) as github:
+            await run_heal_job_remote_verify(job_id, mcp=mcp, github=github)
+        return True
 
     runners = backend if backend is not None else _select_backend(chosen_backend_name)
     try:

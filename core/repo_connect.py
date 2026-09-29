@@ -39,6 +39,14 @@ from mcp_server.sandbox import REPO_ROOT, to_repo_relative
 CONNECTED_APPS_ROOT = REPO_ROOT / "connected_apps"
 CLONE_TIMEOUT_SECONDS = 120.0
 
+#: how many directory levels below the repo root to search for a nested
+#: manifest (root itself is depth 0) -- "up to 2 levels deep" per the
+#: monorepo-support request.
+MONOREPO_MAX_DEPTH = 2
+_MONOREPO_SKIP_DIRS = frozenset(
+    {"node_modules", ".venv", "dist", "build", ".git", "__pycache__", ".selfheal_venv"}
+)
+
 _APP_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _GITHUB_URL_PATTERN = re.compile(
     r"^(?:https?://github\.com/|git@github\.com:)(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$"
@@ -49,6 +57,24 @@ class RepoConnectError(Exception):
     """Raised for any step of connect-a-repo the caller should show to the user."""
 
 
+class SubprojectsFound(RepoConnectError):
+    """Raised by `connect_repo`/`select_subproject` when the repo root has no
+    manifest of its own but nested sub-projects were found -- the caller
+    (an API/CLI layer) is expected to show `subprojects` and ask the
+    operator to re-run with a `sub_path`. Its own message already lists
+    every detected path, so a caller that just prints the message (as
+    `RepoConnectError`'s existing handling does everywhere) needs no special
+    case."""
+
+    def __init__(self, subprojects: list[SubProject]):
+        self.subprojects = subprojects
+        paths = ", ".join(sp.rel_path or "." for sp in subprojects)
+        super().__init__(
+            f"No manifest at the repo root, but found sub-project(s): {paths}. "
+            "Re-run connect with --path <subdir> to pick one."
+        )
+
+
 @dataclass(frozen=True)
 class DetectedStack:
     language: str
@@ -57,6 +83,16 @@ class DetectedStack:
     install_command: str | None
     """Shell command to install dependencies before scanning, or None if
     nothing to install (no manifest file found)."""
+
+
+@dataclass(frozen=True)
+class SubProject:
+    """One manifest found while walking a repo for monorepo support.
+    `rel_path` is `""` for the repo root itself, else a forward-slash
+    relative path like `"backend"` or `"services/api"`."""
+
+    rel_path: str
+    stack: DetectedStack
 
 
 def parse_github_url(repo_url: str) -> str:
@@ -209,8 +245,62 @@ def detect_stack(local_path: Path) -> DetectedStack:
     )
 
 
+def find_subprojects(local_path: Path, *, max_depth: int = MONOREPO_MAX_DEPTH) -> list[SubProject]:
+    """Walk `local_path` up to `max_depth` levels deep (root included, so
+    depth 2 means root + 2 levels of subdirectories), skipping
+    node_modules/.venv/dist/build/.git/other noise dirs and any hidden
+    directory, and return every directory whose own manifest `detect_stack`
+    recognizes (i.e. not `language == "unknown"`) as a `SubProject`. A
+    directory is checked regardless of whether an ancestor already matched
+    (a repo can legitimately have both a root manifest and nested ones), and
+    is still recursed into either way."""
+    found: list[SubProject] = []
+
+    def walk(dir_path: Path, depth: int) -> None:
+        stack = detect_stack(dir_path)
+        if stack.language != "unknown":
+            rel = "" if dir_path == local_path else dir_path.relative_to(local_path).as_posix()
+            found.append(SubProject(rel_path=rel, stack=stack))
+        if depth >= max_depth:
+            return
+        try:
+            children = sorted(
+                p
+                for p in dir_path.iterdir()
+                if p.is_dir() and p.name not in _MONOREPO_SKIP_DIRS and not p.name.startswith(".")
+            )
+        except OSError:
+            return
+        for child in children:
+            walk(child, depth + 1)
+
+    walk(local_path, 0)
+    return found
+
+
+def _resolve_sub_path(local_path: Path, sub_path: str) -> Path:
+    """Resolve and validate `sub_path` (as passed to `--path`) is a real
+    directory inside `local_path` -- refuses anything that would resolve
+    outside the clone (e.g. `../..`), same containment principle as
+    `mcp_server/sandbox.py`."""
+    normalized = sub_path.strip("/\\")
+    target = (local_path / normalized).resolve()
+    try:
+        target.relative_to(local_path.resolve())
+    except ValueError as exc:
+        raise RepoConnectError(f"--path {sub_path!r} escapes the repo") from exc
+    if not target.is_dir():
+        raise RepoConnectError(f"{sub_path!r} is not a directory in this repo")
+    return target
+
+
 async def connect_repo(
-    session: AsyncSession, *, repo_url: str, name: str | None, github_token: str
+    session: AsyncSession,
+    *,
+    repo_url: str,
+    name: str | None,
+    github_token: str,
+    sub_path: str | None = None,
 ) -> MonitoredApp:
     """The full "connect a repo" flow: verify access, pick a unique name,
     clone, detect the stack, and insert the `monitored_apps` row.
@@ -235,14 +325,24 @@ async def connect_repo(
         raise RepoConnectError(f"An app named {app_name!r} is already connected")
 
     local_path = await clone_repo(owner_repo, app_name, github_token=github_token)
-    stack = detect_stack(local_path)
+
+    if sub_path is not None:
+        target_dir = _resolve_sub_path(local_path, sub_path)
+        stack = detect_stack(target_dir)
+    else:
+        stack = detect_stack(local_path)
+        if stack.language == "unknown":
+            subprojects = [sp for sp in find_subprojects(local_path) if sp.rel_path != ""]
+            if subprojects:
+                raise SubprojectsFound(subprojects)
+        target_dir = local_path
 
     app = MonitoredApp(
         name=app_name,
         language=stack.language,
-        local_repo_path=to_repo_relative(local_path),
+        local_repo_path=to_repo_relative(target_dir),
         github_repo=owner_repo,
-        allowed_write_paths=[f"{to_repo_relative(local_path)}/"],
+        allowed_write_paths=[f"{to_repo_relative(target_dir)}/"],
         test_command=stack.test_command,
         lint_command=stack.lint_command,
         health_url=None,
@@ -252,6 +352,31 @@ async def connect_repo(
     session.add(app)
     await session.flush()
     return app
+
+
+def select_subproject(app: MonitoredApp, sub_path: str) -> None:
+    """Re-point an already-connected app at a different sub-project folder
+    of its own clone (`selfheal scan <app> --path <subdir>`) -- mutates
+    `local_repo_path`/`allowed_write_paths`/`test_command`/`lint_command` in
+    place; caller commits. Because every write-scope/test-run check in this
+    codebase (`mcp_server/sandbox.py`'s `check_writable`, `core/scanner.py`'s
+    `_app_dir`) reads those fields off the `MonitoredApp` row rather than
+    trusting a per-call parameter, repointing the row here is what makes
+    "fixes and test runs scoped to that sub-project folder" true for every
+    downstream consumer without changing any of them."""
+    # local_repo_path may already be a sub-project path (e.g. "connected_apps/foo/backend");
+    # re-resolve from the clone root (connected_apps/<name>) so --path is always relative
+    # to the repo, not to whatever sub-project is currently selected.
+    clone_root = CONNECTED_APPS_ROOT / app.name
+    if not clone_root.is_dir():
+        raise RepoConnectError(f"App {app.name!r}'s clone directory is missing: {clone_root}")
+    target_dir = _resolve_sub_path(clone_root, sub_path)
+    stack = detect_stack(target_dir)
+    app.language = stack.language
+    app.local_repo_path = to_repo_relative(target_dir)
+    app.allowed_write_paths = [f"{to_repo_relative(target_dir)}/"]
+    app.test_command = stack.test_command
+    app.lint_command = stack.lint_command
 
 
 def generate_ingest_token() -> str:

@@ -3033,3 +3033,115 @@ passed / 1 skipped, clean (no flake this run). No application code was
 touched — this session's changes are `scripts/record_terminal_demo.py`
 (new), `docs/demo-terminal.{gif,mp4}` (new), and a one-line README
 addition.
+
+### 2026-09-29 — monorepo support + remote-verification fix mode
+
+Two follow-up requests from a real "connect my own repos" session (every
+repo the user tried was a monorepo with no manifest at its root — ShopCart,
+PortfolioReact, and a `backend`/`frontend`/`mobile` layout all failed
+`connect` the same way, which is what prompted this work).
+
+**Monorepo detection** (`core/repo_connect.py`):
+`find_subprojects(local_path)` walks up to 2 levels below the repo root
+(root itself is depth 0), skipping `node_modules`/`.venv`/`dist`/`build`/
+`.git`/hidden dirs, and calls the *existing* `detect_stack` on every
+candidate directory — a directory "has a manifest" iff `detect_stack(dir).
+language != "unknown"`, reusing the exact same manifest list (`package.
+json`/`requirements.txt`/`pyproject.toml`/`go.mod`/`pom.xml`/`build.
+gradle*`/`*.csproj`/`composer.json`/`Gemfile`) rather than duplicating it.
+`connect_repo` gained an optional `sub_path` param: given, it scopes the
+new `MonitoredApp` row to that subdirectory directly (its
+`local_repo_path`/`allowed_write_paths` become the sub-project's own path —
+no schema change needed, since this project's write-scope enforcement was
+already "whatever `local_repo_path` says", per-app, not per-repo). Omitted,
+and the root has no manifest but nested sub-projects were found, it raises
+`SubprojectsFound` (a `RepoConnectError` subclass whose own message already
+lists every detected path — no special handling needed anywhere that just
+prints a `RepoConnectError`'s message, which is everywhere already).
+`select_subproject(app, sub_path)` re-points an *already-connected* app at
+a different sub-project of the same clone (`selfheal scan <app> --path
+<subdir>`) by mutating `local_repo_path`/`allowed_write_paths`/
+`test_command`/`lint_command` in place — every downstream write-scope/
+test-run check already reads these off the `MonitoredApp` row, so repointing
+the row here is what makes "fixes and test runs scoped to that sub-project"
+true everywhere without touching `mcp_server/sandbox.py` or `core/
+scanner.py` at all.
+
+**Heavy/ML dependencies never installed, anywhere** (new standing project
+rule this session, not just for monorepos): `core/scanner.py:
+detect_heavy_dependencies` scans a manifest (`requirements.txt`/
+`pyproject.toml`/`package.json`) for a fixed denylist of heavy/ML package
+names (torch/tensorflow/transformers/chromadb/CUDA-class + close relatives)
+— a substring match against known names, not a live PyPI/npm size query (no
+network dependency). `run_scan` routes to a new `_run_static_only_scan` when
+any are found: never installs the app's own dependencies, never runs its
+test suite, but still runs lint (purely syntactic, doesn't need the app's
+deps) and a dependency audit (`pip-audit -r requirements.txt` / `npm audit`
+both resolve straight from the manifest/lockfile, no install needed) —
+using the same small, always-small scanner-tools venv every Python app
+already gets (pytest/ruff/mypy/pip-audit themselves are ~30-50MB total, not
+what "heavy" refers to). **Real bug hit building this**: `timeout 300 pip
+install <the full heavy requirements.txt>` (a real user repo,
+`multi-agent-workspace` — langchain/chromadb/sentence-transformers/torch/
+transformers/opencv/camelot/tabula, 200+ transitive packages) got SIGKILLed
+mid-write by the bash tool's own `timeout` wrapper, which corrupted the
+venv's own `pip` installation (`cacert.pem` missing, a stray `~ip` invalid
+distribution) badly enough that even `pip uninstall`/retry failed — the fix
+was deleting the whole `.selfheal_venv` and starting over, not trying to
+repair it. This is exactly why the heavy-dependency rule exists: a `timeout`
+around a long-running `pip install` is not a safe way to bound it, so this
+project just never attempts the install at all for these packages.
+
+**Remote-verification fix path** (`healer/remote_verify.py`, new): for a
+connected app caught by `detect_heavy_dependencies`, the normal fail-before/
+pass-after local proof (`mcp_server.tools.code.run_tests`) can't run —
+there's nothing installed to run it against. `run_heal_job_remote_verify`
+applies the AI's fix and pushes it, but opens the PR *without* a local test
+run, clearly labeled "⚠️ verified by CI, not locally"
+(`healer/github_ops.py:RemoteVerifyEvidence`/`open_remote_verify_pull_
+request`, a new `verified-by-ci-not-locally` label), and relies on the
+connected repo's own GitHub Actions to actually prove it — if that CI run
+then fails, the *existing* `ci_failure` heal-job path picks it up exactly
+like any other PR's CI failure, since it already dispatches by
+`heal_job.app_id`, never a hardcoded repo (this does assume the connected
+repo's own CI is wired to notify `/webhooks/ci`, same as this project's own
+`ci-failure.yml` notifies itself — an operator's responsibility, same as
+`healer/onboarding.py`'s snippet). No CI workflow at all
+(`has_ci_workflow` — a plain filesystem check of `<clone>/.github/
+workflows/`, no extra GitHub API call needed since the clone is already on
+disk) means there's no way to ever verify the fix, so it's skipped outright
+(`HealJobStatus.FAILED`, clear `error_message`), no PR opened. **Never
+auto-merges**: `job.auto_merge_override = False` is forced the moment the
+PR opens, outranking the app's/operator's own auto-merge setting per
+`healer/automerge.py:effective_auto_merge`'s existing precedence (a
+non-NULL override always wins). `healer/worker.py`'s `_process_next_job`
+routes a `runtime_error`/`contract_violation` job here (checked via
+`detect_heavy_dependencies(REPO_ROOT / app.local_repo_path)`) *before* the
+normal `AI_CHAIN`/`_select_backend` dispatch — the routing check happens
+inside the same `session_scope()` block that dequeues the job (no DB write
+needed for the "yes, route it" case itself), but the actual dispatch call
+happens *after* that block closes, to avoid the exact nested-`session_
+scope()` deadlock CLAUDE.md's Phase 5 log already documents for `ci_agent.
+py` (an awaited external call must never run inside an already-open
+transaction a callee will open its own `session_scope()` against).
+
+**Scope, stated plainly** (mirrors this project's own established pattern
+for partially-verified work, e.g. the Codex/Gemini CLI backends' history):
+remote-verify mode drives the fix via the same Claude Code CLI runner free
+mode already uses (`healer.agent_free.run_claude_cli`, reused directly, not
+duplicated) — the other 5 AI backends aren't wired into it, and `AI_CHAIN`'s
+ordering/cooldown machinery is not consulted for these jobs. One attempt
+only (no local proof to react to between attempts, so a second attempt
+couldn't learn anything the first didn't already have). Not yet
+live-verified against a real heavy-dependency repo's real GitHub Actions run
+— covered by 9 new tests (6 in `tests/test_healer_remote_verify.py`, 3 more
+in `tests/test_repo_connect.py`/`tests/test_scanner.py`/`tests/
+test_healer_worker.py`) exercising a real MCP round trip, real git worktrees
+(a connected-app clone, not `create_worktree`), and a real `git push` to a
+throwaway local bare repo — same "fake performs its edits via real `git
+apply` before returning a scripted CLI result" pattern every prior AI
+backend's own tests already established, GitHub itself mocked via `respx`.
+
+`ruff check .`/`ruff format --check .` clean repo-wide. `mypy core sentinel
+mcp_server healer cli` (strict) clean. `pytest` (full suite, see below for
+confirmation it stays green).

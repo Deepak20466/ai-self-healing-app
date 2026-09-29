@@ -498,6 +498,49 @@ isolated scan), and `healer/onboarding.py` for the implementation; a repo
 without a Python/Node manifest still scans (language `unknown`), it just has
 nothing to install.
 
+### Monorepos (no manifest at the repo root)
+
+`selfheal connect <url>` walks up to 2 directory levels below the repo root
+(skipping `node_modules`/`.venv`/`dist`/`build`/`.git`) looking for a
+manifest. If the root itself has one, behavior is unchanged (single app,
+same as always). If it doesn't but nested sub-projects are found (e.g.
+`backend/requirements.txt`, `frontend/package.json`), `connect` refuses with
+a message listing every sub-project it found — re-run with
+`--path <subdir>` (e.g. `selfheal connect <url> --path backend`) to connect
+that one. `selfheal scan <app> --path <subdir>` re-points an already-connected
+app at a different sub-project of the same clone; every fix, write-scope
+check, and test run that follows is scoped to that folder, since the
+sub-project path *is* the app's `local_repo_path`/`allowed_write_paths` —
+the same mechanism that already scopes a single-manifest connect.
+
+### Heavy/ML dependencies: never installed locally
+
+This project never installs `torch`/`tensorflow`/`transformers`/`chromadb`/
+CUDA-class packages (or their close relatives), anywhere, to scan or verify
+a fix — a fixed denylist (`core/scanner.py:_HEAVY_DEPENDENCY_NAMES`), not a
+live PyPI/npm size query. A scan of an app whose manifest names one of these
+is **static-only**: it still runs lint and a dependency audit (both work
+straight off the manifest/lockfile, no install needed), but skips installing
+the app's own dependencies and skips running its test suite — the
+resulting finding says so explicitly.
+
+A **fix** for that kind of app can't get the normal fail-before/pass-after
+local proof either (there's nothing installed to run tests against), so it
+uses a separate **remote-verification** path instead
+(`healer/remote_verify.py`): the AI fix is applied and pushed, but the PR
+is opened *without* a local test run, clearly labeled "⚠️ verified by CI,
+not locally", and the connected repo's own GitHub Actions CI is what
+actually proves it. If that CI run then fails, the existing `ci_failure`
+heal-job path picks it up exactly like any other PR's CI failure (assuming
+the connected repo's own CI is wired to notify this system's
+`/webhooks/ci`, the same way this project's own `ci-failure.yml` notifies
+itself). If the repo has **no** CI workflow at all, there's no way to ever
+verify the fix, so it's skipped outright — the job is marked `failed` with
+a clear reason, no PR is opened. A remote-verified fix **never
+auto-merges**, regardless of the app's or the operator's own auto-merge
+setting — `heal_jobs.auto_merge_override` is forced `False` the moment the
+PR opens.
+
 ## Re-running the demo
 
 Each of the 7 seeded bugs in `apps/target_app/bugs.py` only reproduces once:

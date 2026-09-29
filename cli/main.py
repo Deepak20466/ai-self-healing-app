@@ -238,6 +238,15 @@ def _print_or_json(data: Any, json_out: bool, render: Callable[[Any], None]) -> 
 def connect(
     github_url: str,
     name: Annotated[str | None, typer.Option(help="Override the auto-detected app name.")] = None,
+    path: Annotated[
+        str | None,
+        typer.Option(
+            "--path",
+            help="Sub-project folder to connect (for a monorepo with no manifest at its "
+            "root), e.g. --path backend. `connect` lists detected sub-projects if this is "
+            "needed and omitted.",
+        ),
+    ] = None,
 ) -> None:
     """Connect a GitHub repo for scanning + AI fixes."""
 
@@ -246,6 +255,8 @@ def connect(
             body: dict[str, Any] = {"repo_url": github_url}
             if name:
                 body["name"] = name
+            if path:
+                body["path"] = path
             result: dict[str, Any] = await client.post("/api/apps", json=body)
             return result
 
@@ -326,13 +337,26 @@ async def _resolve_app_id(client: HealerClient, name_or_id: str) -> int:
 
 
 @app.command()
-def scan(app_name: str, json_out: Annotated[bool, typer.Option("--json")] = False) -> None:
+def scan(
+    app_name: str,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+    path: Annotated[
+        str | None,
+        typer.Option(
+            "--path",
+            help="Re-point this app at a different sub-project folder of its own clone "
+            "before scanning (monorepo support) -- fixes/writes/test runs afterward are "
+            "scoped to that folder.",
+        ),
+    ] = None,
+) -> None:
     """Trigger a scan for an app and print its health report."""
 
     async def _scan() -> dict[str, Any]:
         async with HealerClient.from_saved_session() as client:
             app_id = await _resolve_app_id(client, app_name)
-            await client.post(f"/api/apps/{app_id}/scan")
+            body = {"path": path} if path else None
+            await client.post(f"/api/apps/{app_id}/scan", json=body)
             console.print("Scanning...")
             for _ in range(120):
                 detail: dict[str, Any] = await client.get(f"/api/apps/{app_id}")

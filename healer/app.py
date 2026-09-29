@@ -32,7 +32,7 @@ from core.db import dispose_engine, get_db, session_scope
 from core.logging import configure_logging
 from core.models import ChatMessage, ChatSession, Finding, FindingStatus, HealJob, MonitoredApp
 from core.ratelimit import check_and_consume
-from core.repo_connect import RepoConnectError, connect_repo
+from core.repo_connect import RepoConnectError, connect_repo, select_subproject
 from core.scanner import run_scan
 from healer import notifier
 from healer.auth import (
@@ -340,6 +340,7 @@ async def _run_scan_and_notify(app_id: int) -> None:
 class ConnectAppRequest(BaseModel):
     repo_url: str
     name: str | None = None
+    path: str | None = None
 
 
 @app.post("/api/apps")
@@ -352,7 +353,11 @@ async def connect_app(
         raise HTTPException(status_code=503, detail="GITHUB_TOKEN is not configured")
     try:
         app_row = await connect_repo(
-            db, repo_url=body.repo_url, name=body.name, github_token=settings.github_token
+            db,
+            repo_url=body.repo_url,
+            name=body.name,
+            github_token=settings.github_token,
+            sub_path=body.path,
         )
         await db.commit()
     except RepoConnectError as exc:
@@ -399,13 +404,31 @@ async def get_app_detail(
     return summary
 
 
+class RescanRequest(BaseModel):
+    path: str | None = None
+
+
 @app.post("/api/apps/{app_id}/scan")
 async def rescan_app(
-    app_id: int, username: str = Depends(require_auth), db: AsyncSession = Depends(get_db)
+    app_id: int,
+    body: RescanRequest | None = None,
+    username: str = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, str]:
     app_row = await db.get(MonitoredApp, app_id)
     if app_row is None:
         raise HTTPException(status_code=404, detail="No such app")
+    if body is not None and body.path is not None:
+        if app_row.repo_url is None:
+            raise HTTPException(
+                status_code=400, detail="--path only applies to a connected external repo"
+            )
+        try:
+            select_subproject(app_row, body.path)
+            await db.commit()
+        except RepoConnectError as exc:
+            await db.rollback()
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     asyncio.create_task(_run_scan_and_notify(app_id))
     return {"status": "scanning"}
 
